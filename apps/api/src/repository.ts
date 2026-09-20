@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import { config } from "./config.js";
 import { seedActivities, seedDashboardSeries, seedIncidents, seedReplayRuns } from "./seed.js";
-import type { DashboardData, Incident, IncidentEvent, SearchResult } from "./types.js";
+import type { Activity, DashboardData, Incident, IncidentEvent, ReplayRun, SearchResult } from "./types.js";
 
 export type IncidentInput = Omit<Incident, "id" | "code" | "createdAt" | "updatedAt" | "events">;
 export type EventInput = Omit<IncidentEvent, "id" | "incidentId">;
@@ -95,6 +95,17 @@ const mapIncident = (row: Row, events: IncidentEvent[] = []): Incident => ({
   startedAt: new Date(String(row.started_at)).toISOString(), resolvedAt: row.resolved_at ? new Date(String(row.resolved_at)).toISOString() : null,
   createdAt: new Date(String(row.created_at)).toISOString(), updatedAt: new Date(String(row.updated_at)).toISOString(), events
 });
+const mapActivity = (row: Row): Activity => ({
+  id: String(row.id),
+  ...(row.incident_id ? { incidentId: String(row.incident_id) } : {}),
+  actor: String(row.actor), action: String(row.action), detail: String(row.detail),
+  timestamp: new Date(String(row.timestamp)).toISOString()
+});
+const mapReplayRun = (row: Row): ReplayRun => ({
+  id: String(row.id), incidentId: String(row.incident_id), name: String(row.name),
+  status: row.status as ReplayRun["status"], progress: Number(row.progress),
+  createdAt: new Date(String(row.created_at)).toISOString()
+});
 
 class PostgresRepository implements Repository {
   private pool: Pool;
@@ -121,7 +132,51 @@ class PostgresRepository implements Repository {
     }
     return (incidentResult.rows as Row[]).map((row) => mapIncident(row, grouped.get(String(row.id)) ?? []));
   }
-  async dashboard(userId: string): Promise<DashboardData> { return { incidents: await this.listIncidents(userId), activities: clone(seedActivities), replayRuns: clone(seedReplayRuns), ...clone(seedDashboardSeries) }; }
+  async dashboard(userId: string): Promise<DashboardData> {
+    const [incidents, activities, replayRuns, serviceHealth, eventVolume] = await Promise.all([
+      this.listIncidents(userId),
+      this.pool.query(
+        `select a.* from incident_activities a
+         where exists (select 1 from organization_members m where m.organization_id = a.organization_id and m.user_id = $1)
+         order by a.timestamp desc limit 20`,
+        [userId]
+      ),
+      this.pool.query(
+        `select r.* from replay_runs r
+         where exists (select 1 from organization_members m where m.organization_id = r.organization_id and m.user_id = $1)
+         order by r.created_at desc limit 20`,
+        [userId]
+      ),
+      this.pool.query(
+        `select * from (
+           select distinct on (s.service) s.* from service_health_snapshots s
+           where exists (select 1 from organization_members m where m.organization_id = s.organization_id and m.user_id = $1)
+           order by s.service, s.observed_at desc
+         ) latest order by case latest.state when 'critical' then 1 when 'degraded' then 2 else 3 end, latest.service`,
+        [userId]
+      ),
+      this.pool.query(
+        `select v.* from event_volume_samples v
+         where exists (select 1 from organization_members m where m.organization_id = v.organization_id and m.user_id = $1)
+         order by v.sampled_at asc limit 48`,
+        [userId]
+      )
+    ]);
+
+    return {
+      incidents,
+      activities: (activities.rows as Row[]).map(mapActivity),
+      replayRuns: (replayRuns.rows as Row[]).map(mapReplayRun),
+      serviceHealth: (serviceHealth.rows as Row[]).map((row) => ({
+        service: String(row.service), availability: Number(row.availability), latencyMs: Number(row.latency_ms),
+        errorRate: Number(row.error_rate), state: row.state as DashboardData["serviceHealth"][number]["state"]
+      })),
+      eventVolume: (eventVolume.rows as Row[]).map((row) => ({
+        time: new Date(String(row.sampled_at)).toISOString().slice(11, 16),
+        requests: Number(row.requests), errors: Number(row.errors)
+      }))
+    };
+  }
   listIncidents(userId: string) { return this.hydrated(userId); }
   async getIncident(userId: string, id: string) { return (await this.hydrated(userId, "and i.id = $2", [id]))[0] ?? null; }
   async createIncident(userId: string, input: IncidentInput, embedding?: number[]) {
