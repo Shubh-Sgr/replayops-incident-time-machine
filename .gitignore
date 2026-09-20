@@ -1,0 +1,12 @@
+node_modules
+dist
+.env
+.env.*
+!.env.example
+.DS_Store
+.vercel
+coverage
+*.log
+*.tsbuildinfo
+.impeccable/review
+.impeccable/build

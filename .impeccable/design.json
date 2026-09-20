@@ -1,0 +1,118 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-20T05:07:56Z",
+  "title": "Design System: ReplayOps",
+  "extensions": {
+    "colorMeta": {
+      "primary": { "role": "primary", "displayName": "Incident Orange", "canonical": "oklch(67.5% 0.185 46)", "tonalRamp": ["oklch(15% 0.185 46)", "oklch(26% 0.185 46)", "oklch(38% 0.185 46)", "oklch(50% 0.185 46)", "oklch(62% 0.185 46)", "oklch(74% 0.185 46)", "oklch(86% 0.185 46)", "oklch(95% 0.185 46)"] },
+      "primary-ink": { "role": "neutral", "displayName": "Warm Control Ink", "canonical": "oklch(22.5% 0.038 42)", "tonalRamp": ["oklch(15% 0.038 42)", "oklch(26% 0.038 42)", "oklch(38% 0.038 42)", "oklch(50% 0.038 42)", "oklch(62% 0.038 42)", "oklch(74% 0.038 42)", "oklch(86% 0.038 42)", "oklch(95% 0.038 42)"] },
+      "info": { "role": "secondary", "displayName": "Telemetry Cyan", "canonical": "oklch(63% 0.125 221)", "tonalRamp": ["oklch(15% 0.125 221)", "oklch(26% 0.125 221)", "oklch(38% 0.125 221)", "oklch(50% 0.125 221)", "oklch(62% 0.125 221)", "oklch(74% 0.125 221)", "oklch(86% 0.125 221)", "oklch(95% 0.125 221)"] },
+      "success": { "role": "secondary", "displayName": "Recovery Green", "canonical": "oklch(59% 0.118 157)", "tonalRamp": ["oklch(15% 0.118 157)", "oklch(26% 0.118 157)", "oklch(38% 0.118 157)", "oklch(50% 0.118 157)", "oklch(62% 0.118 157)", "oklch(74% 0.118 157)", "oklch(86% 0.118 157)", "oklch(95% 0.118 157)"] },
+      "warning": { "role": "secondary", "displayName": "Caution Ochre", "canonical": "oklch(74% 0.135 78)", "tonalRamp": ["oklch(15% 0.135 78)", "oklch(26% 0.135 78)", "oklch(38% 0.135 78)", "oklch(50% 0.135 78)", "oklch(62% 0.135 78)", "oklch(74% 0.135 78)", "oklch(86% 0.135 78)", "oklch(95% 0.135 78)"] },
+      "danger": { "role": "secondary", "displayName": "Fault Red", "canonical": "oklch(61% 0.19 27)", "tonalRamp": ["oklch(15% 0.19 27)", "oklch(26% 0.19 27)", "oklch(38% 0.19 27)", "oklch(50% 0.19 27)", "oklch(62% 0.19 27)", "oklch(74% 0.19 27)", "oklch(86% 0.19 27)", "oklch(95% 0.19 27)"] },
+      "canvas": { "role": "neutral", "displayName": "Instrument Paper", "canonical": "oklch(95.5% 0.012 235)", "tonalRamp": ["oklch(15% 0.012 235)", "oklch(26% 0.012 235)", "oklch(38% 0.012 235)", "oklch(50% 0.012 235)", "oklch(62% 0.012 235)", "oklch(74% 0.012 235)", "oklch(86% 0.012 235)", "oklch(95% 0.012 235)"] },
+      "rail": { "role": "neutral", "displayName": "Rail Blue-Gray", "canonical": "oklch(91.5% 0.022 238)", "tonalRamp": ["oklch(15% 0.022 238)", "oklch(26% 0.022 238)", "oklch(38% 0.022 238)", "oklch(50% 0.022 238)", "oklch(62% 0.022 238)", "oklch(74% 0.022 238)", "oklch(86% 0.022 238)", "oklch(95% 0.022 238)"] },
+      "panel": { "role": "neutral", "displayName": "Panel Porcelain", "canonical": "oklch(98.2% 0.008 235)", "tonalRamp": ["oklch(15% 0.008 235)", "oklch(26% 0.008 235)", "oklch(38% 0.008 235)", "oklch(50% 0.008 235)", "oklch(62% 0.008 235)", "oklch(74% 0.008 235)", "oklch(86% 0.008 235)", "oklch(95% 0.008 235)"] },
+      "elevated": { "role": "neutral", "displayName": "Raised Instrument Well", "canonical": "oklch(93.8% 0.018 236)", "tonalRamp": ["oklch(15% 0.018 236)", "oklch(26% 0.018 236)", "oklch(38% 0.018 236)", "oklch(50% 0.018 236)", "oklch(62% 0.018 236)", "oklch(74% 0.018 236)", "oklch(86% 0.018 236)", "oklch(95% 0.018 236)"] },
+      "ink": { "role": "neutral", "displayName": "Instrument Ink", "canonical": "oklch(24.5% 0.038 244)", "tonalRamp": ["oklch(15% 0.038 244)", "oklch(26% 0.038 244)", "oklch(38% 0.038 244)", "oklch(50% 0.038 244)", "oklch(62% 0.038 244)", "oklch(74% 0.038 244)", "oklch(86% 0.038 244)", "oklch(95% 0.038 244)"] },
+      "muted": { "role": "neutral", "displayName": "Muted Annotation", "canonical": "oklch(49% 0.034 241)", "tonalRamp": ["oklch(15% 0.034 241)", "oklch(26% 0.034 241)", "oklch(38% 0.034 241)", "oklch(50% 0.034 241)", "oklch(62% 0.034 241)", "oklch(74% 0.034 241)", "oklch(86% 0.034 241)", "oklch(95% 0.034 241)"] },
+      "line": { "role": "neutral", "displayName": "Calibration Line", "canonical": "oklch(82% 0.026 239)", "tonalRamp": ["oklch(15% 0.026 239)", "oklch(26% 0.026 239)", "oklch(38% 0.026 239)", "oklch(50% 0.026 239)", "oklch(62% 0.026 239)", "oklch(74% 0.026 239)", "oklch(86% 0.026 239)", "oklch(95% 0.026 239)"] },
+      "dark-canvas": { "role": "neutral", "displayName": "Bay Blue-Black", "canonical": "oklch(18% 0.025 246)", "tonalRamp": ["oklch(15% 0.025 246)", "oklch(26% 0.025 246)", "oklch(38% 0.025 246)", "oklch(50% 0.025 246)", "oklch(62% 0.025 246)", "oklch(74% 0.025 246)", "oklch(86% 0.025 246)", "oklch(95% 0.025 246)"] },
+      "dark-rail": { "role": "neutral", "displayName": "Night Rail", "canonical": "oklch(21.5% 0.032 245)", "tonalRamp": ["oklch(15% 0.032 245)", "oklch(26% 0.032 245)", "oklch(38% 0.032 245)", "oklch(50% 0.032 245)", "oklch(62% 0.032 245)", "oklch(74% 0.032 245)", "oklch(86% 0.032 245)", "oklch(95% 0.032 245)"] },
+      "dark-panel": { "role": "neutral", "displayName": "Night Panel", "canonical": "oklch(23.5% 0.029 244)", "tonalRamp": ["oklch(15% 0.029 244)", "oklch(26% 0.029 244)", "oklch(38% 0.029 244)", "oklch(50% 0.029 244)", "oklch(62% 0.029 244)", "oklch(74% 0.029 244)", "oklch(86% 0.029 244)", "oklch(95% 0.029 244)"] },
+      "dark-elevated": { "role": "neutral", "displayName": "Raised Night Well", "canonical": "oklch(27% 0.033 243)", "tonalRamp": ["oklch(15% 0.033 243)", "oklch(26% 0.033 243)", "oklch(38% 0.033 243)", "oklch(50% 0.033 243)", "oklch(62% 0.033 243)", "oklch(74% 0.033 243)", "oklch(86% 0.033 243)", "oklch(95% 0.033 243)"] },
+      "dark-ink": { "role": "neutral", "displayName": "Night Reading", "canonical": "oklch(91% 0.018 235)", "tonalRamp": ["oklch(15% 0.018 235)", "oklch(26% 0.018 235)", "oklch(38% 0.018 235)", "oklch(50% 0.018 235)", "oklch(62% 0.018 235)", "oklch(74% 0.018 235)", "oklch(86% 0.018 235)", "oklch(95% 0.018 235)"] },
+      "dark-muted": { "role": "neutral", "displayName": "Night Annotation", "canonical": "oklch(69% 0.03 238)", "tonalRamp": ["oklch(15% 0.03 238)", "oklch(26% 0.03 238)", "oklch(38% 0.03 238)", "oklch(50% 0.03 238)", "oklch(62% 0.03 238)", "oklch(74% 0.03 238)", "oklch(86% 0.03 238)", "oklch(95% 0.03 238)"] },
+      "dark-line": { "role": "neutral", "displayName": "Night Calibration Line", "canonical": "oklch(34% 0.034 243)", "tonalRamp": ["oklch(15% 0.034 243)", "oklch(26% 0.034 243)", "oklch(38% 0.034 243)", "oklch(50% 0.034 243)", "oklch(62% 0.034 243)", "oklch(74% 0.034 243)", "oklch(86% 0.034 243)", "oklch(95% 0.034 243)"] }
+    },
+    "typographyMeta": {
+      "display": { "displayName": "Operational Display", "purpose": "Authentication statement only." },
+      "headline": { "displayName": "Incident Headline", "purpose": "Page and incident headings." },
+      "title": { "displayName": "Section Title", "purpose": "Workbench sections, drawers, and panels." },
+      "body": { "displayName": "Operating Copy", "purpose": "Dense descriptions, controls, and recovery guidance." },
+      "label": { "displayName": "Measurement Label", "purpose": "Timestamps, IDs, numeric readings, and keyboard hints." }
+    },
+    "shadows": [
+      { "name": "instrument-lift", "value": "0 12px 28px -18px oklch(var(--shadow) / 0.46)", "purpose": "Lift the dominant incident surface without adding a border." },
+      { "name": "drawer-separation", "value": "-12px 0 34px -24px oklch(var(--shadow) / 0.58)", "purpose": "Separate right-side drawers from the evidence field." }
+    ],
+    "motion": [
+      { "name": "state-standard", "value": "200ms cubic-bezier(0.4, 0, 0.2, 1)", "purpose": "Control and tonal state transitions." },
+      { "name": "trace-spring", "value": "spring(stiffness: 380, damping: 34)", "purpose": "Move the causal playhead while preserving continuity." },
+      { "name": "drawer-spring", "value": "spring(stiffness: 360, damping: 34, mass: 0.9)", "purpose": "Give the evidence assistant restrained spatial weight." }
+    ],
+    "breakpoints": [
+      { "name": "sm", "value": "640px" },
+      { "name": "lg", "value": "1024px" },
+      { "name": "xl", "value": "1280px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "High-intent incident action with rare warm emphasis.",
+      "html": "<button class=\"ds-btn-primary\">Create incident</button>",
+      "css": ".ds-btn-primary{min-height:44px;padding:0 16px;border:0;border-radius:10px;background:oklch(var(--accent));color:oklch(var(--accent-ink));font:600 14px 'IBM Plex Sans',sans-serif;transition:background-color 200ms}.ds-btn-primary:hover{background:oklch(var(--accent)/.9)}.ds-btn-primary:active{background:oklch(var(--accent)/.8)}.ds-btn-primary:focus-visible{outline:0;box-shadow:0 0 0 3px oklch(var(--focus)/.34)}"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Neutral action that remains subordinate to the active incident control.",
+      "html": "<button class=\"ds-btn-secondary\">Open workbench</button>",
+      "css": ".ds-btn-secondary{min-height:44px;padding:0 16px;border:0;border-radius:10px;background:oklch(var(--elevated));color:oklch(var(--ink));font:600 14px 'IBM Plex Sans',sans-serif;transition:background-color 200ms}.ds-btn-secondary:hover{background:oklch(var(--line)/.55)}.ds-btn-secondary:focus-visible{outline:0;box-shadow:0 0 0 3px oklch(var(--focus)/.34)}"
+    },
+    {
+      "name": "Quiet Button",
+      "kind": "button",
+      "description": "Low-emphasis utility action for close, navigation, and theme controls.",
+      "html": "<button class=\"ds-btn-quiet\">Previous event</button>",
+      "css": ".ds-btn-quiet{min-height:44px;padding:0 12px;border:0;border-radius:10px;background:transparent;color:oklch(var(--muted));font:600 14px 'IBM Plex Sans',sans-serif;transition:background-color 200ms,color 200ms}.ds-btn-quiet:hover{background:oklch(var(--elevated));color:oklch(var(--ink))}.ds-btn-quiet:focus-visible{outline:0;box-shadow:0 0 0 3px oklch(var(--focus)/.34)}"
+    },
+    {
+      "name": "Instrument Field",
+      "kind": "input",
+      "refersTo": "field",
+      "description": "Rail-toned input with a calibrated boundary and brightened focus surface.",
+      "html": "<input class=\"ds-field\" placeholder=\"Search incident evidence\" />",
+      "css": ".ds-field{min-height:44px;width:100%;padding:0 14px;border:1px solid oklch(var(--line));border-radius:10px;background:oklch(var(--elevated));color:oklch(var(--ink));font:400 14px 'IBM Plex Sans',sans-serif;transition:background-color 200ms}.ds-field::placeholder{color:oklch(var(--faint))}.ds-field:hover{background:oklch(var(--line)/.3)}.ds-field:focus{background:oklch(var(--panel));outline:0;box-shadow:0 0 0 3px oklch(var(--focus)/.34)}"
+    },
+    {
+      "name": "Active Navigation Row",
+      "kind": "nav",
+      "description": "Inverted equipment label used once per navigation surface.",
+      "html": "<a class=\"ds-nav-active\" href=\"#\">Operations</a>",
+      "css": ".ds-nav-active{display:flex;align-items:center;min-height:44px;padding:0 12px;border-radius:10px;background:oklch(var(--ink));color:oklch(var(--panel));font:600 14px 'IBM Plex Sans',sans-serif;text-decoration:none}.ds-nav-active:hover{background:oklch(var(--ink)/.92)}.ds-nav-active:focus-visible{outline:0;box-shadow:0 0 0 3px oklch(var(--focus)/.34)}"
+    },
+    {
+      "name": "Instrument Panel",
+      "kind": "card",
+      "refersTo": "panel",
+      "description": "Bounded evidence or ledger surface with one depth cue.",
+      "html": "<section class=\"ds-panel\"><h3>Incident record</h3><p>Evidence remains attached to time.</p></section>",
+      "css": ".ds-panel{padding:24px;border:1px solid oklch(var(--line));border-radius:14px;background:oklch(var(--panel));color:oklch(var(--ink));font:400 14px/1.5 'IBM Plex Sans',sans-serif}.ds-panel h3{margin:0 0 8px;font:600 18px/1.4 Outfit,sans-serif}.ds-panel p{margin:0;color:oklch(var(--muted))}"
+    },
+    {
+      "name": "Causal Trace",
+      "kind": "custom",
+      "description": "Signature time-and-service instrument with a selected orange playhead.",
+      "html": "<div class=\"ds-trace\"><span class=\"ds-trace-label\">inventory-api</span><i></i><b></b><em></em></div>",
+      "css": ".ds-trace{position:relative;height:112px;overflow:hidden;border-radius:14px;background-color:oklch(var(--elevated));background-image:linear-gradient(to right,oklch(var(--line)/.34) 1px,transparent 1px),linear-gradient(to bottom,oklch(var(--line)/.22) 1px,transparent 1px);background-size:32px 32px;color:oklch(var(--muted));font:500 11px 'JetBrains Mono',monospace}.ds-trace-label{position:absolute;left:16px;top:18px}.ds-trace i{position:absolute;left:16px;right:16px;top:48px;height:1px;background:oklch(var(--line))}.ds-trace b{position:absolute;left:48%;top:40px;width:16px;height:16px;border:2px solid oklch(var(--accent));border-radius:9999px;background:oklch(var(--accent)/.3);box-shadow:0 0 0 7px oklch(var(--accent)/.12)}.ds-trace em{position:absolute;left:calc(48% + 7px);top:14px;bottom:12px;width:1px;background:oklch(var(--accent))}"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Industrial Chronograph Bench",
+    "overview": "ReplayOps feels like a calibrated instrument used under pressure: precise, legible, and deliberately quieter than the event it is helping diagnose. The system is dense where evidence needs comparison and breathable around decisions. It rejects neon observability spectacle and generic AI-chat styling; assistant output is visually subordinate to the incident record.",
+    "keyCharacteristics": ["Evidence-first hierarchy with the causal trace as the focal instrument.", "Cool hue-tinted neutrals in both light and dark themes.", "Sparse incident orange reserved for high-intent controls and active time.", "Human-readable operational copy paired with monospaced measurements.", "Restrained spring motion only where spatial continuity matters."],
+    "rules": [
+      { "name": "The Ten-Percent Signal Rule", "body": "Incident Orange occupies no more than roughly one tenth of a screen; its scarcity makes an active control or time marker immediately legible.", "section": "colors" },
+      { "name": "The Tinted Neutral Rule", "body": "Every neutral carries the primary blue hue. Unrelated pure gray, pure black, and pure white do not enter the interface.", "section": "colors" },
+      { "name": "The Measurement Reserve Rule", "body": "Monospace belongs only to time, identity, code-like evidence, and numeric measurement.", "section": "typography" },
+      { "name": "The One Depth Cue Rule", "body": "A resting surface earns a border or a shadow, not both.", "section": "elevation" }
+    ],
+    "dos": ["Do lead incident surfaces with evidence and time, then place summaries around them.", "Do use semantic OKLCH tokens and keep neutrals inside the blue instrument family.", "Do label synthetic values, AI uncertainty, and human-approval boundaries explicitly.", "Do retain 44px touch targets, visible focus, reduced-motion behavior, and text alternatives for charts."],
+    "donts": ["Don't use Inter, Roboto, generic purple-to-blue gradients, gradient text, pure black, or pure white-on-gray nesting.", "Don't turn every metric into a card, add decorative sparklines, or nest framed panels without a real information boundary.", "Don't use the trace grid, cross-hatching, or monospaced type as ambient decoration.", "Don't make AI answers visually outrank the evidence that grounds them."]
+  }
+}

@@ -1,0 +1,41 @@
+import { supabase } from "./supabase";
+import type { AssistantResponse, DashboardData, Incident, IncidentEvent, SearchResult } from "../types";
+
+const API_URL = (import.meta.env.VITE_API_URL ?? "http://localhost:8787/api").replace(/\/$/, "");
+
+async function accessToken() {
+  if (localStorage.getItem("replayops-demo-session")) return "demo-session";
+  return (await supabase?.auth.getSession())?.data.session?.access_token;
+}
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const token = await accessToken();
+  const response = await fetch(`${API_URL}${path}`, {
+    ...init,
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...init?.headers
+    }
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({ error: "The service returned an unreadable error." }));
+    throw new Error(payload.error ?? "The request could not be completed.");
+  }
+  if (response.status === 204) return undefined as T;
+  return response.json() as Promise<T>;
+}
+
+export const api = {
+  dashboard: () => request<DashboardData>("/dashboard"),
+  incidents: () => request<Incident[]>("/incidents"),
+  incident: (id: string) => request<Incident>(`/incidents/${id}`),
+  createIncident: (incident: Omit<Incident, "id" | "code" | "createdAt" | "updatedAt" | "events">) => request<Incident>("/incidents", { method: "POST", body: JSON.stringify(incident) }),
+  updateIncident: (id: string, incident: Partial<Incident>) => request<Incident>(`/incidents/${id}`, { method: "PATCH", body: JSON.stringify(incident) }),
+  deleteIncident: (id: string) => request<void>(`/incidents/${id}`, { method: "DELETE" }),
+  createEvent: (incidentId: string, event: Omit<IncidentEvent, "id" | "incidentId">) => request<IncidentEvent>(`/incidents/${incidentId}/events`, { method: "POST", body: JSON.stringify(event) }),
+  updateEvent: (incidentId: string, eventId: string, event: Partial<IncidentEvent>) => request<IncidentEvent>(`/incidents/${incidentId}/events/${eventId}`, { method: "PATCH", body: JSON.stringify(event) }),
+  deleteEvent: (incidentId: string, eventId: string) => request<void>(`/incidents/${incidentId}/events/${eventId}`, { method: "DELETE" }),
+  search: (query: string) => request<SearchResult[]>("/search", { method: "POST", body: JSON.stringify({ query }) }),
+  ask: (question: string, incidentId?: string) => request<AssistantResponse>("/assistant", { method: "POST", body: JSON.stringify({ question, incidentId }) })
+};

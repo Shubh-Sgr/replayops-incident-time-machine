@@ -1,0 +1,197 @@
+@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@500;600;700&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+  --canvas: 0.955 0.012 235;
+  --rail: 0.915 0.022 238;
+  --panel: 0.982 0.008 235;
+  --elevated: 0.938 0.018 236;
+  --ink: 0.245 0.038 244;
+  --muted: 0.49 0.034 241;
+  --faint: 0.66 0.028 240;
+  --line: 0.82 0.026 239;
+  --accent: 0.675 0.185 46;
+  --accent-ink: 0.225 0.038 42;
+  --info: 0.63 0.125 221;
+  --success: 0.59 0.118 157;
+  --warning: 0.74 0.135 78;
+  --danger: 0.61 0.19 27;
+  --shadow: 0.18 0.034 244;
+  --focus: 0.62 0.14 221;
+  --trace: 0.58 0.11 222;
+  --hatch: 0.58 0.08 27;
+}
+
+.dark {
+  color-scheme: dark;
+  --canvas: 0.18 0.025 246;
+  --rail: 0.215 0.032 245;
+  --panel: 0.235 0.029 244;
+  --elevated: 0.27 0.033 243;
+  --ink: 0.91 0.018 235;
+  --muted: 0.69 0.03 238;
+  --faint: 0.5 0.03 241;
+  --line: 0.34 0.034 243;
+  --accent: 0.72 0.175 49;
+  --accent-ink: 0.205 0.034 43;
+  --info: 0.72 0.12 216;
+  --success: 0.7 0.115 157;
+  --warning: 0.79 0.13 82;
+  --danger: 0.7 0.17 28;
+  --shadow: 0.08 0.025 246;
+  --focus: 0.72 0.13 216;
+  --trace: 0.71 0.1 218;
+  --hatch: 0.68 0.09 29;
+}
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  html {
+    min-width: 320px;
+    background: oklch(var(--canvas));
+    scroll-behavior: smooth;
+  }
+
+  body {
+    min-width: 320px;
+    min-height: 100dvh;
+    margin: 0;
+    overflow-x: hidden;
+    background: oklch(var(--canvas));
+    color: oklch(var(--ink));
+    font-family: "IBM Plex Sans", sans-serif;
+    font-feature-settings: "ss02", "ss03";
+    text-rendering: optimizeLegibility;
+  }
+
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+  }
+
+  button,
+  a,
+  input,
+  select,
+  textarea,
+  [tabindex] {
+    outline: none;
+  }
+
+  :focus-visible {
+    box-shadow: 0 0 0 3px oklch(var(--focus) / 0.34);
+  }
+
+  ::selection {
+    background: oklch(var(--accent) / 0.28);
+    color: oklch(var(--ink));
+  }
+
+  ::placeholder {
+    color: oklch(var(--faint));
+  }
+
+  * {
+    scrollbar-color: oklch(var(--faint)) oklch(var(--rail));
+    scrollbar-width: thin;
+  }
+
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  *::-webkit-scrollbar-track {
+    background: oklch(var(--rail));
+  }
+
+  *::-webkit-scrollbar-thumb {
+    border: 3px solid oklch(var(--rail));
+    border-radius: 999px;
+    background: oklch(var(--faint));
+  }
+}
+
+@layer components {
+  .instrument-grid {
+    background-image:
+      linear-gradient(to right, oklch(var(--line) / 0.34) 1px, transparent 1px),
+      linear-gradient(to bottom, oklch(var(--line) / 0.22) 1px, transparent 1px);
+    background-size: 32px 32px, 32px 32px;
+    background-position: -1px -1px;
+  }
+
+  .conflict-hatch {
+    background-image: repeating-linear-gradient(
+      135deg,
+      transparent 0,
+      transparent 5px,
+      oklch(var(--hatch) / 0.13) 5px,
+      oklch(var(--hatch) / 0.13) 6px
+    );
+  }
+
+  .measurement-number {
+    font-family: "JetBrains Mono", monospace;
+    font-variant-numeric: tabular-nums lining-nums;
+    letter-spacing: -0.02em;
+  }
+
+  .control {
+    @apply min-h-11 rounded-control px-4 text-sm font-semibold transition-colors duration-200 disabled:cursor-not-allowed disabled:opacity-45;
+  }
+
+  .control-primary {
+    @apply control bg-accent text-accent-ink hover:bg-accent/90 active:bg-accent/80;
+  }
+
+  .control-secondary {
+    @apply control bg-elevated text-ink hover:bg-line/55 active:bg-line/75;
+  }
+
+  .control-quiet {
+    @apply control bg-transparent text-muted hover:bg-elevated hover:text-ink active:bg-line/55;
+  }
+
+  .field {
+    @apply min-h-11 w-full rounded-control bg-elevated px-3.5 text-base text-ink transition-colors duration-200 placeholder:text-faint hover:bg-line/30 focus:bg-panel sm:text-sm;
+    border: 1px solid oklch(var(--line));
+  }
+
+  .surface {
+    @apply rounded-panel bg-panel shadow-instrument;
+  }
+
+  .surface-lined {
+    @apply rounded-panel bg-panel;
+    border: 1px solid oklch(var(--line));
+  }
+
+  .section-title {
+    @apply font-heading text-lg font-semibold tracking-[-0.02em] text-ink;
+  }
+
+  .status-dot {
+    @apply inline-block h-2 w-2 rounded-full;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
