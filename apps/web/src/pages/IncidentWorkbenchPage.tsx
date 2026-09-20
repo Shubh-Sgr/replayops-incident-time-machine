@@ -1,10 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { motion } from "framer-motion";
-import { ArrowLeft, CheckCircle2, Edit3, FileWarning, LoaderCircle, Plus, RotateCcw, Trash2, TriangleAlert } from "lucide-react";
+import { ArrowLeft, Edit3, FileWarning, LoaderCircle, Plus, Trash2, TriangleAlert } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { CausalTrace } from "../components/CausalTrace";
 import { IncidentEditor, type IncidentDraft } from "../components/IncidentEditor";
+import { ResponseConsole } from "../components/ResponseConsole";
 import { Skeleton } from "../components/Skeleton";
 import { SeverityMark, StatusMark } from "../components/StatusMark";
 import { api } from "../lib/api";
@@ -101,7 +102,6 @@ export function IncidentWorkbenchPage() {
   if (incident.error || !incident.data) return <div className="surface-lined mx-auto max-w-xl p-6 text-center"><TriangleAlert className="mx-auto h-7 w-7 text-danger" /><h1 className="mt-3 font-heading text-2xl font-semibold">Incident record unavailable</h1><p className="mt-2 text-sm text-muted">{incident.error instanceof Error ? incident.error.message : "This incident may have been deleted."}</p><Link to="/incidents" className="control-primary mt-5 inline-flex items-center gap-2"><ArrowLeft className="h-4 w-4" /> Return to ledger</Link></div>;
 
   const value = incident.data;
-  const peak = value.events.reduce<IncidentEvent | undefined>((current, event) => !current || event.impactScore > current.impactScore ? event : current, undefined);
 
   return (
     <div className="space-y-6">
@@ -128,36 +128,25 @@ export function IncidentWorkbenchPage() {
         <CausalTrace incident={value} />
       </section>
 
+      <ResponseConsole incident={value} />
+
       {editingEvent !== undefined && <EventEditor event={editingEvent} saving={saveEvent.isPending} error={saveEvent.error instanceof Error ? saveEvent.error.message : undefined} onCancel={() => setEditingEvent(undefined)} onSave={(draft) => saveEvent.mutate(draft)} />}
 
-      <div className="grid gap-6 xl:grid-cols-[minmax(0,1.35fr)_minmax(320px,0.65fr)]">
+      <div>
         <section className="surface-lined overflow-hidden" aria-labelledby="evidence-title">
           <div className="px-5 py-5 sm:px-6"><h2 id="evidence-title" className="section-title">Evidence ledger</h2><p className="mt-1 text-sm text-muted">Observations and actions remain editable and auditable.</p></div>
           <div className="divide-y divide-line border-t border-line">
             {value.events.map((event) => (
               <div key={event.id} className="grid gap-3 px-5 py-4 sm:grid-cols-[86px_110px_1fr_auto] sm:items-start sm:px-6">
                 <span className="measurement-number text-xs text-muted">{formatClock(event.timestamp)}</span>
-                <span className="measurement-number text-[11px] text-muted">{event.service}</span>
-                <div><div className="flex flex-wrap items-center gap-2"><span className="text-sm font-semibold">{event.title}</span><span className={cn("rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase", event.kind === "alert" ? "bg-danger/10 text-danger" : event.kind === "recovery" ? "bg-success/10 text-success" : "bg-info/10 text-info")}>{event.kind}</span></div><p className="mt-1 text-xs leading-5 text-muted">{event.detail}</p></div>
+                <span className="measurement-number text-xs text-muted">{event.service}</span>
+                <div><div className="flex flex-wrap items-center gap-2"><span className="text-sm font-semibold">{event.title}</span><span className={cn("rounded-full px-2 py-0.5 text-xs font-semibold uppercase", event.kind === "alert" ? "bg-danger/10 text-danger" : event.kind === "recovery" ? "bg-success/10 text-success" : "bg-info/10 text-info")}>{event.kind}</span></div><p className="mt-1 text-xs leading-5 text-muted">{event.detail}</p></div>
                 <div className="flex gap-1"><button className="control-quiet !min-h-8 !px-2" onClick={() => setEditingEvent(event)} aria-label={`Edit ${event.title}`}><Edit3 className="h-3.5 w-3.5" /></button><button className="control-quiet !min-h-8 !px-2 text-danger hover:text-danger" onClick={() => deleteEvent.mutate(event.id)} aria-label={`Delete ${event.title}`}><Trash2 className="h-3.5 w-3.5" /></button></div>
               </div>
             ))}
             {!value.events.length && <div className="px-6 py-12 text-center"><FileWarning className="mx-auto h-6 w-6 text-faint" /><p className="mt-3 font-semibold">No timeline evidence yet</p><p className="mt-1 text-sm text-muted">Add an alert, deploy, metric, dependency, action, or recovery event.</p></div>}
           </div>
         </section>
-
-        <aside className="space-y-6">
-          <section className="surface-lined p-5 sm:p-6" aria-labelledby="hypothesis-title">
-            <h2 id="hypothesis-title" className="section-title">Current hypothesis</h2>
-            {peak ? <><div className="conflict-hatch mt-4 rounded-control p-4"><div className="flex items-center gap-2 text-sm font-semibold"><TriangleAlert className="h-4 w-4 text-warning" /> Highest-impact transition</div><p className="mt-2 text-sm leading-6">{peak.title}</p><p className="mt-2 text-xs leading-5 text-muted">Observed in {peak.service} at {formatClock(peak.timestamp)} UTC. This is correlation, not proof of root cause.</p></div><div className="mt-4 flex items-center justify-between text-xs text-muted"><span>Evidence strength</span><span className="measurement-number">{peak.impactScore}/100</span></div></> : <p className="mt-4 text-sm text-muted">Add evidence to calculate an initial hypothesis.</p>}
-          </section>
-          <section className="surface-lined p-5 sm:p-6" aria-labelledby="replay-title">
-            <h2 id="replay-title" className="section-title">Candidate replay</h2>
-            <p className="mt-2 text-sm leading-6 text-muted">Compare the recorded path against a reduced retry ceiling. This demo stores the replay plan without touching production.</p>
-            <button className="control-primary mt-5 inline-flex w-full items-center justify-center gap-2"><RotateCcw className="h-4 w-4" /> Prepare replay</button>
-            <div className="mt-4 flex items-start gap-2 text-xs leading-5 text-muted"><CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-success" /> Human approval is required before an external executor can run.</div>
-          </section>
-        </aside>
       </div>
 
       {(deleteIncident.error || deleteEvent.error) && <p role="alert" className="rounded-control bg-danger/10 p-3 text-sm text-danger">{(deleteIncident.error ?? deleteEvent.error) instanceof Error ? (deleteIncident.error ?? deleteEvent.error)?.message : "The requested change could not be completed."}</p>}

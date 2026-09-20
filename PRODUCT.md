@@ -24,7 +24,23 @@ Success means moving from alert to defensible causal hypothesis and replay plan 
 
 ## Positioning
 
-ReplayOps is an incident time machine, not another monitoring dashboard: it transforms telemetry into an ordered causal graph and lets operators evaluate candidate remediation against it.
+ReplayOps is an incident time machine, not another monitoring dashboard or incident chat room. It transforms imported evidence into an ordered causal graph, ranks competing explanations, tells the responder what observation could disprove each one, and estimates whether a candidate mitigation would interrupt the recorded propagation.
+
+### Why a team uses ReplayOps alongside existing tools
+
+- Datadog, Grafana, Honeycomb, and similar observability products remain the systems of record for querying raw metrics, logs, and traces. ReplayOps consumes their evidence and turns it into a testable debugging argument.
+- Rootly, incident.io, FireHydrant, and similar response products remain the systems of engagement for paging, roles, chat, runbooks, and status communication. ReplayOps focuses on the unresolved technical question: what should the engineer test next, and what evidence would change the diagnosis?
+- ReplayOps wins when responders need a reviewable chain from precursor → symptom → propagation → falsification test → mitigation replay. It does not compete by duplicating alert routing, chat capture, status pages, or generic dashboards.
+
+### Differentiated proof loop
+
+1. Rank precursor and change candidates by causal order and propagation, not alert loudness.
+2. Compare the pre-symptom and failure windows to expose overrepresented services and signal types.
+3. Maintain multiple hypotheses with supporting and conflicting evidence.
+4. Produce a concrete, reversible falsification test for the selected hypothesis.
+5. Use AI as an adversarial reviewer that challenges claims; it cannot approve them.
+6. Replay mitigation controls against the recorded sequence and retain a reproducible result.
+7. Expose missing trace context, healthy baselines, changes, and recovery signals that limit confidence.
 
 ## Operating Context
 
@@ -41,6 +57,9 @@ ReplayOps is an incident time machine, not another monitoring dashboard: it tran
 - Incident and event CRUD with optimistic updates and rollback.
 - pgvector semantic search with deterministic text fallback.
 - Provider-optional AI; core workflows function without an AI key.
+- Deterministic diagnosis ranking with explicit confidence blockers and no invented conclusion when evidence is absent.
+- Adversarial AI review for disconfirming evidence and falsification tests; model output remains subordinate to recorded evidence.
+- Counterfactual mitigation replay with repeatable inputs and clearly labeled synthetic projections.
 - Responsive light and dark modes.
 - Free-tier Vercel, Render, and Supabase deployment configuration.
 - Synthetic demonstrations are labeled.
@@ -73,4 +92,5 @@ Target WCAG 2.2 AA with keyboard operation, visible focus, reduced motion, seman
 - Initial tenant: one synthetic organization, schema ready for multiple tenants.
 - Initial telemetry: normalized CRUD and seed events rather than a live collector.
 - Replay: deterministic simulation over stored events, not execution against customer infrastructure.
+- Integrations: this version models normalized evidence; production connectors to observability and deployment systems remain future work.
 - Surface mode: Operate.

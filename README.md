@@ -1,6 +1,8 @@
 # ReplayOps
 
-ReplayOps is a production-incident time machine. It reconstructs operational evidence into a causal timeline, supports incident and evidence CRUD, searches prior failures semantically, and provides an AI assistant constrained to visible incident evidence.
+ReplayOps is a production-incident time machine. It reconstructs operational evidence into a causal timeline, ranks competing root-cause hypotheses, exposes what evidence is missing, proposes the next safe falsification test, and replays a candidate mitigation against the recorded sequence.
+
+Its differentiated workflow is the diagnostic proof loop: precursor → symptom → propagation → falsification test → mitigation replay. AI is used to challenge a hypothesis with disconfirming evidence, never to silently declare root cause.
 
 The included workspace is production-configurable and also runs without cloud credentials using a synthetic in-memory organization.
 
@@ -41,7 +43,7 @@ Set `OPENAI_API_KEY` to enable embeddings and provider-assisted answers. `OPENAI
 Without an AI key:
 
 - Search falls back to PostgreSQL full-text search or deterministic in-memory matching.
-- The assistant returns an explicitly labeled deterministic evidence summary.
+- The assistant and adversarial hypothesis review return explicitly labeled deterministic evidence analysis.
 - Incident, timeline, replay, and dashboard workflows continue functioning.
 
 ## Free deployment
@@ -57,7 +59,7 @@ Import the repository into Vercel. The root `vercel.json` builds `apps/web`. Con
 
 ### Backend — Render
 
-Create a Blueprint from `render.yaml`, then provide the unsynchronized environment variables. Set `WEB_ORIGIN` to the Vercel URL. The Docker health check is `/health`.
+Create a Render **Web Service** from the repository using the root `Dockerfile`, then provide the environment variables from `.env.example`. Set `WEB_ORIGIN` to the Vercel URL. The Docker health check is `/health`. `render.yaml` remains available as an optional reference, but it is not required.
 
 The current free tiers are suitable for a portfolio, evaluation, or hobby deployment—not an always-on production SLA. Render free web services sleep after 15 minutes without inbound traffic and can take about a minute to wake. Supabase free projects have usage limits and can pause after a week of inactivity. Vercel Hobby is intended for personal, non-commercial projects. Review provider terms before commercial use.
 

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { MemoryRepository } from "./repository.js";
+import { diagnoseIncident } from "./diagnosis.js";
+import { MemoryRepository, simulateReplay } from "./repository.js";
+import { seedIncidents } from "./seed.js";
 
 describe("MemoryRepository", () => {
   const userId = "demo-operator";
@@ -38,5 +40,50 @@ describe("MemoryRepository", () => {
     expect(event?.incidentId).toBe(incident.id);
     expect(await repository.deleteIncident(userId, incident.id)).toBe(true);
     expect(await repository.getIncident(userId, incident.id)).toBeNull();
+  });
+
+  it("records response decisions and deterministic replay outcomes", async () => {
+    const repository = new MemoryRepository();
+    const incident = (await repository.listIncidents(userId))[0]!;
+    const decision = await repository.createDecision(userId, incident.id, {
+      kind: "mitigation",
+      status: "approved",
+      title: "Reduce checkout retry ceiling",
+      detail: "Limit retries to one attempt while the inventory replica catches up."
+    });
+    const replay = await repository.runReplay(userId, incident.id, {
+      retryCeiling: 1,
+      concurrencyCap: 18,
+      timeoutMs: 1800
+    });
+
+    expect(decision?.status).toBe("approved");
+    expect(await repository.listDecisions(userId, incident.id)).toHaveLength(1);
+    expect(replay?.projection.projectedPeak).toBeLessThan(replay?.projection.baselinePeak ?? 0);
+    expect(replay?.progress).toBe(100);
+  });
+
+  it("makes the replay model reproducible for identical inputs", () => {
+    const config = { retryCeiling: 1, concurrencyCap: 18, timeoutMs: 1800 };
+    expect(simulateReplay(seedIncidents[0]!, config)).toEqual(simulateReplay(seedIncidents[0]!, config));
+  });
+
+  it("ranks falsifiable incident hypotheses and exposes evidence gaps", () => {
+    const diagnosis = diagnoseIncident(seedIncidents[0]!);
+
+    expect(diagnosis.originService).toBe("inventory-api");
+    expect(diagnosis.servicePath).toEqual(["inventory-api", "checkout-api", "payments-api"]);
+    expect(diagnosis.hypotheses[0]?.nextTest).toContain("trace or request IDs");
+    expect(diagnosis.hypotheses[0]?.conflictingEvidence.length).toBeGreaterThan(0);
+    expect(diagnosis.evidenceGaps).toContain("No trace, span, or request ID is attached; cross-service causality cannot be verified.");
+    expect(diagnosis.signalDeltas.length).toBeGreaterThan(0);
+  });
+
+  it("refuses to invent a diagnosis without evidence", () => {
+    const diagnosis = diagnoseIncident({ ...seedIncidents[0]!, events: [] });
+
+    expect(diagnosis.hypotheses).toEqual([]);
+    expect(diagnosis.confidence).toBe(12);
+    expect(diagnosis.evidenceGaps[0]).toContain("No timestamped evidence");
   });
 });

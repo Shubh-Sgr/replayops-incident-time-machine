@@ -1,6 +1,8 @@
 export type Severity = "critical" | "high" | "medium" | "low";
 export type IncidentStatus = "investigating" | "identified" | "monitoring" | "resolved";
 export type EventKind = "alert" | "deploy" | "dependency" | "metric" | "action" | "recovery";
+export type DecisionKind = "hypothesis" | "mitigation" | "communication";
+export type DecisionStatus = "proposed" | "approved" | "rejected";
 
 export interface IncidentEvent {
   id: string;
@@ -28,6 +30,87 @@ export interface Incident {
   createdAt: string;
   updatedAt: string;
   events: IncidentEvent[];
+}
+
+export interface IncidentDecision {
+  id: string;
+  incidentId: string;
+  actor: string;
+  kind: DecisionKind;
+  status: DecisionStatus;
+  title: string;
+  detail: string;
+  timestamp: string;
+}
+
+export interface ReplayConfig {
+  retryCeiling: number;
+  concurrencyCap: number;
+  timeoutMs: number;
+}
+
+export interface ReplayResult {
+  id: string;
+  incidentId: string;
+  name: string;
+  status: "queued" | "running" | "passed" | "failed";
+  progress: number;
+  createdAt: string;
+  config: ReplayConfig;
+  projection: {
+    baselinePeak: number;
+    projectedPeak: number;
+    avoidedHighImpactEvents: number;
+    recoveryGainMinutes: number;
+    confidence: number;
+    state: "contained" | "degraded" | "critical";
+    summary: string;
+    signals: string[];
+  };
+}
+
+export interface DiagnosisCandidate {
+  eventId: string;
+  title: string;
+  service: string;
+  kind: EventKind;
+  leadTimeSeconds: number;
+  score: number;
+  reason: string;
+}
+
+export interface SignalDelta {
+  dimension: "service" | "event kind";
+  value: string;
+  beforeImpact: number;
+  failureImpact: number;
+  change: number;
+  score: number;
+}
+
+export interface DiagnosticHypothesis {
+  id: string;
+  rank: number;
+  title: string;
+  claim: string;
+  confidence: number;
+  supportingEvidence: string[];
+  conflictingEvidence: string[];
+  nextTest: string;
+  safeAction: string;
+}
+
+export interface IncidentDiagnosis {
+  incidentId: string;
+  generatedAt: string;
+  symptomEventId?: string;
+  originService?: string;
+  servicePath: string[];
+  confidence: number;
+  changeCandidates: DiagnosisCandidate[];
+  signalDeltas: SignalDelta[];
+  hypotheses: DiagnosticHypothesis[];
+  evidenceGaps: string[];
 }
 
 export interface DashboardData {

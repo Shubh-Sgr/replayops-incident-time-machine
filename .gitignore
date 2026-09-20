@@ -10,3 +10,4 @@ coverage
 *.tsbuildinfo
 .impeccable/review
 .impeccable/build
+**/.impeccable/review

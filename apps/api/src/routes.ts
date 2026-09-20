@@ -2,11 +2,14 @@ import { Router } from "express";
 import { z } from "zod";
 import { answerQuestion, embedText } from "./ai.js";
 import type { AuthenticatedRequest } from "./auth.js";
+import { diagnoseIncident } from "./diagnosis.js";
 import { repository } from "./repository.js";
 
 const severity = z.enum(["critical", "high", "medium", "low"]);
 const status = z.enum(["investigating", "identified", "monitoring", "resolved"]);
 const eventKind = z.enum(["alert", "deploy", "dependency", "metric", "action", "recovery"]);
+const decisionKind = z.enum(["hypothesis", "mitigation", "communication"]);
+const decisionStatus = z.enum(["proposed", "approved", "rejected"]);
 
 const incidentSchema = z.object({
   title: z.string().min(4).max(120),
@@ -27,6 +30,19 @@ const eventSchema = z.object({
   detail: z.string().min(8).max(1200),
   impactScore: z.number().min(0).max(100),
   metadata: z.record(z.unknown()).optional()
+});
+
+const decisionSchema = z.object({
+  kind: decisionKind,
+  status: decisionStatus,
+  title: z.string().min(4).max(120),
+  detail: z.string().min(8).max(800)
+});
+
+const replaySchema = z.object({
+  retryCeiling: z.number().int().min(1).max(4),
+  concurrencyCap: z.number().int().min(5).max(50),
+  timeoutMs: z.number().int().min(500).max(5000)
 });
 
 const parseOrReply = <T>(schema: z.ZodSchema<T>, value: unknown) => {
@@ -58,6 +74,15 @@ apiRouter.get("/incidents/:id", async (req, res) => {
     return;
   }
   res.json(incident);
+});
+
+apiRouter.get("/incidents/:id/diagnosis", async (req, res) => {
+  const incident = await repository.getIncident(userId(req), req.params.id);
+  if (!incident) {
+    res.status(404).json({ error: "Incident not found." });
+    return;
+  }
+  res.json(diagnoseIncident(incident));
 });
 
 apiRouter.post("/incidents", async (req, res) => {
@@ -94,6 +119,43 @@ apiRouter.delete("/incidents/:id", async (req, res) => {
     return;
   }
   res.status(204).send();
+});
+
+apiRouter.get("/incidents/:id/decisions", async (req, res) => {
+  const incident = await repository.getIncident(userId(req), req.params.id);
+  if (!incident) {
+    res.status(404).json({ error: "Incident not found." });
+    return;
+  }
+  res.json(await repository.listDecisions(userId(req), req.params.id));
+});
+
+apiRouter.post("/incidents/:id/decisions", async (req, res) => {
+  const parsed = parseOrReply(decisionSchema, req.body);
+  if ("error" in parsed) {
+    res.status(400).json(parsed);
+    return;
+  }
+  const decision = await repository.createDecision(userId(req), req.params.id, parsed.data);
+  if (!decision) {
+    res.status(404).json({ error: "Incident not found." });
+    return;
+  }
+  res.status(201).json(decision);
+});
+
+apiRouter.post("/incidents/:id/replays", async (req, res) => {
+  const parsed = parseOrReply(replaySchema, req.body);
+  if ("error" in parsed) {
+    res.status(400).json(parsed);
+    return;
+  }
+  const result = await repository.runReplay(userId(req), req.params.id, parsed.data);
+  if (!result) {
+    res.status(404).json({ error: "Incident not found." });
+    return;
+  }
+  res.status(201).json(result);
 });
 
 apiRouter.post("/incidents/:id/events", async (req, res) => {

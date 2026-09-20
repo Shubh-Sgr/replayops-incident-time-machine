@@ -2,10 +2,11 @@ import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import { config } from "./config.js";
 import { seedActivities, seedDashboardSeries, seedIncidents, seedReplayRuns } from "./seed.js";
-import type { Activity, DashboardData, Incident, IncidentEvent, ReplayRun, SearchResult } from "./types.js";
+import type { Activity, DashboardData, Incident, IncidentDecision, IncidentEvent, ReplayConfig, ReplayProjection, ReplayResult, ReplayRun, SearchResult } from "./types.js";
 
 export type IncidentInput = Omit<Incident, "id" | "code" | "createdAt" | "updatedAt" | "events">;
 export type EventInput = Omit<IncidentEvent, "id" | "incidentId">;
+export type DecisionInput = Pick<IncidentDecision, "kind" | "status" | "title" | "detail">;
 
 export interface Repository {
   dashboard(userId: string): Promise<DashboardData>;
@@ -17,16 +18,60 @@ export interface Repository {
   createEvent(userId: string, incidentId: string, input: EventInput): Promise<IncidentEvent | null>;
   updateEvent(userId: string, incidentId: string, eventId: string, input: Partial<EventInput>): Promise<IncidentEvent | null>;
   deleteEvent(userId: string, incidentId: string, eventId: string): Promise<boolean>;
+  listDecisions(userId: string, incidentId: string): Promise<IncidentDecision[]>;
+  createDecision(userId: string, incidentId: string, input: DecisionInput): Promise<IncidentDecision | null>;
+  runReplay(userId: string, incidentId: string, config: ReplayConfig): Promise<ReplayResult | null>;
   search(userId: string, query: string, embedding?: number[]): Promise<SearchResult[]>;
 }
 
 const clone = <T>(value: T): T => structuredClone(value);
 
+export function simulateReplay(incident: Incident, config: ReplayConfig): ReplayProjection {
+  const baselinePeak = incident.events.reduce((peak, event) => Math.max(peak, event.impactScore), 0);
+  const retryRelief = Math.max(0, 4 - config.retryCeiling) * 8;
+  const concurrencyRelief = Math.max(-5, Math.min(9, (30 - config.concurrencyCap) * 0.45));
+  const timeoutRelief = Math.max(-4, Math.min(8, (3000 - config.timeoutMs) / 250));
+  const evidenceCoverage = Math.min(1, incident.events.length / 6);
+  const totalRelief = Math.max(0, retryRelief + concurrencyRelief + timeoutRelief) * (0.72 + evidenceCoverage * 0.28);
+  const projectedPeak = Math.max(12, Math.round(baselinePeak - totalRelief));
+  const improvement = Math.max(0, baselinePeak - projectedPeak);
+  const avoidedHighImpactEvents = Math.min(
+    incident.events.filter((event) => event.impactScore >= 65).length,
+    Math.floor(improvement / 14)
+  );
+  const recoveryGainMinutes = Math.round(improvement / 3.5);
+  const hasRecovery = incident.events.some((event) => event.kind === "recovery");
+  const confidence = Math.min(94, Math.round(46 + incident.events.length * 6 + (hasRecovery ? 8 : 0)));
+  const state: ReplayProjection["state"] = projectedPeak <= 60 ? "contained" : projectedPeak <= 78 ? "degraded" : "critical";
+  const summary = state === "contained"
+    ? "The candidate contains propagation below the high-impact threshold."
+    : state === "degraded"
+      ? "The candidate reduces pressure, but one degraded path remains."
+      : "The candidate does not sufficiently interrupt the recorded propagation path.";
+
+  return {
+    baselinePeak,
+    projectedPeak,
+    avoidedHighImpactEvents,
+    recoveryGainMinutes,
+    confidence,
+    state,
+    summary,
+    signals: [
+      `Retry amplification relief: ${Math.round(retryRelief)} points`,
+      `Concurrency pressure relief: ${Math.round(concurrencyRelief)} points`,
+      `Timeout budget relief: ${Math.round(timeoutRelief)} points`
+    ]
+  };
+}
+
 export class MemoryRepository implements Repository {
   private incidents = clone(seedIncidents);
+  private decisions: IncidentDecision[] = [];
+  private replayRuns = clone(seedReplayRuns);
 
   async dashboard(_userId: string): Promise<DashboardData> {
-    return { incidents: clone(this.incidents), activities: clone(seedActivities), replayRuns: clone(seedReplayRuns), ...clone(seedDashboardSeries) };
+    return { incidents: clone(this.incidents), activities: clone(seedActivities), replayRuns: clone(this.replayRuns), ...clone(seedDashboardSeries) };
   }
   async listIncidents(_userId: string) { return clone(this.incidents).sort((a, b) => b.startedAt.localeCompare(a.startedAt)); }
   async getIncident(_userId: string, id: string) { return clone(this.incidents.find((incident) => incident.id === id) ?? null); }
@@ -73,6 +118,30 @@ export class MemoryRepository implements Repository {
     incident.updatedAt = new Date().toISOString();
     return incident.events.length < before;
   }
+  async listDecisions(_userId: string, incidentId: string) {
+    return clone(this.decisions.filter((decision) => decision.incidentId === incidentId).sort((a, b) => b.timestamp.localeCompare(a.timestamp)));
+  }
+  async createDecision(_userId: string, incidentId: string, input: DecisionInput) {
+    const incident = this.incidents.find((item) => item.id === incidentId);
+    if (!incident) return null;
+    const decision: IncidentDecision = { ...input, id: randomUUID(), incidentId, actor: incident.owner, timestamp: new Date().toISOString() };
+    this.decisions.unshift(decision);
+    return clone(decision);
+  }
+  async runReplay(_userId: string, incidentId: string, config: ReplayConfig) {
+    const incident = this.incidents.find((item) => item.id === incidentId);
+    if (!incident) return null;
+    const projection = simulateReplay(incident, config);
+    const run: ReplayResult = {
+      id: randomUUID(), incidentId, config, projection,
+      name: `Retry ${config.retryCeiling} · cap ${config.concurrencyCap} · ${config.timeoutMs}ms`,
+      status: projection.state === "critical" ? "failed" : "passed",
+      progress: 100,
+      createdAt: new Date().toISOString()
+    };
+    this.replayRuns.unshift(run);
+    return clone(run);
+  }
   async search(_userId: string, query: string) {
     const tokens = query.toLowerCase().split(/\W+/).filter(Boolean);
     return this.incidents.map((incident) => {
@@ -98,9 +167,19 @@ const mapIncident = (row: Row, events: IncidentEvent[] = []): Incident => ({
 const mapActivity = (row: Row): Activity => ({
   id: String(row.id),
   ...(row.incident_id ? { incidentId: String(row.incident_id) } : {}),
-  actor: String(row.actor), action: String(row.action), detail: String(row.detail),
+  actor: String(row.actor), action: String(row.action).replace(/^\[decision:[^:]+:[^\]]+\]\s*/, ""), detail: String(row.detail),
   timestamp: new Date(String(row.timestamp)).toISOString()
 });
+const mapDecision = (row: Row): IncidentDecision => {
+  const match = String(row.action).match(/^\[decision:(hypothesis|mitigation|communication):(proposed|approved|rejected)\]\s*(.+)$/);
+  return {
+    id: String(row.id), incidentId: String(row.incident_id), actor: String(row.actor),
+    kind: (match?.[1] ?? "mitigation") as IncidentDecision["kind"],
+    status: (match?.[2] ?? "proposed") as IncidentDecision["status"],
+    title: match?.[3] ?? String(row.action), detail: String(row.detail),
+    timestamp: new Date(String(row.timestamp)).toISOString()
+  };
+};
 const mapReplayRun = (row: Row): ReplayRun => ({
   id: String(row.id), incidentId: String(row.incident_id), name: String(row.name),
   status: row.status as ReplayRun["status"], progress: Number(row.progress),
@@ -248,6 +327,50 @@ class PostgresRepository implements Repository {
        )`,
       [userId, incidentId, eventId]
     )).rowCount === 1;
+  }
+  async listDecisions(userId: string, incidentId: string) {
+    const result = await this.pool.query(
+      `select a.* from incident_activities a
+       where a.incident_id = $2 and a.action like '[decision:%'
+       and exists (
+         select 1 from incidents i join organization_members m on m.organization_id = i.organization_id
+         where i.id = a.incident_id and m.user_id = $1
+       )
+       order by a.timestamp desc`,
+      [userId, incidentId]
+    );
+    return (result.rows as Row[]).map(mapDecision);
+  }
+  async createDecision(userId: string, incidentId: string, input: DecisionInput) {
+    const action = `[decision:${input.kind}:${input.status}] ${input.title}`;
+    const result = await this.pool.query(
+      `insert into incident_activities (organization_id, incident_id, actor, action, detail, timestamp)
+       select i.organization_id, i.id, i.owner, $3, $4, now()
+       from incidents i join organization_members m on m.organization_id = i.organization_id
+       where i.id = $2 and m.user_id = $1
+       returning *`,
+      [userId, incidentId, action, input.detail]
+    );
+    const row = result.rows[0] as Row | undefined;
+    return row ? mapDecision(row) : null;
+  }
+  async runReplay(userId: string, incidentId: string, config: ReplayConfig) {
+    const incident = await this.getIncident(userId, incidentId);
+    if (!incident) return null;
+    const projection = simulateReplay(incident, config);
+    const name = `Retry ${config.retryCeiling} · cap ${config.concurrencyCap} · ${config.timeoutMs}ms · ${new Date().toISOString().slice(11, 19)}`;
+    const status = projection.state === "critical" ? "failed" : "passed";
+    const result = await this.pool.query(
+      `insert into replay_runs (organization_id, incident_id, name, status, progress)
+       select i.organization_id, i.id, $3, $4, 100
+       from incidents i join organization_members m on m.organization_id = i.organization_id
+       where i.id = $2 and m.user_id = $1
+       returning *`,
+      [userId, incidentId, name, status]
+    );
+    const row = result.rows[0] as Row | undefined;
+    if (!row) return null;
+    return { ...mapReplayRun(row), config, projection } satisfies ReplayResult;
   }
   async search(userId: string, query: string, embedding?: number[]) {
     const result = embedding
