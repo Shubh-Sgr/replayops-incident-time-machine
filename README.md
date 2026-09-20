@@ -6,6 +6,8 @@ Its differentiated workflow is the diagnostic proof loop: precursor → symptom 
 
 The included workspace is production-configurable and also runs without cloud credentials using a synthetic in-memory organization.
 
+For an end-to-end explanation of the architecture, feature flows, engineering decisions, API routes, database model, and user guide, see [`CODE_WALKTHROUGH.md`](CODE_WALKTHROUGH.md).
+
 ## Architecture
 
 - `apps/web`: React, Vite, TypeScript, Tailwind CSS, Framer Motion, TanStack Query, Supabase Auth.
