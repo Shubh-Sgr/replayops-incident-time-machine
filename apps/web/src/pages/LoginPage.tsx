@@ -1,7 +1,7 @@
 import { motion } from "framer-motion";
 import { Activity, ArrowRight, CheckCircle2, Github, KeyRound, LoaderCircle, ShieldCheck } from "lucide-react";
 import { useState, type FormEvent } from "react";
-import { Navigate } from "react-router-dom";
+import { Navigate, useLocation } from "react-router-dom";
 import { CausalTrace } from "../components/CausalTrace";
 import { TEST_CREDENTIALS, useAuth } from "../providers/AuthProvider";
 import type { Incident } from "../types";
@@ -27,6 +27,8 @@ const previewIncident: Incident = {
 };
 
 export function LoginPage() {
+  const location = useLocation();
+  const returnTo = (location.state as { from?: string } | null)?.from ?? "/";
   const { user, loading, signIn, signUp, signInWithGithub, enterDemo, demoAvailable } = useAuth();
   const [mode, setMode] = useState<"login" | "signup">("login");
   const [name, setName] = useState("");
@@ -37,7 +39,7 @@ export function LoginPage() {
   const [success, setSuccess] = useState("");
 
   if (loading) return <div className="flex min-h-[100dvh] items-center justify-center bg-canvas"><LoaderCircle className="h-6 w-6 animate-spin text-accent" /></div>;
-  if (user) return <Navigate to="/" replace />;
+  if (user) return <Navigate to={returnTo} replace />;
 
   async function submit(event: FormEvent) {
     event.preventDefault();

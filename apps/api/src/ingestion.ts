@@ -2,6 +2,7 @@ import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto
 import { Router, type Request, type Response } from "express";
 import { config } from "./config.js";
 import { repository } from "./repository.js";
+import { ingestionQueue } from "./queue.js";
 import type { EventKind, IngestionBatch, IntegrationProvider, NormalizedSignal, Severity } from "./types.js";
 
 type JsonRecord = Record<string, unknown>;
@@ -343,8 +344,17 @@ async function receive(req: RawRequest, res: Response) {
   const externalId = req.get("x-github-delivery") ?? req.get("x-request-id") ?? createHash("sha256").update(rawBody).digest("hex").slice(0, 32) ?? randomUUID();
   const eventName = req.get("x-github-event") ?? textValue(req.params.signal);
   const batch: IngestionBatch = { externalId, signals: normalizePayload(integration.provider, payload, externalId, eventName) };
-  const result = await repository.ingest(integration, batch);
-  res.status(result.status === "duplicate" ? 200 : 202).json(result);
+  const queued = await ingestionQueue.enqueue(integration, batch);
+  if (queued.duplicate && queued.job.status === "completed") {
+    res.status(200).json({ status: "duplicate", acceptedSignals: 0, incidentIds: [], queueId: queued.job.id });
+    return;
+  }
+  try {
+    const result = await ingestionQueue.process(queued.job.id);
+    res.status(result.status === "duplicate" ? 200 : 202).json(result);
+  } catch {
+    res.status(202).json({ status: "queued", acceptedSignals: 0, incidentIds: [], queueId: queued.job.id });
+  }
 }
 
 export const ingestionRouter = Router();

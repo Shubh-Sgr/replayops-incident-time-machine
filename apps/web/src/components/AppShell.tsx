@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { Activity, Bell, Bot, CircleUserRound, Gauge, LogOut, Menu, Moon, RadioTower, Search, Sun, X } from "lucide-react";
+import { Activity, Bell, Bot, CircleUserRound, Gauge, LogOut, Menu, Moon, RadioTower, Search, Settings2, Sun, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { cn } from "../lib/utils";
@@ -11,7 +11,8 @@ import { CommandSearch } from "./CommandSearch";
 const navigation = [
   { to: "/", label: "Operations", icon: Gauge, end: true },
   { to: "/incidents", label: "Incidents", icon: Activity, end: false },
-  { to: "/integrations", label: "Connectors", icon: RadioTower, end: false }
+  { to: "/integrations", label: "Connectors", icon: RadioTower, end: false },
+  { to: "/workspace", label: "Workspace", icon: Settings2, end: false }
 ];
 
 export function AppShell() {
@@ -121,7 +122,7 @@ export function AppShell() {
       </div>
 
       <nav className="fixed inset-x-3 bottom-3 z-30 flex items-center justify-around rounded-panel bg-ink p-1.5 text-panel shadow-drawer lg:hidden" aria-label="Mobile commands">
-        {navigation.map((item) => (
+        {navigation.filter((item) => item.to !== "/workspace").map((item) => (
           <NavLink key={item.to} to={item.to} end={item.end} className={({ isActive }) => cn("flex min-h-11 flex-1 items-center justify-center gap-2 rounded-control text-xs font-semibold", isActive ? "bg-panel text-ink" : "text-panel/70")}><item.icon className="h-4 w-4" />{item.label}</NavLink>
         ))}
         <button className="flex min-h-11 flex-1 items-center justify-center gap-2 rounded-control text-xs font-semibold text-panel/70" onClick={() => setAssistantOpen(true)}><Bot className="h-4 w-4" />Assistant</button>

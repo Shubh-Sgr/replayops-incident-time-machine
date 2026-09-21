@@ -130,9 +130,11 @@ export interface SearchResult {
 
 export interface AssistantResponse {
   answer: string;
-  citations: Array<{ code: string; title: string; incidentId: string }>;
+  citations: Array<{ code: string; title: string; incidentId: string; eventIds: string[]; excerpt: string }>;
   confidence: number;
   mode: "deterministic" | "provider";
+  redactions: number;
+  evidenceBoundary: string;
 }
 
 export interface IntegrationDelivery {
@@ -165,7 +167,18 @@ export interface Integration {
 }
 
 export interface IngestionResult {
-  status: "accepted" | "duplicate";
+  status: "accepted" | "queued" | "duplicate";
   acceptedSignals: number;
   incidentIds: string[];
+  queueId?: string;
 }
+
+export type WorkspaceRole = "admin" | "responder" | "viewer";
+export interface WorkspaceContext { organizationId: string; organizationName: string; role: WorkspaceRole }
+export interface ServiceDefinition { id: string; name: string; ownerTeam: string; tier: "critical" | "standard" | "internal"; repositoryUrl?: string | null; runbookUrl?: string | null; dependencies: string[]; createdAt: string; updatedAt: string }
+export interface IncidentPolicy { incidentThreshold: number; groupingWindowMinutes: number; suppressLowSeverity: boolean; maintenanceMode: boolean; updatedAt: string }
+export interface TeamMember { userId: string; email: string; displayName: string; role: WorkspaceRole; joinedAt: string }
+export interface TeamInvitation { id: string; email: string; role: WorkspaceRole; status: "pending" | "accepted" | "revoked" | "expired"; expiresAt: string; createdAt: string; inviteToken?: string }
+export interface AuditEntry { id: string; actor: string; action: string; targetType: string; targetId?: string | null; detail: Record<string, unknown>; createdAt: string }
+export interface QueueJob { id: string; integrationId: string; externalId: string; status: "queued" | "processing" | "completed" | "retrying" | "dead_letter"; attempts: number; lastError?: string | null; nextAttemptAt: string; createdAt: string; updatedAt: string }
+export interface MitigationRequest { id: string; incidentId: string; requestedBy: string; reviewedBy?: string | null; title: string; action: string; rollbackPlan: string; status: "pending" | "approved" | "rejected" | "executed"; createdAt: string; reviewedAt?: string | null }

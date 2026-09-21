@@ -69,4 +69,29 @@ describe("automated ingestion", () => {
     const duplicate = await repository.ingest(target!, { externalId: "delivery-alert", signals: [] });
     expect(duplicate).toEqual({ status: "duplicate", acceptedSignals: 0, incidentIds: [] });
   });
+
+  it("groups signals across services connected in the service catalog", async () => {
+    const repository = new MemoryRepository();
+    const integration = await repository.createIntegration("demo", { name: "Architecture test", provider: "generic" });
+    const target = await repository.getIntegrationTarget(integration.id);
+    const checkout = await repository.ingest(target!, {
+      externalId: "checkout-alert-delivery",
+      signals: [{
+        externalId: "checkout-alert", timestamp: "2026-09-20T11:00:00Z", service: "checkout-api", kind: "alert",
+        title: "Checkout error budget burn", detail: "Checkout failures exceeded the configured threshold.", impactScore: 82,
+        severity: "high", metadata: {}
+      }]
+    });
+    const inventory = await repository.ingest(target!, {
+      externalId: "inventory-alert-delivery",
+      signals: [{
+        externalId: "inventory-alert", timestamp: "2026-09-20T11:04:00Z", service: "inventory-api", kind: "alert",
+        title: "Inventory timeouts", detail: "A dependency listed in the service catalog started timing out.", impactScore: 77,
+        severity: "high", metadata: {}
+      }]
+    });
+    expect(inventory.incidentIds).toEqual(checkout.incidentIds);
+    const incident = await repository.getIncident("demo", checkout.incidentIds[0]!);
+    expect(incident?.events.map((event) => event.service)).toEqual(["checkout-api", "inventory-api"]);
+  });
 });

@@ -9,6 +9,14 @@ import { api } from "../lib/api";
 import { cn } from "../lib/utils";
 import type { Integration, IntegrationProvider } from "../types";
 
+function connectorHealth(integration: Integration) {
+  if (!integration.lastDeliveryAt) return { label: "Awaiting verification", tone: "text-warning", dot: "bg-warning", detail: "No signed delivery received" };
+  if (integration.lastDeliveryStatus === "failed" || integration.lastDeliveryStatus === "rejected") return { label: "Attention required", tone: "text-danger", dot: "bg-danger", detail: "Latest delivery did not complete" };
+  const ageMinutes = (Date.now() - new Date(integration.lastDeliveryAt).getTime()) / 60_000;
+  if (ageMinutes > 180) return { label: "Stale", tone: "text-warning", dot: "bg-warning", detail: "No delivery in the last three hours" };
+  return { label: "Healthy", tone: "text-success", dot: "bg-success", detail: `Last delivery ${new Date(integration.lastDeliveryAt).toLocaleString()}` };
+}
+
 const providers: Array<{
   id: IntegrationProvider;
   name: string;
@@ -97,6 +105,9 @@ function ConnectorInstructions({ integration }: { integration: Integration }) {
           </div>
           <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all text-xs leading-6 text-panel/90"><code>{snippet}</code></pre>
         </div>
+        <ol className="mt-5 grid gap-3 sm:grid-cols-3" aria-label="Connector verification steps">
+          {[integration.provider === "github" ? "Add repository webhook" : integration.provider === "otel" ? "Configure OTLP exporter" : "Configure webhook sender", "Send a signed delivery", "Confirm evidence and incident"].map((step, index) => <li key={step} className="flex items-start gap-2 text-xs leading-5 text-muted"><span className="measurement-number flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-elevated text-xs font-semibold text-ink">{index + 1}</span>{step}</li>)}
+        </ol>
       </div>
 
       <div className="min-w-0 space-y-4">
@@ -117,6 +128,7 @@ export function IntegrationsPage() {
   const [selectedId, setSelectedId] = useState<string>();
   const [deletePending, setDeletePending] = useState<string>();
   const [notice, setNotice] = useState<string>();
+  const [setupStep, setSetupStep] = useState<"source" | "configure" | "verify">("source");
 
   const integrationsQuery = useQuery({ queryKey: ["integrations"], queryFn: api.integrations });
   const integrations = integrationsQuery.data ?? [];
@@ -127,6 +139,7 @@ export function IntegrationsPage() {
     onSuccess: (integration) => {
       queryClient.setQueryData<Integration[]>(["integrations"], (current = []) => [integration, ...current]);
       setSelectedId(integration.id);
+      setSetupStep("configure");
       setNotice(`${integration.name} is ready. Copy its endpoint into the source system, or run the labeled test.`);
     }
   });
@@ -134,6 +147,7 @@ export function IntegrationsPage() {
     mutationFn: api.testIntegration,
     onSuccess: async (result) => {
       setNotice(`Test accepted ${result.acceptedSignals} signal and opened ${result.incidentIds.length} labeled synthetic incident${result.incidentIds.length === 1 ? "" : "s"}.`);
+      setSetupStep("verify");
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["integrations"] }),
         queryClient.invalidateQueries({ queryKey: ["incidents"] }),
@@ -193,8 +207,8 @@ export function IntegrationsPage() {
 
       <div className="mt-7 grid gap-6 xl:grid-cols-[360px_minmax(0,1fr)]">
         <section className="surface-lined self-start p-5 sm:p-6">
-          <h2 className="section-title">Add an evidence source</h2>
-          <p className="mt-1 text-sm text-muted">No OAuth app or paid middleware required.</p>
+          <div className="flex items-start justify-between gap-3"><div><h2 className="section-title">Add an evidence source</h2><p className="mt-1 text-sm text-muted">No OAuth app or paid middleware required.</p></div><span className="measurement-number rounded-full bg-elevated px-2.5 py-1 text-xs text-muted">{setupStep === "source" ? "1/3" : setupStep === "configure" ? "2/3" : "3/3"}</span></div>
+          <div className="mt-4 flex items-center gap-1" aria-label={`Setup step ${setupStep}`}><span className="h-1 flex-1 rounded-full bg-accent" /><span className={cn("h-1 flex-1 rounded-full", setupStep !== "source" ? "bg-accent" : "bg-line")} /><span className={cn("h-1 flex-1 rounded-full", setupStep === "verify" ? "bg-success" : "bg-line")} /></div>
           <div className="mt-5 space-y-2" role="radiogroup" aria-label="Connector type">
             {providers.map((item) => (
               <button
@@ -204,6 +218,7 @@ export function IntegrationsPage() {
                 aria-checked={provider === item.id}
                 onClick={() => {
                   setProvider(item.id);
+                  setSetupStep("source");
                   setName(item.id === "github" ? "Production delivery stream" : item.id === "otel" ? "Production telemetry" : "Operations webhook");
                 }}
                 className={cn(
@@ -258,6 +273,7 @@ export function IntegrationsPage() {
             <div className="divide-y divide-line">
               {integrations.map((integration) => {
                 const meta = providerMeta[integration.provider];
+                const health = connectorHealth(integration);
                 return (
                   <button key={integration.id} className={cn("flex w-full items-center gap-4 px-5 py-4 text-left transition-colors sm:px-6", selected?.id === integration.id ? "bg-elevated" : "hover:bg-elevated/55")} onClick={() => setSelectedId(integration.id)}>
                     <meta.icon className="h-5 w-5 shrink-0 text-info" />
@@ -266,8 +282,8 @@ export function IntegrationsPage() {
                       <span className="mt-1 block truncate text-xs text-muted">{meta.name} · {integration.signalCount} accepted signal{integration.signalCount === 1 ? "" : "s"}</span>
                     </span>
                     <span className="hidden text-right sm:block">
-                      <span className="flex items-center justify-end gap-2 text-xs font-semibold text-success"><span className="status-dot bg-success" />{integration.status}</span>
-                      <span className="measurement-number mt-1 block text-xs text-faint">{integration.lastDeliveryAt ? new Date(integration.lastDeliveryAt).toLocaleString() : "waiting for first delivery"}</span>
+                      <span className={cn("flex items-center justify-end gap-2 text-xs font-semibold", health.tone)}><span className={cn("status-dot", health.dot)} />{health.label}</span>
+                      <span className="measurement-number mt-1 block text-xs text-faint">{health.detail}</span>
                     </span>
                     <ChevronRight className="h-4 w-4 text-faint" />
                   </button>
@@ -280,7 +296,7 @@ export function IntegrationsPage() {
 
       {selected && (
         <motion.section key={selected.id} className="surface-lined mt-6 overflow-hidden" initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }}>
-          <div className="p-5 sm:p-6"><ConnectorInstructions integration={selected} /></div>
+          <div className="p-5 sm:p-6"><div className="mb-5 flex flex-wrap items-center justify-between gap-3 border-b border-line pb-4"><div><p className="text-sm font-semibold">Connector health</p><p className="mt-1 text-xs text-muted">Authentication, delivery freshness, and pipeline outcome</p></div>{(() => { const health = connectorHealth(selected); return <span className={cn("inline-flex items-center gap-2 rounded-full bg-elevated px-3 py-1.5 text-xs font-semibold", health.tone)}><span className={cn("status-dot", health.dot)} />{health.label}</span>; })()}</div><ConnectorInstructions integration={selected} /></div>
           <div className="flex flex-wrap items-center gap-3 border-t border-line bg-elevated px-5 py-4 sm:px-6">
             <button className="control-primary" disabled={testMutation.isPending} onClick={() => testMutation.mutate(selected.id)}>
               {testMutation.isPending ? <RefreshCw className="mr-2 h-4 w-4 animate-spin" /> : <Activity className="mr-2 h-4 w-4" />}

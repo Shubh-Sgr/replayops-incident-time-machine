@@ -8,7 +8,7 @@ Its differentiated workflow is the diagnostic proof loop: precursor → symptom 
 
 The included workspace is production-configurable and also runs without cloud credentials using a synthetic in-memory organization.
 
-For an end-to-end explanation of the architecture, feature flows, engineering decisions, API routes, database model, and user guide, see [`CODE_WALKTHROUGH.md`](CODE_WALKTHROUGH.md).
+For an end-to-end explanation of the architecture, feature flows, engineering decisions, API routes, database model, and user guide, see [`CODE_WALKTHROUGH.md`](CODE_WALKTHROUGH.md). For a plain-language explanation of every current and planned product capability, see [`FEATURE_GUIDE.md`](FEATURE_GUIDE.md).
 
 ## Architecture
 
@@ -28,6 +28,17 @@ Open **Connectors** in the application and create one of three free receivers:
 Normal deployments and low-impact metrics remain in a 30-minute evidence buffer. An alert or signal at the incident threshold automatically creates an incident, backfills matching precursor evidence, and updates diagnosis as later evidence arrives. Provider retries are idempotent.
 
 No paid queue or connector platform is required. The receiver runs inside the existing Render API, and connector metadata is stored in the existing Supabase PostgreSQL database.
+
+Every authenticated delivery is now persisted to a Supabase-backed `ingestion_queue` before normalization. Temporary failures use exponential backoff, five failed attempts enter dead-letter review, and operators can retry jobs from **Workspace → Delivery queue**. Connector setup is a three-stage source/configure/verify flow with delivery freshness and latest-outcome health.
+
+## Real-user controls
+
+- **Service map:** records owner, criticality, repository, runbook, and dependencies for architecture-aware grouping.
+- **Intake policy:** configures incident threshold, grouping window, low-severity suppression, and maintenance mode.
+- **Team access:** admin, responder, and viewer roles are enforced at the API; admins can create expiring email-bound invite links.
+- **Audit trail:** successful mutations and governed actions retain actor, target, detail, and timestamp.
+- **Grounded AI:** assistant context is redacted before provider calls and responses expose incident/event citations, evidence boundary, model mode, and confidence.
+- **Mitigation approval:** responders submit an exact action plus rollback plan; a separate administrator approves or rejects it. ReplayOps does not execute infrastructure commands.
 
 ## Run locally
 

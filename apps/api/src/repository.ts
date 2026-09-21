@@ -3,6 +3,7 @@ import { Pool } from "pg";
 import { config } from "./config.js";
 import { seedActivities, seedDashboardSeries, seedIncidents, seedReplayRuns } from "./seed.js";
 import type { Activity, DashboardData, Incident, IncidentDecision, IncidentEvent, IngestionBatch, IngestionResult, Integration, IntegrationDelivery, IntegrationProvider, IntegrationTarget, NormalizedSignal, ReplayConfig, ReplayProjection, ReplayResult, ReplayRun, SearchResult } from "./types.js";
+import { workspaceService } from "./workspace.js";
 
 export type IncidentInput = Omit<Incident, "id" | "code" | "createdAt" | "updatedAt" | "events">;
 export type EventInput = Omit<IncidentEvent, "id" | "incidentId">;
@@ -184,12 +185,14 @@ export class MemoryRepository implements Repository {
     return integration ? { id: integration.id, organizationId: "demo-organization", name: integration.name, provider: integration.provider, status: integration.status } : null;
   }
   async ingest(integration: IntegrationTarget, batch: IngestionBatch) {
+    const policy = await workspaceService.policyForOrganization(integration.organizationId);
     const deliveryKey = `${integration.id}:${batch.externalId}`;
     if (this.deliveries.has(deliveryKey)) return { status: "duplicate", acceptedSignals: 0, incidentIds: [] } satisfies IngestionResult;
     this.deliveries.add(deliveryKey);
     const incidentIds = new Set<string>();
     let acceptedSignals = 0;
     for (const signal of batch.signals) {
+      const relatedServices = await workspaceService.relatedServicesForOrganization(integration.organizationId, signal.service);
       if (this.bufferedSignals.some((item) => item.integrationId === integration.id && item.externalId === signal.externalId)) continue;
       const buffered: NormalizedSignal & { integrationId: string; incidentId?: string } = { ...signal, integrationId: integration.id };
       this.bufferedSignals.push(buffered);
@@ -197,8 +200,9 @@ export class MemoryRepository implements Repository {
       let incident = signal.correlationKey
         ? this.incidents.find((item) => item.status !== "resolved" && item.events.some((event) => event.metadata?.correlationKey === signal.correlationKey))
         : undefined;
-      incident ??= this.incidents.find((item) => item.status !== "resolved" && item.service === signal.service && Math.abs(new Date(item.startedAt).getTime() - new Date(signal.timestamp).getTime()) <= 7_200_000);
-      if (!incident && (signal.kind === "alert" || signal.impactScore >= 65)) {
+      incident ??= this.incidents.find((item) => item.status !== "resolved" && relatedServices.includes(item.service) && Math.abs(new Date(item.startedAt).getTime() - new Date(signal.timestamp).getTime()) <= policy.groupingWindowMinutes * 60_000);
+      const suppressed = policy.maintenanceMode || (policy.suppressLowSeverity && signal.severity === "low");
+      if (!incident && !suppressed && signal.impactScore >= policy.incidentThreshold) {
         const now = new Date().toISOString();
         incident = {
           id: randomUUID(), code: `AUTO-${String(Date.now()).slice(-6)}`, title: signal.title,
@@ -208,7 +212,7 @@ export class MemoryRepository implements Repository {
         };
         this.incidents.unshift(incident);
         const triggerTime = new Date(signal.timestamp).getTime();
-        for (const precursor of this.bufferedSignals.filter((item) => !item.incidentId && item.service === signal.service && new Date(item.timestamp).getTime() >= triggerTime - 1_800_000 && new Date(item.timestamp).getTime() <= triggerTime)) {
+        for (const precursor of this.bufferedSignals.filter((item) => !item.incidentId && relatedServices.includes(item.service) && new Date(item.timestamp).getTime() >= triggerTime - 1_800_000 && new Date(item.timestamp).getTime() <= triggerTime)) {
           precursor.incidentId = incident.id;
           incident.events.push(signalToEvent(incident.id, precursor));
         }
@@ -426,7 +430,7 @@ class PostgresRepository implements Repository {
       `insert into incidents (organization_id,code,title,summary,service,severity,status,owner,started_at,resolved_at,embedding)
        select m.organization_id,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::vector
        from organization_members m where m.user_id = $1
-       order by m.created_at limit 1 returning *`,
+       order by m.created_at desc limit 1 returning *`,
       [userId, `ROP-${Math.floor(2000 + Math.random() * 7000)}`, input.title, input.summary, input.service, input.severity, input.status, input.owner, input.startedAt, input.resolvedAt ?? null, embedding ? `[${embedding.join(",")}]` : null]
     );
     const row = result.rows[0] as Row | undefined;
@@ -583,7 +587,7 @@ class PostgresRepository implements Repository {
       `insert into integrations (organization_id, created_by, name, provider)
        select m.organization_id, $1, $2, $3 from organization_members m
        where m.user_id = $1 and m.role in ('admin', 'responder')
-       order by m.created_at limit 1 returning *`,
+       order by m.created_at desc limit 1 returning *`,
       [userId, input.name, input.provider]
     );
     const row = result.rows[0] as Row | undefined;
@@ -609,6 +613,7 @@ class PostgresRepository implements Repository {
     } : null;
   }
   async ingest(integration: IntegrationTarget, batch: IngestionBatch) {
+    const policy = await workspaceService.policyForOrganization(integration.organizationId);
     const client = await this.pool.connect();
     try {
       await client.query("begin");
@@ -626,6 +631,7 @@ class PostgresRepository implements Repository {
       const incidentIds = new Set<string>();
       let acceptedSignals = 0;
       for (const signal of batch.signals) {
+        const relatedServices = await workspaceService.relatedServicesForOrganization(integration.organizationId, signal.service);
         const insertedSignal = await client.query(
           `insert into ingestion_signals (
              integration_id, external_id, occurred_at, service, kind, title, detail, impact_score, severity,
@@ -647,18 +653,19 @@ class PostgresRepository implements Repository {
              ($2::text is not null and exists (
                select 1 from ingestion_signals prior where prior.incident_id = i.id and prior.correlation_key = $2
              ))
-             or (i.service = $3 and i.started_at between $4::timestamptz - interval '2 hours' and $4::timestamptz + interval '2 hours')
+             or (i.service = any($3::text[]) and i.started_at between $4::timestamptz - ($5 * interval '1 minute') and $4::timestamptz + ($5 * interval '1 minute'))
            )
            order by
              case when $2::text is not null and exists (
                select 1 from ingestion_signals prior where prior.incident_id = i.id and prior.correlation_key = $2
              ) then 0 else 1 end,
              i.started_at desc limit 1`,
-          [integration.organizationId, signal.correlationKey ?? null, signal.service, signal.timestamp]
+          [integration.organizationId, signal.correlationKey ?? null, relatedServices, signal.timestamp, policy.groupingWindowMinutes]
         );
         let incidentId = match.rows[0] ? String((match.rows[0] as Row).id) : undefined;
 
-        if (!incidentId && (signal.kind === "alert" || signal.impactScore >= 65)) {
+        const suppressed = policy.maintenanceMode || (policy.suppressLowSeverity && signal.severity === "low");
+        if (!incidentId && !suppressed && signal.impactScore >= policy.incidentThreshold) {
           const code = `AUTO-${new Date(signal.timestamp).toISOString().slice(5, 16).replace(/[-T:]/g, "")}-${randomUUID().slice(0, 4).toUpperCase()}`;
           const created = await client.query(
             `insert into incidents (organization_id, code, title, summary, service, severity, status, owner, started_at)
@@ -671,9 +678,9 @@ class PostgresRepository implements Repository {
           await client.query(
             `update ingestion_signals s set incident_id = $1
              where s.incident_id is null and s.occurred_at between $2::timestamptz - interval '30 minutes' and $2::timestamptz + interval '5 minutes'
-             and (s.service = $3 or ($4::text is not null and s.correlation_key = $4))
+             and (s.service = any($3::text[]) or ($4::text is not null and s.correlation_key = $4))
              and exists (select 1 from integrations x where x.id = s.integration_id and x.organization_id = $5)`,
-            [incidentId, signal.timestamp, signal.service, signal.correlationKey ?? null, integration.organizationId]
+            [incidentId, signal.timestamp, relatedServices, signal.correlationKey ?? null, integration.organizationId]
           );
           await client.query(
             `insert into incident_events (incident_id, timestamp, service, kind, title, detail, impact_score, metadata)

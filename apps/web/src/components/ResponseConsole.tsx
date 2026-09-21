@@ -22,7 +22,8 @@ import {
 import { useMemo, useState, type FormEvent } from "react";
 import { api } from "../lib/api";
 import { cn, formatClock, formatRelative } from "../lib/utils";
-import type { AssistantResponse, DecisionKind, DecisionStatus, Incident, IncidentDecision, IncidentDiagnosis, ReplayConfig, ReplayResult } from "../types";
+import type { AssistantResponse, DecisionKind, DecisionStatus, Incident, IncidentDecision, IncidentDiagnosis, MitigationRequest, ReplayConfig, ReplayResult } from "../types";
+import { useAuth } from "../providers/AuthProvider";
 
 type ConsoleMode = "diagnose" | "decisions" | "replay" | "handoff";
 
@@ -88,7 +89,7 @@ function DiagnosisPanel({ incident }: { incident: Incident }) {
             <div className="grid gap-5 xl:grid-cols-[1fr_0.8fr]"><div><p className="text-xs font-semibold uppercase tracking-[0.12em] text-muted">Next falsification test</p><p className="mt-2 text-sm font-semibold leading-6">{selected.nextTest}</p></div><div><p className="text-xs font-semibold uppercase tracking-[0.12em] text-muted">Reversible guardrail</p><p className="mt-2 text-sm leading-6 text-muted">{selected.safeAction}</p></div></div>
             <button type="button" className="control-secondary mt-4 inline-flex items-center gap-2" onClick={challenge} disabled={aiReview.isPending}>{aiReview.isPending ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Bot className="h-4 w-4" />}{aiReview.isPending ? "AI is challenging the claim" : "Ask AI to challenge this hypothesis"}</button>
             {aiReview.error && <p role="alert" className="mt-3 text-sm text-danger">{aiReview.error instanceof Error ? aiReview.error.message : "The adversarial review failed."}</p>}
-            {aiResponse && <div className="mt-4 rounded-control bg-info/8 p-4"><div className="flex items-center justify-between gap-3"><span className="text-xs font-semibold uppercase tracking-[0.12em] text-info">Adversarial review</span><span className="measurement-number text-xs text-muted">{Math.round(aiResponse.confidence * 100)}% · {aiResponse.mode}</span></div><p className="mt-2 text-sm leading-6">{aiResponse.answer}</p><p className="mt-2 text-xs text-muted">Review aid only. AI cannot approve or close a hypothesis.</p></div>}
+            {aiResponse && <div className="mt-4 rounded-control bg-info/8 p-4"><div className="flex items-center justify-between gap-3"><span className="text-xs font-semibold uppercase tracking-[0.12em] text-info">Adversarial review</span><span className="measurement-number text-xs text-muted">{Math.round(aiResponse.confidence * 100)}% · {aiResponse.mode}</span></div><p className="mt-2 text-sm leading-6">{aiResponse.answer}</p><div className="mt-3 flex flex-wrap gap-2">{aiResponse.citations.map((citation) => <span key={citation.incidentId} title={citation.excerpt} className="rounded-full bg-panel px-2.5 py-1 text-xs font-semibold text-info">{citation.code} · {citation.eventIds.length} cited</span>)}</div><p className="mt-2 text-xs text-muted">{aiResponse.evidenceBoundary}{aiResponse.redactions ? ` · ${aiResponse.redactions} sensitive values redacted` : ""}. Review aid only; AI cannot approve or close a hypothesis.</p></div>}
           </div>
         </div>
       </div>
@@ -197,12 +198,26 @@ function ImpactRail({ label, value, tone }: { label: string; value: number; tone
 
 function ReplayLab({ incident, onResult }: { incident: Incident; onResult(result: ReplayResult): void }) {
   const queryClient = useQueryClient();
+  const { user } = useAuth();
   const [config, setConfig] = useState<ReplayConfig>({ retryCeiling: 1, concurrencyCap: 18, timeoutMs: 1800 });
   const [result, setResult] = useState<ReplayResult | null>(null);
+  const approvals = useQuery({ queryKey: ["mitigations", incident.id], queryFn: () => api.mitigations(incident.id) });
   const replay = useMutation({
     mutationFn: () => api.runReplay(incident.id, config),
     onSuccess: (value) => { setResult(value); onResult(value); },
     onSettled: () => void queryClient.invalidateQueries({ queryKey: ["dashboard"] })
+  });
+  const requestApproval = useMutation({
+    mutationFn: () => api.requestMitigation(incident.id, {
+      title: `Apply bounded mitigation for ${incident.service}`,
+      action: `Set retry ceiling to ${config.retryCeiling}, concurrency cap to ${config.concurrencyCap}, and downstream timeout to ${config.timeoutMs}ms for a bounded observation window.`,
+      rollbackPlan: "Restore the previous retry, concurrency, and timeout values immediately if error rate or projected impact worsens."
+    }),
+    onSuccess: (value) => queryClient.setQueryData<MitigationRequest[]>(["mitigations", incident.id], (current) => [value, ...(current ?? [])])
+  });
+  const reviewApproval = useMutation({
+    mutationFn: ({ id, status }: { id: string; status: "approved" | "rejected" }) => api.reviewMitigation(id, status),
+    onSuccess: (value) => queryClient.setQueryData<MitigationRequest[]>(["mitigations", incident.id], (current) => (current ?? []).map((item) => item.id === value.id ? value : item))
   });
   const baselinePeak = Math.max(0, ...incident.events.map((event) => event.impactScore));
 
@@ -236,11 +251,13 @@ function ReplayLab({ incident, onResult }: { incident: Incident; onResult(result
                 <div><dt className="text-xs text-muted">Recovery gain</dt><dd className="measurement-number mt-1 text-lg font-semibold">{result.projection.recoveryGainMinutes}m</dd></div>
               </dl>
               <ul className="mt-4 grid gap-2 text-xs text-muted sm:grid-cols-3">{result.projection.signals.map((signal) => <li key={signal} className="flex items-start gap-2"><Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-info" />{signal}</li>)}</ul>
+              <div className="mt-6 border-t border-line pt-5"><div className="flex flex-wrap items-start justify-between gap-3"><div><h4 className="text-sm font-semibold">Production approval boundary</h4><p className="mt-1 max-w-2xl text-xs leading-5 text-muted">ReplayOps records the exact proposed action and rollback plan. A separate administrator must approve it; this application does not execute infrastructure commands.</p></div><button className="control-primary" disabled={requestApproval.isPending} onClick={() => requestApproval.mutate()}><ShieldCheck className="mr-2 h-4 w-4" />{requestApproval.isPending ? "Requesting…" : "Request approval"}</button></div>{requestApproval.error && <p className="mt-3 text-sm text-danger">{requestApproval.error.message}</p>}</div>
             </motion.div>
           ) : (
             <div className="mt-7 flex min-h-36 items-center justify-center border-y border-line text-center"><div><Gauge className="mx-auto h-6 w-6 text-faint" /><p className="mt-3 font-semibold">Ready to test a mitigation</p><p className="mt-1 max-w-md text-sm leading-6 text-muted">Run the current controls to compare the recorded peak with a reproducible counterfactual.</p></div></div>
           )}
         </AnimatePresence>
+        {approvals.data?.length ? <div className="mt-6 border-t border-line pt-5"><div className="flex items-center justify-between gap-3"><h4 className="text-sm font-semibold">Mitigation approvals</h4><span className="measurement-number text-xs text-muted">{approvals.data.length} requests</span></div><div className="mt-3 space-y-3">{approvals.data.slice(0, 4).map((approval) => { const selfReview = approval.requestedBy === user?.email; return <article key={approval.id} className="rounded-control bg-elevated p-4"><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-sm font-semibold">{approval.title}</p><p className="mt-1 text-xs leading-5 text-muted">{approval.action}</p><p className="mt-2 text-xs leading-5"><strong>Rollback:</strong> {approval.rollbackPlan}</p></div><span className={cn("rounded-full px-2.5 py-1 text-xs font-semibold capitalize", approval.status === "approved" ? "bg-success/12 text-success" : approval.status === "rejected" ? "bg-danger/10 text-danger" : "bg-warning/12 text-warning")}>{approval.status}</span></div>{approval.status === "pending" && <div className="mt-3 flex gap-2"><button className="control-secondary !min-h-9" disabled={selfReview} title={selfReview ? "A different administrator must approve this request." : undefined} onClick={() => reviewApproval.mutate({ id: approval.id, status: "approved" })}>Approve</button><button className="control-quiet !min-h-9 text-danger" disabled={selfReview} title={selfReview ? "A different administrator must review this request." : undefined} onClick={() => reviewApproval.mutate({ id: approval.id, status: "rejected" })}>Reject</button></div>}<p className="mt-3 text-xs text-faint">Requested by {approval.requestedBy}{approval.reviewedBy ? ` · reviewed by ${approval.reviewedBy}` : selfReview ? " · waiting for another administrator" : " · independent review required"}</p></article>; })}</div>{reviewApproval.error && <p className="mt-3 text-sm text-danger">{reviewApproval.error.message}</p>}</div> : null}
       </div>
     </div>
   );

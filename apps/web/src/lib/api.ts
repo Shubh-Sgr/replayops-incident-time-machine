@@ -1,5 +1,5 @@
 import { supabase } from "./supabase";
-import type { AssistantResponse, DashboardData, Incident, IncidentDecision, IncidentDiagnosis, IncidentEvent, IngestionResult, Integration, IntegrationProvider, ReplayConfig, ReplayResult, SearchResult } from "../types";
+import type { AssistantResponse, AuditEntry, DashboardData, Incident, IncidentDecision, IncidentDiagnosis, IncidentEvent, IncidentPolicy, IngestionResult, Integration, IntegrationProvider, MitigationRequest, QueueJob, ReplayConfig, ReplayResult, SearchResult, ServiceDefinition, TeamInvitation, TeamMember, WorkspaceContext, WorkspaceRole } from "../types";
 
 const API_URL = (import.meta.env.VITE_API_URL ?? "http://localhost:8787/api").replace(/\/$/, "");
 
@@ -45,5 +45,21 @@ export const api = {
   integrations: () => request<Integration[]>("/integrations"),
   createIntegration: (input: { name: string; provider: IntegrationProvider }) => request<Integration>("/integrations", { method: "POST", body: JSON.stringify(input) }),
   deleteIntegration: (id: string) => request<void>(`/integrations/${id}`, { method: "DELETE" }),
-  testIntegration: (id: string) => request<IngestionResult>(`/integrations/${id}/test`, { method: "POST" })
+  testIntegration: (id: string) => request<IngestionResult>(`/integrations/${id}/test`, { method: "POST" }),
+  workspace: () => request<WorkspaceContext>("/workspace"),
+  services: () => request<ServiceDefinition[]>("/services"),
+  saveService: (input: Pick<ServiceDefinition, "name" | "ownerTeam" | "tier" | "repositoryUrl" | "runbookUrl" | "dependencies">) => request<ServiceDefinition>("/services", { method: "POST", body: JSON.stringify(input) }),
+  incidentPolicy: () => request<IncidentPolicy>("/incident-policy"),
+  updateIncidentPolicy: (input: Omit<IncidentPolicy, "updatedAt">) => request<IncidentPolicy>("/incident-policy", { method: "PATCH", body: JSON.stringify(input) }),
+  teamMembers: () => request<TeamMember[]>("/team/members"),
+  updateMemberRole: (id: string, role: WorkspaceRole) => request<TeamMember>(`/team/members/${id}`, { method: "PATCH", body: JSON.stringify({ role }) }),
+  invitations: () => request<TeamInvitation[]>("/team/invitations"),
+  createInvitation: (email: string, role: WorkspaceRole) => request<TeamInvitation>("/team/invitations", { method: "POST", body: JSON.stringify({ email, role }) }),
+  acceptInvitation: (token: string) => request<{ organizationName: string; role: WorkspaceRole }>("/team/invitations/accept", { method: "POST", body: JSON.stringify({ token }) }),
+  audit: () => request<AuditEntry[]>("/audit"),
+  queue: () => request<QueueJob[]>("/ingestion-queue"),
+  retryQueueJob: (id: string) => request<QueueJob>(`/ingestion-queue/${id}/retry`, { method: "POST" }),
+  mitigations: (incidentId: string) => request<MitigationRequest[]>(`/incidents/${incidentId}/mitigations`),
+  requestMitigation: (incidentId: string, input: Pick<MitigationRequest, "title" | "action" | "rollbackPlan">) => request<MitigationRequest>(`/incidents/${incidentId}/mitigations`, { method: "POST", body: JSON.stringify(input) }),
+  reviewMitigation: (id: string, status: "approved" | "rejected") => request<MitigationRequest>(`/mitigations/${id}`, { method: "PATCH", body: JSON.stringify({ status }) })
 };

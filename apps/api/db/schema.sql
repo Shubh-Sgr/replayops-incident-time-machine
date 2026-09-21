@@ -11,6 +11,8 @@ create table if not exists organizations (
 create table if not exists organization_members (
   organization_id uuid not null references organizations(id) on delete cascade,
   user_id uuid not null references auth.users(id) on delete cascade,
+  email text,
+  display_name text,
   role text not null check (role in ('admin', 'responder', 'viewer')),
   created_at timestamptz not null default now(),
   primary key (organization_id, user_id)
@@ -138,6 +140,80 @@ create table if not exists ingestion_signals (
   unique (integration_id, external_id)
 );
 
+create table if not exists service_catalog (
+  id uuid primary key default gen_random_uuid(),
+  organization_id uuid not null references organizations(id) on delete cascade,
+  name text not null,
+  owner_team text not null,
+  tier text not null check (tier in ('critical','standard','internal')),
+  repository_url text,
+  runbook_url text,
+  dependencies text[] not null default '{}',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (organization_id,name)
+);
+
+create table if not exists incident_policies (
+  organization_id uuid primary key references organizations(id) on delete cascade,
+  incident_threshold integer not null default 65 check (incident_threshold between 1 and 100),
+  grouping_window_minutes integer not null default 120 check (grouping_window_minutes between 5 and 1440),
+  suppress_low_severity boolean not null default true,
+  maintenance_mode boolean not null default false,
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists organization_invitations (
+  id uuid primary key default gen_random_uuid(),
+  organization_id uuid not null references organizations(id) on delete cascade,
+  email text not null,
+  role text not null check (role in ('admin','responder','viewer')),
+  token_hash text not null unique,
+  status text not null default 'pending' check (status in ('pending','accepted','revoked','expired')),
+  expires_at timestamptz not null,
+  created_by uuid,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists workspace_audit_log (
+  id uuid primary key default gen_random_uuid(),
+  organization_id uuid not null references organizations(id) on delete cascade,
+  actor text not null,
+  action text not null,
+  target_type text not null,
+  target_id text,
+  detail jsonb not null default '{}',
+  created_at timestamptz not null default now()
+);
+
+create table if not exists mitigation_requests (
+  id uuid primary key default gen_random_uuid(),
+  organization_id uuid not null references organizations(id) on delete cascade,
+  incident_id uuid not null references incidents(id) on delete cascade,
+  requested_by text not null,
+  reviewed_by text,
+  title text not null,
+  action text not null,
+  rollback_plan text not null,
+  status text not null default 'pending' check (status in ('pending','approved','rejected','executed')),
+  created_at timestamptz not null default now(),
+  reviewed_at timestamptz
+);
+
+create table if not exists ingestion_queue (
+  id uuid primary key default gen_random_uuid(),
+  integration_id uuid not null references integrations(id) on delete cascade,
+  external_id text not null,
+  batch jsonb not null,
+  status text not null default 'queued' check(status in ('queued','processing','completed','retrying','dead_letter')),
+  attempts integer not null default 0,
+  last_error text,
+  next_attempt_at timestamptz not null default now(),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique(integration_id,external_id)
+);
+
 create index if not exists incidents_started_at_idx on incidents(organization_id, started_at desc);
 create index if not exists incidents_status_idx on incidents(organization_id, status);
 create index if not exists incident_events_incident_time_idx on incident_events(incident_id, timestamp);
@@ -150,6 +226,10 @@ create index if not exists integrations_org_idx on integrations(organization_id,
 create index if not exists ingestion_deliveries_source_idx on ingestion_deliveries(integration_id, received_at desc);
 create index if not exists ingestion_signals_match_idx on ingestion_signals(service, occurred_at desc) where incident_id is null;
 create index if not exists ingestion_signals_correlation_idx on ingestion_signals(correlation_key) where correlation_key is not null;
+create index if not exists service_catalog_org_idx on service_catalog(organization_id,name);
+create index if not exists workspace_audit_org_idx on workspace_audit_log(organization_id,created_at desc);
+create index if not exists mitigation_incident_idx on mitigation_requests(incident_id,created_at desc);
+create index if not exists ingestion_queue_ready_idx on ingestion_queue(status,next_attempt_at);
 
 alter table organizations enable row level security;
 alter table organization_members enable row level security;
@@ -162,6 +242,12 @@ alter table event_volume_samples enable row level security;
 alter table integrations enable row level security;
 alter table ingestion_deliveries enable row level security;
 alter table ingestion_signals enable row level security;
+alter table service_catalog enable row level security;
+alter table incident_policies enable row level security;
+alter table organization_invitations enable row level security;
+alter table workspace_audit_log enable row level security;
+alter table mitigation_requests enable row level security;
+alter table ingestion_queue enable row level security;
 
 create policy "members can read own memberships" on organization_members for select
 using (user_id = auth.uid());
@@ -221,6 +307,39 @@ create policy "members can read ingestion signals" on ingestion_signals for sele
 using (exists (
   select 1 from integrations x join organization_members m on m.organization_id = x.organization_id
   where x.id = ingestion_signals.integration_id and m.user_id = auth.uid()
+));
+
+create policy "members can read service catalog" on service_catalog for select
+using (exists (select 1 from organization_members m where m.organization_id = service_catalog.organization_id and m.user_id = auth.uid()));
+
+create policy "responders can manage service catalog" on service_catalog for all
+using (exists (select 1 from organization_members m where m.organization_id = service_catalog.organization_id and m.user_id = auth.uid() and m.role in ('admin','responder')))
+with check (exists (select 1 from organization_members m where m.organization_id = service_catalog.organization_id and m.user_id = auth.uid() and m.role in ('admin','responder')));
+
+create policy "members can read incident policy" on incident_policies for select
+using (exists (select 1 from organization_members m where m.organization_id = incident_policies.organization_id and m.user_id = auth.uid()));
+
+create policy "admins can manage incident policy" on incident_policies for all
+using (exists (select 1 from organization_members m where m.organization_id = incident_policies.organization_id and m.user_id = auth.uid() and m.role = 'admin'))
+with check (exists (select 1 from organization_members m where m.organization_id = incident_policies.organization_id and m.user_id = auth.uid() and m.role = 'admin'));
+
+create policy "admins can manage invitations" on organization_invitations for all
+using (exists (select 1 from organization_members m where m.organization_id = organization_invitations.organization_id and m.user_id = auth.uid() and m.role = 'admin'))
+with check (exists (select 1 from organization_members m where m.organization_id = organization_invitations.organization_id and m.user_id = auth.uid() and m.role = 'admin'));
+
+create policy "members can read workspace audit" on workspace_audit_log for select
+using (exists (select 1 from organization_members m where m.organization_id = workspace_audit_log.organization_id and m.user_id = auth.uid()));
+
+create policy "members can read mitigation requests" on mitigation_requests for select
+using (exists (select 1 from organization_members m where m.organization_id = mitigation_requests.organization_id and m.user_id = auth.uid()));
+
+create policy "responders can create mitigation requests" on mitigation_requests for insert
+with check (exists (select 1 from organization_members m where m.organization_id = mitigation_requests.organization_id and m.user_id = auth.uid() and m.role in ('admin','responder')));
+
+create policy "members can read ingestion queue" on ingestion_queue for select
+using (exists (
+  select 1 from integrations x join organization_members m on m.organization_id = x.organization_id
+  where x.id = ingestion_queue.integration_id and m.user_id = auth.uid()
 ));
 
 create or replace function public.seed_replayops_workspace(target_organization_id uuid)
@@ -310,8 +429,8 @@ begin
   insert into public.organizations (id, name, slug)
   values (workspace_id, workspace_name || ' workspace', 'workspace-' || new.id::text);
 
-  insert into public.organization_members (organization_id, user_id, role)
-  values (workspace_id, new.id, 'admin');
+  insert into public.organization_members (organization_id, user_id, email, display_name, role)
+  values (workspace_id, new.id, new.email, workspace_name, 'admin');
 
   perform public.seed_replayops_workspace(workspace_id);
   return new;

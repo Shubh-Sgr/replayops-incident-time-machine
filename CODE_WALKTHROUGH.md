@@ -62,7 +62,9 @@ The core product principle is: **AI may challenge a diagnosis, but evidence and 
 
 - Semantic incident search when embeddings are configured.
 - PostgreSQL full-text or deterministic in-memory search when no AI key exists.
-- A grounded assistant that receives only visible incident evidence.
+- A grounded assistant that receives only visible, automatically redacted incident evidence.
+- Response citations that identify the exact incident and event excerpts used.
+- An explicit evidence boundary, model mode, confidence, and redaction count on every answer.
 - An adversarial review action that challenges the selected hypothesis and explains what observation would change the conclusion.
 - Provider mode uses an OpenAI-compatible chat endpoint.
 - Deterministic fallback mode keeps the workflow usable without an AI subscription.
@@ -73,8 +75,20 @@ The core product principle is: **AI may challenge a diagnosis, but evidence and 
 - Compare recorded and projected peak impact.
 - Estimate avoided high-impact events and recovery-time improvement.
 - Persist replay runs for auditability.
+- Submit a bounded production action with a required rollback plan for approval.
+- Prevent the requester from approving their own mitigation; ReplayOps never executes the command.
 - Record proposed, approved, or rejected hypotheses and mitigations.
 - Generate a portable Markdown shift handoff from incident evidence, decisions, and the latest replay.
+
+### Production intake and governance
+
+- A guided GitHub, Grafana/generic webhook, and OTLP HTTP/JSON connector setup flow.
+- Connector health derived from verification state, delivery failures, and delivery freshness.
+- A durable PostgreSQL queue with exponential retry and dead-letter recovery.
+- Service ownership and dependency catalog used during cross-service incident grouping.
+- Configurable incident threshold, grouping window, low-severity suppression, and maintenance mode.
+- Email-bound, expiring team invitations with admin, responder, and viewer roles.
+- A workspace audit trail for successful mutations and governed response decisions.
 
 ## 3. Repository Map
 
@@ -92,7 +106,10 @@ ReplayOps/
 │   │       │   ├── DashboardPage.tsx
 │   │       │   ├── IncidentsPage.tsx
 │   │       │   ├── IncidentWorkbenchPage.tsx
-│   │       │   └── LoginPage.tsx
+│   │       │   ├── LoginPage.tsx
+│   │       │   ├── IntegrationsPage.tsx
+│   │       │   ├── WorkspacePage.tsx
+│   │       │   └── AcceptInvitePage.tsx
 │   │       ├── providers/AuthProvider.tsx
 │   │       ├── lib/api.ts
 │   │       └── types.ts
@@ -105,6 +122,9 @@ ReplayOps/
 │           ├── repository.ts
 │           ├── diagnosis.ts
 │           ├── ai.ts
+│           ├── ingestion.ts
+│           ├── queue.ts
+│           ├── workspace.ts
 │           ├── auth.ts
 │           ├── seed.ts
 │           └── types.ts
@@ -171,6 +191,18 @@ The frontend sends the Supabase access token to the API. Local demo mode sends t
 3. `ResponseConsole`, which owns diagnosis, decisions, replay, and handoff.
 4. The editable evidence ledger.
 
+### Connectors and workspace operations
+
+`IntegrationsPage` walks an operator through source selection, provider-specific configuration, and an end-to-end verification delivery. It reports whether each receiver is awaiting verification, healthy, stale, or needs attention.
+
+`WorkspacePage` is the operational control plane:
+
+- **Service map:** ownership, criticality, code/runbook links, and dependencies.
+- **Intake policy:** noise suppression and correlation thresholds.
+- **Team access:** role changes and shareable, expiring invite links.
+- **Audit trail:** who changed what and when.
+- **Delivery queue:** pending work, retries, failures, and dead-letter recovery.
+
 ### Response console
 
 `apps/web/src/components/ResponseConsole.tsx` has four modes:
@@ -208,6 +240,16 @@ Diagnosis is intentionally the default. A responder should see “what should I 
 | `POST` | `/api/integrations/:id/test` | Run a labeled end-to-end ingestion test |
 | `POST` | `/ingest/:id` | Receive signed GitHub or generic webhook deliveries |
 | `POST` | `/ingest/:id/v1/:signal` | Receive OTLP HTTP/JSON traces, logs, and metrics |
+| `GET/PATCH` | `/api/incident-policy` | Read or update grouping and suppression policy |
+| `GET/POST` | `/api/services` | Read or upsert service ownership and dependencies |
+| `GET/PATCH` | `/api/team/members` | List members or change a member role |
+| `GET/POST` | `/api/team/invitations` | List or create expiring invitations |
+| `POST` | `/api/team/invitations/accept` | Accept an email-bound invitation |
+| `GET` | `/api/audit` | Read the workspace audit trail |
+| `GET` | `/api/ingestion-queue` | Inspect delivery and dead-letter state |
+| `POST` | `/api/ingestion-queue/:id/retry` | Retry a failed or dead-letter delivery |
+| `GET/POST` | `/api/incidents/:id/mitigations` | Read or request a governed mitigation |
+| `PATCH` | `/api/mitigations/:id` | Approve or reject a request as a different admin |
 
 ### Repository abstraction
 
@@ -241,7 +283,7 @@ If there are no events, the engine returns no hypothesis. It does not invent an 
 - **Provider mode:** calls configured embedding and chat-completion endpoints.
 - **Deterministic mode:** provides evidence-derived search and adversarial-review responses when no key exists.
 
-The system prompt requires the model to use supplied evidence, separate observation from hypothesis, cite incident codes, and state uncertainty.
+Before provider calls, secrets, tokens, email addresses, IP addresses, and credential-shaped values are redacted. The system prompt requires the model to use supplied evidence, separate observation from hypothesis, cite incident/event identifiers, and state uncertainty. The API returns structured citations and excerpts so the UI can show exactly what grounded an answer.
 
 ### Replay engine
 
@@ -273,6 +315,12 @@ The production schema is in `apps/api/db/schema.sql`.
 | `integrations` | Workspace-owned GitHub, OTLP, and generic receivers |
 | `ingestion_deliveries` | Idempotency and connector delivery health |
 | `ingestion_signals` | Normalized evidence buffer and incident attachment state |
+| `ingestion_queue` | Durable normalized delivery jobs, attempts, retry timing, and dead-letter state |
+| `service_catalog` | Service owner, criticality, links, and dependency graph |
+| `incident_policies` | Workspace grouping, threshold, suppression, and maintenance controls |
+| `organization_invitations` | Hashed, expiring, email-bound team invitations |
+| `workspace_audit_log` | Actor, action, target, detail, and timestamp for governed changes |
+| `mitigation_requests` | Exact proposed action, rollback plan, requester, reviewer, and disposition |
 
 `pgvector` and an HNSW cosine index support semantic incident search. Row-level security restricts data to organization members. An `auth.users` trigger creates and seeds a private workspace for every new account.
 
@@ -350,6 +398,36 @@ The production schema is in `apps/api/db/schema.sql`.
 
 **Why:** A safe portfolio deployment must not imply production certainty or require infrastructure credentials. Real execution would need isolated workers, signed manifests, approval policy, and complete auditing.
 
+### Decision 13: Use PostgreSQL as the free durable queue
+
+**Choice:** Persist normalized intake jobs in the existing Supabase database and drain them from the API process.
+
+**Why:** This provides restart safety, idempotency, exponential retries, and dead-letter inspection without adding Redis, Kafka, or another paid service. It fits the free deployment while keeping a clean boundary for replacing the worker at higher scale.
+
+### Decision 14: Make grouping policy and architecture explicit
+
+**Choice:** Correlate by exact keys first, then use the configured time window and bidirectional service dependencies from the catalog.
+
+**Why:** Same-service grouping misses common cascades. A visible service graph gives correlation a reviewable reason to join checkout and inventory evidence while thresholds and suppression controls reduce noise.
+
+### Decision 15: Use scoped roles and immutable audit entries
+
+**Choice:** Viewers read, responders operate incidents and request mitigations, and administrators manage policy, access, and approvals.
+
+**Why:** Team collaboration is unsafe when every session has owner authority. Server-side checks—not hidden buttons—enforce the boundary, and the audit log makes changes attributable.
+
+### Decision 16: Redact before AI, then cite after AI
+
+**Choice:** Sanitize provider context before transmission and return structured source citations with each answer.
+
+**Why:** Grounding is incomplete if sensitive evidence can leak or responders cannot inspect the supporting record. Redaction reduces exposure and citations preserve verifiability.
+
+### Decision 17: Separate replay, approval, and execution
+
+**Choice:** Replay estimates an outcome; a responder requests a concrete action; a different administrator approves or rejects it; ReplayOps does not execute it.
+
+**Why:** This delivers a realistic control workflow without giving a free portfolio deployment dangerous production credentials. Self-approval is blocked in the API and database-backed workflow.
+
 ## 9. How Any User Can Try It
 
 ### Live application
@@ -368,15 +446,15 @@ Alternatively, create a new account. Supabase provisions a private workspace and
 Suggested evaluation flow:
 
 1. Open **Connectors** and create a Generic, GitHub, or OpenTelemetry receiver.
-2. Run the labeled end-to-end test; it automatically creates a synthetic incident.
-3. Return to **Incidents** and open that new incident.
-4. Inspect the automated source metadata and causal trace.
-5. In **Diagnose**, compare the ranked hypotheses and confidence blockers.
-6. Select a different hypothesis and inspect its falsification test.
-7. Ask AI to challenge the leading hypothesis.
-8. Open **Decisions** and record a proposed mitigation.
-9. Open **Replay**, change the controls, and run the counterfactual.
-10. Open **Handoff** and copy or download the generated Markdown.
+2. Follow the three-step setup guide and run the end-to-end test; it queues a delivery and creates a synthetic incident.
+3. Open **Workspace → Delivery queue** to inspect the completed job and retry controls.
+4. Add or inspect dependencies in **Workspace → Service map**, then review grouping rules under **Intake policy**.
+5. Return to **Incidents** and open the new incident.
+6. Inspect the automated source metadata and causal trace.
+7. In **Diagnose**, compare the ranked hypotheses and confidence blockers.
+8. Ask AI to challenge the leading hypothesis, then inspect its citations, evidence boundary, and redaction count.
+9. In **Replay**, run a counterfactual and submit the exact bounded action plus rollback plan for separate approval.
+10. Review **Team access** and **Audit trail**, then generate the Markdown handoff.
 
 ### Run locally for free
 
@@ -415,7 +493,9 @@ The deployed application is fully usable as an interactive portfolio and archite
 - Render's free service can sleep when idle, so the first webhook after inactivity may be delayed while it wakes. A production SLA would require an always-on service tier.
 - The replay engine estimates outcomes; it does not execute a load test or production rollback.
 - AI provider mode requires `OPENAI_API_KEY`; the deployed fallback remains deterministic without it.
-- Decision records currently share the activity table.
-- Real enterprise use should add audit export, retention policies, secret management, rate limits, connector health, and role-aware mutation rules at the API layer.
+- One active workspace is selected automatically; a workspace switcher is not yet included for users who belong to several organizations.
+- The database-backed queue is intentionally single-worker and polling-based for the free tier. Higher sustained volume should move execution to a dedicated worker with leases and metrics.
+- Invitations are shareable links rather than outbound email because Slack/Teams/email notification delivery is intentionally excluded from this implementation.
+- Real enterprise use should still add audit export, retention policies, managed secret rotation, per-tenant rate limits, SSO/SCIM, and a separately isolated mitigation executor if execution is ever enabled.
 
 These boundaries are deliberate. ReplayOps should earn trust by clearly separating recorded evidence, deterministic inference, model-generated review, and synthetic projection.

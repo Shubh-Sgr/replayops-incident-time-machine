@@ -4,7 +4,9 @@ import { requireAuth } from "./auth.js";
 import { config } from "./config.js";
 import { ingestionRouter } from "./ingestion.js";
 import { repository } from "./repository.js";
+import { ingestionQueue } from "./queue.js";
 import { apiRouter } from "./routes.js";
+import { workspaceService } from "./workspace.js";
 
 const app = express();
 
@@ -39,6 +41,11 @@ const errorHandler: ErrorRequestHandler = (error, _req, res, _next) => {
 app.use(errorHandler);
 
 await repository.initialize();
+await workspaceService.initialize();
+await ingestionQueue.initialize();
 app.listen(config.port, "0.0.0.0", () => {
   console.log(`ReplayOps API listening on http://localhost:${config.port}`);
 });
+
+const queueTimer = setInterval(() => void ingestionQueue.processReady(), 30_000);
+queueTimer.unref();

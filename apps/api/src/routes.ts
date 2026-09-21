@@ -7,7 +7,9 @@ import { diagnoseIncident } from "./diagnosis.js";
 import { config } from "./config.js";
 import { deriveIntegrationToken } from "./ingestion.js";
 import { repository } from "./repository.js";
-import type { Integration } from "./types.js";
+import type { IngestionBatch, Integration } from "./types.js";
+import { ingestionQueue } from "./queue.js";
+import { workspaceService } from "./workspace.js";
 
 const severity = z.enum(["critical", "high", "medium", "low"]);
 const status = z.enum(["investigating", "identified", "monitoring", "resolved"]);
@@ -52,6 +54,15 @@ const integrationSchema = z.object({
   name: z.string().min(3).max(80),
   provider: z.enum(["github", "otel", "generic"])
 });
+const serviceSchema = z.object({
+  name: z.string().min(2).max(80), ownerTeam: z.string().min(2).max(80), tier: z.enum(["critical", "standard", "internal"]),
+  repositoryUrl: z.string().url().nullable().optional(), runbookUrl: z.string().url().nullable().optional(), dependencies: z.array(z.string().min(2).max(80)).max(30)
+});
+const policySchema = z.object({ incidentThreshold: z.number().int().min(1).max(100), groupingWindowMinutes: z.number().int().min(5).max(1440), suppressLowSeverity: z.boolean(), maintenanceMode: z.boolean() });
+const roleSchema = z.enum(["admin", "responder", "viewer"]);
+const inviteSchema = z.object({ email: z.string().email(), role: roleSchema });
+const mitigationSchema = z.object({ title: z.string().min(4).max(120), action: z.string().min(12).max(1200), rollbackPlan: z.string().min(12).max(1200) });
+const mitigationReviewSchema = z.object({ status: z.enum(["approved", "rejected"]) });
 
 const parseOrReply = <T>(schema: z.ZodSchema<T>, value: unknown) => {
   const result = schema.safeParse(value);
@@ -66,6 +77,21 @@ const userId = (req: AuthenticatedRequest) => {
   if (!req.user) throw new Error("Authenticated request context is missing.");
   return req.user.id;
 };
+const actor = (req: AuthenticatedRequest) => req.user?.email ?? req.user?.id ?? "Unknown operator";
+
+apiRouter.use(async (req: AuthenticatedRequest, res, next) => {
+  if (req.method === "GET" || ["/assistant", "/search", "/team/invitations/accept"].includes(req.path)) { next(); return; }
+  try {
+    await workspaceService.assertRole(userId(req), ["admin", "responder"]);
+    res.once("finish", () => {
+      const target = req.params.id ?? req.params.incidentId;
+      if (res.statusCode >= 200 && res.statusCode < 300) void workspaceService.audit(userId(req), actor(req), `${req.method} ${req.path}`, "api-route", target ? String(target) : undefined, {});
+    });
+    next();
+  } catch (error) {
+    res.status(403).json({ error: error instanceof Error ? error.message : "Your workspace role does not allow this action." });
+  }
+});
 
 const integrationView = (req: Request, integration: Integration) => {
   const origin = config.publicApiUrl ?? `${req.protocol}://${req.get("host")}`;
@@ -281,7 +307,7 @@ apiRouter.post("/integrations/:id/test", async (req, res) => {
     return;
   }
   const deliveryId = `test-${randomUUID()}`;
-  const result = await repository.ingest(target, {
+  const batch: IngestionBatch = {
     externalId: deliveryId,
     signals: [{
       externalId: `${deliveryId}:signal`, timestamp: new Date().toISOString(), service: "checkout-probe",
@@ -291,6 +317,89 @@ apiRouter.post("/integrations/:id/test", async (req, res) => {
       sourceUrl: `${config.publicApiUrl ?? `${req.protocol}://${req.get("host")}`}/health`,
       environment: "integration-test", metadata: { synthetic: true, provider: owned.provider }
     }]
-  });
+  };
+  const queued = await ingestionQueue.enqueue(target, batch);
+  const result = await ingestionQueue.process(queued.job.id);
   res.status(202).json(result);
+});
+
+apiRouter.get("/workspace", async (req, res) => {
+  res.json(await workspaceService.context(userId(req)));
+});
+
+apiRouter.get("/services", async (req, res) => {
+  res.json(await workspaceService.listServices(userId(req)));
+});
+
+apiRouter.post("/services", async (req: AuthenticatedRequest, res) => {
+  const parsed = parseOrReply(serviceSchema, req.body);
+  if ("error" in parsed) { res.status(400).json(parsed); return; }
+  res.status(201).json(await workspaceService.upsertService(userId(req), actor(req), parsed.data));
+});
+
+apiRouter.get("/incident-policy", async (req, res) => {
+  res.json(await workspaceService.getPolicy(userId(req)));
+});
+
+apiRouter.patch("/incident-policy", async (req: AuthenticatedRequest, res) => {
+  const parsed = parseOrReply(policySchema, req.body);
+  if ("error" in parsed) { res.status(400).json(parsed); return; }
+  res.json(await workspaceService.updatePolicy(userId(req), actor(req), parsed.data));
+});
+
+apiRouter.get("/team/members", async (req, res) => {
+  res.json(await workspaceService.listMembers(userId(req)));
+});
+
+apiRouter.patch("/team/members/:id", async (req: AuthenticatedRequest, res) => {
+  const parsed = parseOrReply(z.object({ role: roleSchema }), req.body);
+  if ("error" in parsed) { res.status(400).json(parsed); return; }
+  res.json(await workspaceService.updateMemberRole(userId(req), actor(req), String(req.params.id), parsed.data.role));
+});
+
+apiRouter.get("/team/invitations", async (req, res) => {
+  res.json(await workspaceService.listInvitations(userId(req)));
+});
+
+apiRouter.post("/team/invitations", async (req: AuthenticatedRequest, res) => {
+  const parsed = parseOrReply(inviteSchema, req.body);
+  if ("error" in parsed) { res.status(400).json(parsed); return; }
+  res.status(201).json(await workspaceService.createInvitation(userId(req), actor(req), parsed.data.email, parsed.data.role));
+});
+
+apiRouter.post("/team/invitations/accept", async (req: AuthenticatedRequest, res) => {
+  const parsed = parseOrReply(z.object({ token: z.string().min(32).max(128) }), req.body);
+  if ("error" in parsed) { res.status(400).json(parsed); return; }
+  if (!req.user?.email) { res.status(400).json({ error: "Your authenticated account does not have an email address." }); return; }
+  res.json(await workspaceService.acceptInvitation(userId(req), req.user.email, parsed.data.token));
+});
+
+apiRouter.get("/audit", async (req, res) => {
+  res.json(await workspaceService.listAudit(userId(req)));
+});
+
+apiRouter.get("/ingestion-queue", async (req, res) => {
+  res.json(await ingestionQueue.list(userId(req)));
+});
+
+apiRouter.post("/ingestion-queue/:id/retry", async (req, res) => {
+  const job = await ingestionQueue.retry(userId(req), String(req.params.id));
+  void ingestionQueue.process(job.id).catch(() => undefined);
+  res.status(202).json(job);
+});
+
+apiRouter.get("/incidents/:id/mitigations", async (req, res) => {
+  res.json(await workspaceService.listMitigations(userId(req), String(req.params.id)));
+});
+
+apiRouter.post("/incidents/:id/mitigations", async (req: AuthenticatedRequest, res) => {
+  const parsed = parseOrReply(mitigationSchema, req.body);
+  if ("error" in parsed) { res.status(400).json(parsed); return; }
+  res.status(201).json(await workspaceService.requestMitigation(userId(req), actor(req), String(req.params.id), parsed.data));
+});
+
+apiRouter.patch("/mitigations/:id", async (req: AuthenticatedRequest, res) => {
+  const parsed = parseOrReply(mitigationReviewSchema, req.body);
+  if ("error" in parsed) { res.status(400).json(parsed); return; }
+  res.json(await workspaceService.reviewMitigation(userId(req), actor(req), String(req.params.id), parsed.data.status));
 });
