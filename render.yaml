@@ -13,6 +13,10 @@ services:
         value: "true"
       - key: WEB_ORIGIN
         value: https://replayops-incident-time-machine.vercel.app
+      - key: PUBLIC_API_URL
+        value: https://replayops-incident-api.onrender.com
+      - key: INGESTION_SIGNING_SECRET
+        generateValue: true
       - key: OPENAI_BASE_URL
         value: https://api.openai.com/v1
       - key: OPENAI_CHAT_MODEL

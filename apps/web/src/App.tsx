@@ -6,6 +6,7 @@ import { useAuth } from "./providers/AuthProvider";
 const DashboardPage = lazy(() => import("./pages/DashboardPage").then((module) => ({ default: module.DashboardPage })));
 const IncidentWorkbenchPage = lazy(() => import("./pages/IncidentWorkbenchPage").then((module) => ({ default: module.IncidentWorkbenchPage })));
 const IncidentsPage = lazy(() => import("./pages/IncidentsPage").then((module) => ({ default: module.IncidentsPage })));
+const IntegrationsPage = lazy(() => import("./pages/IntegrationsPage").then((module) => ({ default: module.IntegrationsPage })));
 const LoginPage = lazy(() => import("./pages/LoginPage").then((module) => ({ default: module.LoginPage })));
 
 function RouteFallback() {
@@ -28,6 +29,7 @@ export function App() {
           <Route index element={<DashboardPage />} />
           <Route path="incidents" element={<IncidentsPage />} />
           <Route path="incidents/:id" element={<IncidentWorkbenchPage />} />
+          <Route path="integrations" element={<IntegrationsPage />} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

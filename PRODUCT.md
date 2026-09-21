@@ -44,7 +44,7 @@ ReplayOps is an incident time machine, not another monitoring dashboard or incid
 
 ## Operating Context
 
-- Incident intake from manually created records and future telemetry connectors.
+- Continuous incident intake through signed GitHub, OpenTelemetry HTTP/JSON, Grafana, and generic webhook connectors, with manual evidence reserved for human observations.
 - Protected dashboard for service health, active incidents, activity, and replay state.
 - Workbench with timeline events, causal relationships, evidence, notes, and hypotheses.
 - Semantic search and an assistant grounded in selected and historical incident evidence.
@@ -58,6 +58,8 @@ ReplayOps is an incident time machine, not another monitoring dashboard or incid
 - pgvector semantic search with deterministic text fallback.
 - Provider-optional AI; core workflows function without an AI key.
 - Deterministic diagnosis ranking with explicit confidence blockers and no invented conclusion when evidence is absent.
+- Signed, provider-specific ingestion with delivery deduplication, normalized evidence buffering, trace/release correlation, and threshold-based incident creation.
+- Automatic precursor backfill: ordinary deploys and metrics stay buffered, then attach when a related high-impact signal opens an incident.
 - Adversarial AI review for disconfirming evidence and falsification tests; model output remains subordinate to recorded evidence.
 - Counterfactual mitigation replay with repeatable inputs and clearly labeled synthetic projections.
 - Responsive light and dark modes.
@@ -90,7 +92,7 @@ Target WCAG 2.2 AA with keyboard operation, visible focus, reduced motion, seman
 ## Explicitly Inferred Decisions
 
 - Initial tenant: one synthetic organization, schema ready for multiple tenants.
-- Initial telemetry: normalized CRUD and seed events rather than a live collector.
+- Initial telemetry: native GitHub and OTLP HTTP/JSON receivers plus a normalized generic/Grafana webhook; binary OTLP and vendor OAuth apps remain future extensions.
 - Replay: deterministic simulation over stored events, not execution against customer infrastructure.
-- Integrations: this version models normalized evidence; production connectors to observability and deployment systems remain future work.
+- Integrations: receivers are intentionally push-based so they run on the existing free API service without polling workers or paid queues.
 - Surface mode: Operate.

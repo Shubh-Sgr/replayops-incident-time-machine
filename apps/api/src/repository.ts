@@ -2,13 +2,15 @@ import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import { config } from "./config.js";
 import { seedActivities, seedDashboardSeries, seedIncidents, seedReplayRuns } from "./seed.js";
-import type { Activity, DashboardData, Incident, IncidentDecision, IncidentEvent, ReplayConfig, ReplayProjection, ReplayResult, ReplayRun, SearchResult } from "./types.js";
+import type { Activity, DashboardData, Incident, IncidentDecision, IncidentEvent, IngestionBatch, IngestionResult, Integration, IntegrationDelivery, IntegrationProvider, IntegrationTarget, NormalizedSignal, ReplayConfig, ReplayProjection, ReplayResult, ReplayRun, SearchResult } from "./types.js";
 
 export type IncidentInput = Omit<Incident, "id" | "code" | "createdAt" | "updatedAt" | "events">;
 export type EventInput = Omit<IncidentEvent, "id" | "incidentId">;
 export type DecisionInput = Pick<IncidentDecision, "kind" | "status" | "title" | "detail">;
+export type IntegrationInput = { name: string; provider: IntegrationProvider };
 
 export interface Repository {
+  initialize(): Promise<void>;
   dashboard(userId: string): Promise<DashboardData>;
   listIncidents(userId: string): Promise<Incident[]>;
   getIncident(userId: string, id: string): Promise<Incident | null>;
@@ -22,6 +24,11 @@ export interface Repository {
   createDecision(userId: string, incidentId: string, input: DecisionInput): Promise<IncidentDecision | null>;
   runReplay(userId: string, incidentId: string, config: ReplayConfig): Promise<ReplayResult | null>;
   search(userId: string, query: string, embedding?: number[]): Promise<SearchResult[]>;
+  listIntegrations(userId: string): Promise<Integration[]>;
+  createIntegration(userId: string, input: IntegrationInput): Promise<Integration>;
+  deleteIntegration(userId: string, integrationId: string): Promise<boolean>;
+  getIntegrationTarget(integrationId: string): Promise<IntegrationTarget | null>;
+  ingest(integration: IntegrationTarget, batch: IngestionBatch): Promise<IngestionResult>;
 }
 
 const clone = <T>(value: T): T => structuredClone(value);
@@ -69,6 +76,11 @@ export class MemoryRepository implements Repository {
   private incidents = clone(seedIncidents);
   private decisions: IncidentDecision[] = [];
   private replayRuns = clone(seedReplayRuns);
+  private integrations: Integration[] = [];
+  private deliveries = new Set<string>();
+  private bufferedSignals: Array<NormalizedSignal & { integrationId: string; incidentId?: string }> = [];
+
+  async initialize() {}
 
   async dashboard(_userId: string): Promise<DashboardData> {
     return { incidents: clone(this.incidents), activities: clone(seedActivities), replayRuns: clone(this.replayRuns), ...clone(seedDashboardSeries) };
@@ -150,7 +162,90 @@ export class MemoryRepository implements Repository {
       return { incident: clone(incident), score: tokens.length ? matches / tokens.length : 0, matchReason: matches ? `${matches} query signal${matches === 1 ? "" : "s"} matched incident evidence` : "Related operational history" };
     }).filter((result) => result.score > 0).sort((a, b) => b.score - a.score).slice(0, 6);
   }
+  async listIntegrations(_userId: string) {
+    return clone(this.integrations);
+  }
+  async createIntegration(_userId: string, input: IntegrationInput) {
+    const integration: Integration = {
+      id: randomUUID(), name: input.name, provider: input.provider, status: "active", createdAt: new Date().toISOString(),
+      lastDeliveryAt: null, lastDeliveryStatus: null, signalCount: 0, deliveries: []
+    };
+    this.integrations.unshift(integration);
+    return clone(integration);
+  }
+  async deleteIntegration(_userId: string, integrationId: string) {
+    const before = this.integrations.length;
+    this.integrations = this.integrations.filter((integration) => integration.id !== integrationId);
+    this.bufferedSignals = this.bufferedSignals.filter((signal) => signal.integrationId !== integrationId);
+    return this.integrations.length < before;
+  }
+  async getIntegrationTarget(integrationId: string) {
+    const integration = this.integrations.find((item) => item.id === integrationId);
+    return integration ? { id: integration.id, organizationId: "demo-organization", name: integration.name, provider: integration.provider, status: integration.status } : null;
+  }
+  async ingest(integration: IntegrationTarget, batch: IngestionBatch) {
+    const deliveryKey = `${integration.id}:${batch.externalId}`;
+    if (this.deliveries.has(deliveryKey)) return { status: "duplicate", acceptedSignals: 0, incidentIds: [] } satisfies IngestionResult;
+    this.deliveries.add(deliveryKey);
+    const incidentIds = new Set<string>();
+    let acceptedSignals = 0;
+    for (const signal of batch.signals) {
+      if (this.bufferedSignals.some((item) => item.integrationId === integration.id && item.externalId === signal.externalId)) continue;
+      const buffered: NormalizedSignal & { integrationId: string; incidentId?: string } = { ...signal, integrationId: integration.id };
+      this.bufferedSignals.push(buffered);
+      acceptedSignals += 1;
+      let incident = signal.correlationKey
+        ? this.incidents.find((item) => item.status !== "resolved" && item.events.some((event) => event.metadata?.correlationKey === signal.correlationKey))
+        : undefined;
+      incident ??= this.incidents.find((item) => item.status !== "resolved" && item.service === signal.service && Math.abs(new Date(item.startedAt).getTime() - new Date(signal.timestamp).getTime()) <= 7_200_000);
+      if (!incident && (signal.kind === "alert" || signal.impactScore >= 65)) {
+        const now = new Date().toISOString();
+        incident = {
+          id: randomUUID(), code: `AUTO-${String(Date.now()).slice(-6)}`, title: signal.title,
+          summary: `Automatically opened from ${integration.name} after ${signal.service} crossed the incident threshold.`,
+          service: signal.service, severity: signal.severity, status: "investigating", owner: "Automation",
+          startedAt: signal.timestamp, resolvedAt: null, createdAt: now, updatedAt: now, events: []
+        };
+        this.incidents.unshift(incident);
+        const triggerTime = new Date(signal.timestamp).getTime();
+        for (const precursor of this.bufferedSignals.filter((item) => !item.incidentId && item.service === signal.service && new Date(item.timestamp).getTime() >= triggerTime - 1_800_000 && new Date(item.timestamp).getTime() <= triggerTime)) {
+          precursor.incidentId = incident.id;
+          incident.events.push(signalToEvent(incident.id, precursor));
+        }
+      }
+      if (incident && !buffered.incidentId) {
+        buffered.incidentId = incident.id;
+        if (!incident.events.some((event) => event.metadata?.sourceExternalId === signal.externalId)) incident.events.push(signalToEvent(incident.id, signal));
+      }
+      if (incident) {
+        incident.events.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+        incident.updatedAt = new Date().toISOString();
+        if (signal.kind === "recovery") incident.status = "monitoring";
+        incidentIds.add(incident.id);
+      }
+    }
+    const now = new Date().toISOString();
+    const storedIntegration = this.integrations.find((item) => item.id === integration.id);
+    if (storedIntegration) {
+      const delivery: IntegrationDelivery = { id: randomUUID(), integrationId: integration.id, externalId: batch.externalId, status: "accepted", signalCount: acceptedSignals, incidentIds: [...incidentIds], receivedAt: now };
+      storedIntegration.lastDeliveryAt = now;
+      storedIntegration.lastDeliveryStatus = "accepted";
+      storedIntegration.signalCount += acceptedSignals;
+      storedIntegration.deliveries.unshift(delivery);
+      storedIntegration.deliveries = storedIntegration.deliveries.slice(0, 8);
+    }
+    return { status: "accepted", acceptedSignals, incidentIds: [...incidentIds] } satisfies IngestionResult;
+  }
 }
+
+const signalToEvent = (incidentId: string, signal: NormalizedSignal): IncidentEvent => ({
+  id: randomUUID(), incidentId, timestamp: signal.timestamp, service: signal.service, kind: signal.kind,
+  title: signal.title, detail: signal.detail, impactScore: signal.impactScore,
+  metadata: {
+    ...signal.metadata, sourceExternalId: signal.externalId, correlationKey: signal.correlationKey,
+    traceId: signal.traceId, sourceUrl: signal.sourceUrl, environment: signal.environment, automated: true
+  }
+});
 
 type Row = Record<string, unknown>;
 const mapEvent = (row: Row): IncidentEvent => ({
@@ -185,11 +280,79 @@ const mapReplayRun = (row: Row): ReplayRun => ({
   status: row.status as ReplayRun["status"], progress: Number(row.progress),
   createdAt: new Date(String(row.created_at)).toISOString()
 });
+const mapDelivery = (row: Row): IntegrationDelivery => ({
+  id: String(row.id), integrationId: String(row.integration_id), externalId: String(row.external_id),
+  status: row.status as IntegrationDelivery["status"], signalCount: Number(row.signal_count),
+  incidentIds: Array.isArray(row.incident_ids) ? row.incident_ids.map(String) : [],
+  error: row.error ? String(row.error) : null, receivedAt: new Date(String(row.received_at)).toISOString()
+});
+const mapIntegration = (row: Row, deliveries: IntegrationDelivery[] = []): Integration => ({
+  id: String(row.id), name: String(row.name), provider: row.provider as Integration["provider"],
+  status: row.status as Integration["status"], createdAt: new Date(String(row.created_at)).toISOString(),
+  lastDeliveryAt: row.last_delivery_at ? new Date(String(row.last_delivery_at)).toISOString() : null,
+  lastDeliveryStatus: row.last_delivery_status ? row.last_delivery_status as IntegrationDelivery["status"] : null,
+  signalCount: Number(row.signal_count ?? 0), deliveries
+});
 
 class PostgresRepository implements Repository {
   private pool: Pool;
   constructor(connectionString: string) {
     this.pool = new Pool({ connectionString, ssl: connectionString.includes("localhost") ? false : { rejectUnauthorized: false }, max: 6 });
+  }
+  async initialize() {
+    await this.pool.query(`
+      create table if not exists integrations (
+        id uuid primary key default gen_random_uuid(),
+        organization_id uuid not null references organizations(id) on delete cascade,
+        created_by uuid references auth.users(id) on delete set null,
+        name text not null,
+        provider text not null check (provider in ('github', 'otel', 'generic')),
+        status text not null default 'active' check (status in ('active', 'paused')),
+        last_delivery_at timestamptz,
+        last_delivery_status text check (last_delivery_status in ('accepted', 'duplicate', 'rejected', 'failed')),
+        signal_count integer not null default 0 check (signal_count >= 0),
+        created_at timestamptz not null default now(),
+        updated_at timestamptz not null default now()
+      );
+      create table if not exists ingestion_deliveries (
+        id uuid primary key default gen_random_uuid(),
+        integration_id uuid not null references integrations(id) on delete cascade,
+        external_id text not null,
+        status text not null check (status in ('accepted', 'duplicate', 'rejected', 'failed')),
+        signal_count integer not null default 0,
+        incident_ids uuid[] not null default '{}',
+        error text,
+        received_at timestamptz not null default now(),
+        unique (integration_id, external_id)
+      );
+      create table if not exists ingestion_signals (
+        id uuid primary key default gen_random_uuid(),
+        integration_id uuid not null references integrations(id) on delete cascade,
+        external_id text not null,
+        occurred_at timestamptz not null,
+        service text not null,
+        kind text not null check (kind in ('alert', 'deploy', 'dependency', 'metric', 'action', 'recovery')),
+        title text not null,
+        detail text not null,
+        impact_score integer not null check (impact_score between 0 and 100),
+        severity text not null check (severity in ('critical', 'high', 'medium', 'low')),
+        correlation_key text,
+        trace_id text,
+        source_url text,
+        environment text,
+        metadata jsonb not null default '{}'::jsonb,
+        incident_id uuid references incidents(id) on delete set null,
+        created_at timestamptz not null default now(),
+        unique (integration_id, external_id)
+      );
+      create index if not exists integrations_org_idx on integrations(organization_id, created_at desc);
+      create index if not exists ingestion_deliveries_source_idx on ingestion_deliveries(integration_id, received_at desc);
+      create index if not exists ingestion_signals_match_idx on ingestion_signals(service, occurred_at desc) where incident_id is null;
+      create index if not exists ingestion_signals_correlation_idx on ingestion_signals(correlation_key) where correlation_key is not null;
+      alter table integrations enable row level security;
+      alter table ingestion_deliveries enable row level security;
+      alter table ingestion_signals enable row level security;
+    `);
   }
   private async hydrated(userId: string, where = "", values: unknown[] = []) {
     const incidentResult = await this.pool.query(
@@ -391,6 +554,186 @@ class PostgresRepository implements Repository {
       );
     const hydrated = await Promise.all((result.rows as Row[]).map((row) => this.getIncident(userId, String(row.id))));
     return hydrated.flatMap((incident, index) => incident ? [{ incident, score: Number((result.rows[index] as Row | undefined)?.score ?? 0), matchReason: embedding ? "Semantic similarity across incident evidence" : "Full-text match across incident evidence" }] : []);
+  }
+  async listIntegrations(userId: string) {
+    const integrations = await this.pool.query(
+      `select x.* from integrations x
+       where exists (select 1 from organization_members m where m.organization_id = x.organization_id and m.user_id = $1)
+       order by x.created_at desc`,
+      [userId]
+    );
+    if (!integrations.rows.length) return [];
+    const ids = integrations.rows.map((row: Row) => row.id);
+    const deliveries = await this.pool.query(
+      `select * from (
+         select d.*, row_number() over (partition by d.integration_id order by d.received_at desc) as row_number
+         from ingestion_deliveries d where d.integration_id = any($1::uuid[])
+       ) ranked where row_number <= 8 order by received_at desc`,
+      [ids]
+    );
+    const grouped = new Map<string, IntegrationDelivery[]>();
+    for (const row of deliveries.rows as Row[]) {
+      const delivery = mapDelivery(row);
+      grouped.set(delivery.integrationId, [...(grouped.get(delivery.integrationId) ?? []), delivery]);
+    }
+    return (integrations.rows as Row[]).map((row) => mapIntegration(row, grouped.get(String(row.id)) ?? []));
+  }
+  async createIntegration(userId: string, input: IntegrationInput) {
+    const result = await this.pool.query(
+      `insert into integrations (organization_id, created_by, name, provider)
+       select m.organization_id, $1, $2, $3 from organization_members m
+       where m.user_id = $1 and m.role in ('admin', 'responder')
+       order by m.created_at limit 1 returning *`,
+      [userId, input.name, input.provider]
+    );
+    const row = result.rows[0] as Row | undefined;
+    if (!row) throw new Error("A responder workspace is required before a connector can be created.");
+    return mapIntegration(row);
+  }
+  async deleteIntegration(userId: string, integrationId: string) {
+    return (await this.pool.query(
+      `delete from integrations x where x.id = $2
+       and exists (
+         select 1 from organization_members m
+         where m.organization_id = x.organization_id and m.user_id = $1 and m.role in ('admin', 'responder')
+       )`,
+      [userId, integrationId]
+    )).rowCount === 1;
+  }
+  async getIntegrationTarget(integrationId: string) {
+    const result = await this.pool.query("select id, organization_id, name, provider, status from integrations where id = $1", [integrationId]);
+    const row = result.rows[0] as Row | undefined;
+    return row ? {
+      id: String(row.id), organizationId: String(row.organization_id), name: String(row.name),
+      provider: row.provider as IntegrationTarget["provider"], status: row.status as IntegrationTarget["status"]
+    } : null;
+  }
+  async ingest(integration: IntegrationTarget, batch: IngestionBatch) {
+    const client = await this.pool.connect();
+    try {
+      await client.query("begin");
+      const delivery = await client.query(
+        `insert into ingestion_deliveries (integration_id, external_id, status, signal_count)
+         values ($1, $2, 'accepted', 0)
+         on conflict (integration_id, external_id) do nothing returning id`,
+        [integration.id, batch.externalId]
+      );
+      if (!delivery.rowCount) {
+        await client.query("rollback");
+        return { status: "duplicate", acceptedSignals: 0, incidentIds: [] } satisfies IngestionResult;
+      }
+
+      const incidentIds = new Set<string>();
+      let acceptedSignals = 0;
+      for (const signal of batch.signals) {
+        const insertedSignal = await client.query(
+          `insert into ingestion_signals (
+             integration_id, external_id, occurred_at, service, kind, title, detail, impact_score, severity,
+             correlation_key, trace_id, source_url, environment, metadata
+           ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+           on conflict (integration_id, external_id) do nothing returning id`,
+          [integration.id, signal.externalId, signal.timestamp, signal.service, signal.kind, signal.title, signal.detail,
+            signal.impactScore, signal.severity, signal.correlationKey ?? null, signal.traceId ?? null,
+            signal.sourceUrl ?? null, signal.environment ?? null, signal.metadata]
+        );
+        if (!insertedSignal.rowCount) continue;
+        acceptedSignals += 1;
+        const signalId = String((insertedSignal.rows[0] as Row).id);
+
+        const match = await client.query(
+          `select i.id from incidents i
+           where i.organization_id = $1 and i.status <> 'resolved'
+           and (
+             ($2::text is not null and exists (
+               select 1 from ingestion_signals prior where prior.incident_id = i.id and prior.correlation_key = $2
+             ))
+             or (i.service = $3 and i.started_at between $4::timestamptz - interval '2 hours' and $4::timestamptz + interval '2 hours')
+           )
+           order by
+             case when $2::text is not null and exists (
+               select 1 from ingestion_signals prior where prior.incident_id = i.id and prior.correlation_key = $2
+             ) then 0 else 1 end,
+             i.started_at desc limit 1`,
+          [integration.organizationId, signal.correlationKey ?? null, signal.service, signal.timestamp]
+        );
+        let incidentId = match.rows[0] ? String((match.rows[0] as Row).id) : undefined;
+
+        if (!incidentId && (signal.kind === "alert" || signal.impactScore >= 65)) {
+          const code = `AUTO-${new Date(signal.timestamp).toISOString().slice(5, 16).replace(/[-T:]/g, "")}-${randomUUID().slice(0, 4).toUpperCase()}`;
+          const created = await client.query(
+            `insert into incidents (organization_id, code, title, summary, service, severity, status, owner, started_at)
+             values ($1,$2,$3,$4,$5,$6,'investigating','Automation',$7) returning id`,
+            [integration.organizationId, code, signal.title,
+              `Automatically opened from ${integration.name} after ${signal.service} crossed the incident threshold.`,
+              signal.service, signal.severity, signal.timestamp]
+          );
+          incidentId = String((created.rows[0] as Row).id);
+          await client.query(
+            `update ingestion_signals s set incident_id = $1
+             where s.incident_id is null and s.occurred_at between $2::timestamptz - interval '30 minutes' and $2::timestamptz + interval '5 minutes'
+             and (s.service = $3 or ($4::text is not null and s.correlation_key = $4))
+             and exists (select 1 from integrations x where x.id = s.integration_id and x.organization_id = $5)`,
+            [incidentId, signal.timestamp, signal.service, signal.correlationKey ?? null, integration.organizationId]
+          );
+          await client.query(
+            `insert into incident_events (incident_id, timestamp, service, kind, title, detail, impact_score, metadata)
+             select $1, s.occurred_at, s.service, s.kind, s.title, s.detail, s.impact_score,
+               s.metadata || jsonb_strip_nulls(jsonb_build_object(
+                 'sourceExternalId', s.external_id, 'correlationKey', s.correlation_key, 'traceId', s.trace_id,
+                 'sourceUrl', s.source_url, 'environment', s.environment, 'automated', true
+               ))
+             from ingestion_signals s where s.incident_id = $1
+             and not exists (
+               select 1 from incident_events e where e.incident_id = $1 and e.metadata->>'sourceExternalId' = s.external_id
+             )`,
+            [incidentId]
+          );
+        } else if (incidentId) {
+          await client.query("update ingestion_signals set incident_id = $1 where id = $2", [incidentId, signalId]);
+          await client.query(
+            `insert into incident_events (incident_id, timestamp, service, kind, title, detail, impact_score, metadata)
+             values ($1,$2,$3,$4,$5,$6,$7,$8)`,
+            [incidentId, signal.timestamp, signal.service, signal.kind, signal.title, signal.detail, signal.impactScore, {
+              ...signal.metadata, sourceExternalId: signal.externalId, correlationKey: signal.correlationKey,
+              traceId: signal.traceId, sourceUrl: signal.sourceUrl, environment: signal.environment, automated: true
+            }]
+          );
+        }
+
+        if (incidentId) {
+          incidentIds.add(incidentId);
+          await client.query(
+            `update incidents set updated_at = now(), status = case when $2 = 'recovery' then 'monitoring' else status end where id = $1`,
+            [incidentId, signal.kind]
+          );
+        }
+      }
+
+      const incidentIdList = [...incidentIds];
+      await client.query(
+        `update ingestion_deliveries set signal_count = $2, incident_ids = $3::uuid[] where integration_id = $1 and external_id = $4`,
+        [integration.id, acceptedSignals, incidentIdList, batch.externalId]
+      );
+      await client.query(
+        `update integrations set last_delivery_at = now(), last_delivery_status = 'accepted',
+         signal_count = signal_count + $2, updated_at = now() where id = $1`,
+        [integration.id, acceptedSignals]
+      );
+      if (incidentIdList[0]) {
+        await client.query(
+          `insert into incident_activities (organization_id, incident_id, actor, action, detail, timestamp)
+           values ($1,$2,'Connector','ingested automated evidence',$3,now())`,
+          [integration.organizationId, incidentIdList[0], `${integration.name} accepted ${acceptedSignals} signal${acceptedSignals === 1 ? "" : "s"}; ${incidentIdList.length} incident${incidentIdList.length === 1 ? "" : "s"} matched.`]
+        );
+      }
+      await client.query("commit");
+      return { status: "accepted", acceptedSignals, incidentIds: incidentIdList } satisfies IngestionResult;
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 }
 

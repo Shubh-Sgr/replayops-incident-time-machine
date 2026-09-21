@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { Activity, Bell, Bot, CircleUserRound, Gauge, LogOut, Menu, Moon, Search, Sun, X } from "lucide-react";
+import { Activity, Bell, Bot, CircleUserRound, Gauge, LogOut, Menu, Moon, RadioTower, Search, Sun, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { cn } from "../lib/utils";
@@ -10,7 +10,8 @@ import { CommandSearch } from "./CommandSearch";
 
 const navigation = [
   { to: "/", label: "Operations", icon: Gauge, end: true },
-  { to: "/incidents", label: "Incidents", icon: Activity, end: false }
+  { to: "/incidents", label: "Incidents", icon: Activity, end: false },
+  { to: "/integrations", label: "Connectors", icon: RadioTower, end: false }
 ];
 
 export function AppShell() {

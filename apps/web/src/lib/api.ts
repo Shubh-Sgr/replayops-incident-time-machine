@@ -1,5 +1,5 @@
 import { supabase } from "./supabase";
-import type { AssistantResponse, DashboardData, Incident, IncidentDecision, IncidentDiagnosis, IncidentEvent, ReplayConfig, ReplayResult, SearchResult } from "../types";
+import type { AssistantResponse, DashboardData, Incident, IncidentDecision, IncidentDiagnosis, IncidentEvent, IngestionResult, Integration, IntegrationProvider, ReplayConfig, ReplayResult, SearchResult } from "../types";
 
 const API_URL = (import.meta.env.VITE_API_URL ?? "http://localhost:8787/api").replace(/\/$/, "");
 
@@ -41,5 +41,9 @@ export const api = {
   createDecision: (incidentId: string, decision: Pick<IncidentDecision, "kind" | "status" | "title" | "detail">) => request<IncidentDecision>(`/incidents/${incidentId}/decisions`, { method: "POST", body: JSON.stringify(decision) }),
   runReplay: (incidentId: string, config: ReplayConfig) => request<ReplayResult>(`/incidents/${incidentId}/replays`, { method: "POST", body: JSON.stringify(config) }),
   search: (query: string) => request<SearchResult[]>("/search", { method: "POST", body: JSON.stringify({ query }) }),
-  ask: (question: string, incidentId?: string) => request<AssistantResponse>("/assistant", { method: "POST", body: JSON.stringify({ question, incidentId }) })
+  ask: (question: string, incidentId?: string) => request<AssistantResponse>("/assistant", { method: "POST", body: JSON.stringify({ question, incidentId }) }),
+  integrations: () => request<Integration[]>("/integrations"),
+  createIntegration: (input: { name: string; provider: IntegrationProvider }) => request<Integration>("/integrations", { method: "POST", body: JSON.stringify(input) }),
+  deleteIntegration: (id: string) => request<void>(`/integrations/${id}`, { method: "DELETE" }),
+  testIntegration: (id: string) => request<IngestionResult>(`/integrations/${id}/test`, { method: "POST" })
 };

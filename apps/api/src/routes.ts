@@ -1,9 +1,13 @@
-import { Router } from "express";
+import { randomUUID } from "node:crypto";
+import { Router, type Request } from "express";
 import { z } from "zod";
 import { answerQuestion, embedText } from "./ai.js";
 import type { AuthenticatedRequest } from "./auth.js";
 import { diagnoseIncident } from "./diagnosis.js";
+import { config } from "./config.js";
+import { deriveIntegrationToken } from "./ingestion.js";
 import { repository } from "./repository.js";
+import type { Integration } from "./types.js";
 
 const severity = z.enum(["critical", "high", "medium", "low"]);
 const status = z.enum(["investigating", "identified", "monitoring", "resolved"]);
@@ -44,6 +48,10 @@ const replaySchema = z.object({
   concurrencyCap: z.number().int().min(5).max(50),
   timeoutMs: z.number().int().min(500).max(5000)
 });
+const integrationSchema = z.object({
+  name: z.string().min(3).max(80),
+  provider: z.enum(["github", "otel", "generic"])
+});
 
 const parseOrReply = <T>(schema: z.ZodSchema<T>, value: unknown) => {
   const result = schema.safeParse(value);
@@ -57,6 +65,21 @@ export const apiRouter = Router();
 const userId = (req: AuthenticatedRequest) => {
   if (!req.user) throw new Error("Authenticated request context is missing.");
   return req.user.id;
+};
+
+const integrationView = (req: Request, integration: Integration) => {
+  const origin = config.publicApiUrl ?? `${req.protocol}://${req.get("host")}`;
+  const endpoint = `${origin}/ingest/${integration.id}`;
+  const token = deriveIntegrationToken(integration.id);
+  return {
+    ...integration,
+    connector: {
+      endpoint,
+      token,
+      githubSecret: integration.provider === "github" ? token : undefined,
+      otlpHeaders: integration.provider === "otel" ? `x-replayops-token=${token}` : undefined
+    }
+  };
 };
 
 apiRouter.get("/dashboard", async (req, res) => {
@@ -220,4 +243,54 @@ apiRouter.post("/assistant", async (req, res) => {
     }
   }
   res.json(await answerQuestion(parsed.data.question, evidence));
+});
+
+apiRouter.get("/integrations", async (req, res) => {
+  const integrations = await repository.listIntegrations(userId(req));
+  res.json(integrations.map((integration) => integrationView(req, integration)));
+});
+
+apiRouter.post("/integrations", async (req, res) => {
+  const parsed = parseOrReply(integrationSchema, req.body);
+  if ("error" in parsed) {
+    res.status(400).json(parsed);
+    return;
+  }
+  const integration = await repository.createIntegration(userId(req), parsed.data);
+  res.status(201).json(integrationView(req, integration));
+});
+
+apiRouter.delete("/integrations/:id", async (req, res) => {
+  const deleted = await repository.deleteIntegration(userId(req), req.params.id);
+  if (!deleted) {
+    res.status(404).json({ error: "Connector not found." });
+    return;
+  }
+  res.status(204).send();
+});
+
+apiRouter.post("/integrations/:id/test", async (req, res) => {
+  const owned = (await repository.listIntegrations(userId(req))).find((integration) => integration.id === req.params.id);
+  if (!owned) {
+    res.status(404).json({ error: "Connector not found." });
+    return;
+  }
+  const target = await repository.getIntegrationTarget(owned.id);
+  if (!target) {
+    res.status(404).json({ error: "Connector not found." });
+    return;
+  }
+  const deliveryId = `test-${randomUUID()}`;
+  const result = await repository.ingest(target, {
+    externalId: deliveryId,
+    signals: [{
+      externalId: `${deliveryId}:signal`, timestamp: new Date().toISOString(), service: "checkout-probe",
+      kind: "alert", title: "Synthetic checkout probe crossed the error threshold",
+      detail: "ReplayOps generated this labeled test signal to verify authentication, normalization, incident creation, and evidence attachment.",
+      impactScore: 82, severity: "high", correlationKey: deliveryId,
+      sourceUrl: `${config.publicApiUrl ?? `${req.protocol}://${req.get("host")}`}/health`,
+      environment: "integration-test", metadata: { synthetic: true, provider: owned.provider }
+    }]
+  });
+  res.status(202).json(result);
 });

@@ -3,6 +3,8 @@ export type IncidentStatus = "investigating" | "identified" | "monitoring" | "re
 export type EventKind = "alert" | "deploy" | "dependency" | "metric" | "action" | "recovery";
 export type DecisionKind = "hypothesis" | "mitigation" | "communication";
 export type DecisionStatus = "proposed" | "approved" | "rejected";
+export type IntegrationProvider = "github" | "otel" | "generic";
+export type IntegrationStatus = "active" | "paused";
 
 export interface IncidentEvent {
   id: string;
@@ -139,4 +141,62 @@ export interface SearchResult {
   incident: Incident;
   score: number;
   matchReason: string;
+}
+
+export interface IntegrationDelivery {
+  id: string;
+  integrationId: string;
+  externalId: string;
+  status: "accepted" | "duplicate" | "rejected" | "failed";
+  signalCount: number;
+  incidentIds: string[];
+  error?: string | null;
+  receivedAt: string;
+}
+
+export interface Integration {
+  id: string;
+  name: string;
+  provider: IntegrationProvider;
+  status: IntegrationStatus;
+  createdAt: string;
+  lastDeliveryAt?: string | null;
+  lastDeliveryStatus?: IntegrationDelivery["status"] | null;
+  signalCount: number;
+  deliveries: IntegrationDelivery[];
+}
+
+export interface IntegrationTarget {
+  id: string;
+  organizationId: string;
+  name: string;
+  provider: IntegrationProvider;
+  status: IntegrationStatus;
+}
+
+export interface NormalizedSignal {
+  externalId: string;
+  timestamp: string;
+  service: string;
+  kind: EventKind;
+  title: string;
+  detail: string;
+  impactScore: number;
+  severity: Severity;
+  correlationKey?: string;
+  traceId?: string;
+  sourceUrl?: string;
+  environment?: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface IngestionBatch {
+  externalId: string;
+  signals: NormalizedSignal[];
+}
+
+export interface IngestionResult {
+  status: "accepted" | "duplicate";
+  acceptedSignals: number;
+  incidentIds: string[];
 }

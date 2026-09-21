@@ -3,6 +3,7 @@ export type IncidentStatus = "investigating" | "identified" | "monitoring" | "re
 export type EventKind = "alert" | "deploy" | "dependency" | "metric" | "action" | "recovery";
 export type DecisionKind = "hypothesis" | "mitigation" | "communication";
 export type DecisionStatus = "proposed" | "approved" | "rejected";
+export type IntegrationProvider = "github" | "otel" | "generic";
 
 export interface IncidentEvent {
   id: string;
@@ -132,4 +133,39 @@ export interface AssistantResponse {
   citations: Array<{ code: string; title: string; incidentId: string }>;
   confidence: number;
   mode: "deterministic" | "provider";
+}
+
+export interface IntegrationDelivery {
+  id: string;
+  integrationId: string;
+  externalId: string;
+  status: "accepted" | "duplicate" | "rejected" | "failed";
+  signalCount: number;
+  incidentIds: string[];
+  error?: string | null;
+  receivedAt: string;
+}
+
+export interface Integration {
+  id: string;
+  name: string;
+  provider: IntegrationProvider;
+  status: "active" | "paused";
+  createdAt: string;
+  lastDeliveryAt?: string | null;
+  lastDeliveryStatus?: IntegrationDelivery["status"] | null;
+  signalCount: number;
+  deliveries: IntegrationDelivery[];
+  connector: {
+    endpoint: string;
+    token: string;
+    githubSecret?: string;
+    otlpHeaders?: string;
+  };
+}
+
+export interface IngestionResult {
+  status: "accepted" | "duplicate";
+  acceptedSignals: number;
+  incidentIds: string[];
 }

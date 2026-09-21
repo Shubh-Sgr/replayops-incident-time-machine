@@ -12,5 +12,7 @@ export const config = {
   openAiKey: process.env.OPENAI_API_KEY,
   openAiBaseUrl: process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1",
   chatModel: process.env.OPENAI_CHAT_MODEL ?? "gpt-4o-mini",
-  embeddingModel: process.env.OPENAI_EMBEDDING_MODEL ?? "text-embedding-3-small"
+  embeddingModel: process.env.OPENAI_EMBEDDING_MODEL ?? "text-embedding-3-small",
+  publicApiUrl: process.env.PUBLIC_API_URL?.replace(/\/$/, ""),
+  ingestionSigningSecret: process.env.INGESTION_SIGNING_SECRET
 };

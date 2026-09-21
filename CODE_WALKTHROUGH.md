@@ -166,7 +166,7 @@ The frontend sends the Supabase access token to the API. Local demo mode sends t
 
 `apps/web/src/pages/IncidentWorkbenchPage.tsx` composes the debugging experience:
 
-1. Incident identity, severity, status, owner, and duration.
+1. Automatically ingested or manually created incident identity, severity, status, owner, and duration.
 2. `CausalTrace`, which shows evidence across services and time.
 3. `ResponseConsole`, which owns diagnosis, decisions, replay, and handoff.
 4. The editable evidence ledger.
@@ -203,6 +203,11 @@ Diagnosis is intentionally the default. A responder should see “what should I 
 | `POST` | `/api/incidents/:id/replays` | Run and persist a mitigation replay |
 | `POST` | `/api/search` | Semantic or full-text incident search |
 | `POST` | `/api/assistant` | Evidence-grounded assistant response |
+| `GET/POST` | `/api/integrations` | List or create signed evidence receivers |
+| `DELETE` | `/api/integrations/:id` | Remove a receiver while preserving copied incident evidence |
+| `POST` | `/api/integrations/:id/test` | Run a labeled end-to-end ingestion test |
+| `POST` | `/ingest/:id` | Receive signed GitHub or generic webhook deliveries |
+| `POST` | `/ingest/:id/v1/:signal` | Receive OTLP HTTP/JSON traces, logs, and metrics |
 
 ### Repository abstraction
 
@@ -265,6 +270,9 @@ The production schema is in `apps/api/db/schema.sql`.
 | `replay_runs` | Stored replay execution summaries |
 | `service_health_snapshots` | Current service indicators |
 | `event_volume_samples` | Request/error time series |
+| `integrations` | Workspace-owned GitHub, OTLP, and generic receivers |
+| `ingestion_deliveries` | Idempotency and connector delivery health |
+| `ingestion_signals` | Normalized evidence buffer and incident attachment state |
 
 `pgvector` and an HNSW cosine index support semantic incident search. Row-level security restricts data to organization members. An `auth.users` trigger creates and seeds a private workspace for every new account.
 
@@ -318,7 +326,25 @@ The production schema is in `apps/api/db/schema.sql`.
 
 **Why:** This allowed the deployed feature to remain backward-compatible with existing free-tier data. A dedicated normalized decisions table is appropriate when querying and workflow requirements become more complex.
 
-### Decision 9: Label replay as synthetic
+### Decision 9: Use push-based connectors on the free deployment
+
+**Choice:** Receive signed webhooks and OTLP HTTP/JSON in the existing API instead of running polling workers or a separate message broker.
+
+**Why:** Push delivery works within Vercel, Render, and Supabase free tiers. It also keeps source-system credentials out of ReplayOps. Delivery IDs provide idempotency, while the database acts as a durable evidence buffer.
+
+### Decision 10: Buffer ordinary changes before opening incidents
+
+**Choice:** Store low-impact deployments and metrics without creating an incident. Open one only for an alert or impact score of 65 or higher, then backfill the previous 30 minutes of correlated evidence.
+
+**Why:** Automatically creating an incident for every deploy would replace manual entry with alert noise. Buffering preserves precursor context without overwhelming the incident ledger.
+
+### Decision 11: Derive connector credentials server-side
+
+**Choice:** Derive a unique connector token from one deployment signing secret and the connector ID.
+
+**Why:** No connector secret is committed to GitHub or stored in plaintext in the database. GitHub uses the token as its HMAC secret; generic and OTLP send it as a bearer/custom header.
+
+### Decision 12: Label replay as synthetic
 
 **Choice:** Replay results are estimates and never execute production commands.
 
@@ -341,15 +367,16 @@ Alternatively, create a new account. Supabase provisions a private workspace and
 
 Suggested evaluation flow:
 
-1. Open `ROP-1842` from the dashboard.
-2. Inspect the causal trace and move between evidence events.
-3. In **Diagnose**, compare the ranked hypotheses and confidence blockers.
-4. Select a different hypothesis and inspect its falsification test.
-5. Ask AI to challenge the leading hypothesis.
-6. Open **Decisions** and record a proposed mitigation.
-7. Open **Replay**, change the controls, and run the counterfactual.
-8. Open **Handoff** and copy or download the generated Markdown.
-9. Add or edit evidence and observe the diagnosis update.
+1. Open **Connectors** and create a Generic, GitHub, or OpenTelemetry receiver.
+2. Run the labeled end-to-end test; it automatically creates a synthetic incident.
+3. Return to **Incidents** and open that new incident.
+4. Inspect the automated source metadata and causal trace.
+5. In **Diagnose**, compare the ranked hypotheses and confidence blockers.
+6. Select a different hypothesis and inspect its falsification test.
+7. Ask AI to challenge the leading hypothesis.
+8. Open **Decisions** and record a proposed mitigation.
+9. Open **Replay**, change the controls, and run the counterfactual.
+10. Open **Handoff** and copy or download the generated Markdown.
 
 ### Run locally for free
 
@@ -384,7 +411,8 @@ Required variables are documented in `.env.example`. The frontend needs the publ
 
 The deployed application is fully usable as an interactive portfolio and architecture demonstration, but the following are intentionally not misrepresented as complete production integrations:
 
-- Evidence is entered manually or seeded; native OpenTelemetry, Datadog, Grafana, deployment, and feature-flag connectors are future work.
+- GitHub, OpenTelemetry HTTP/JSON, Grafana, and normalized generic webhooks are implemented. Binary OTLP, Datadog-specific schemas, vendor OAuth installation flows, Kubernetes watches, and feature-flag adapters remain future work.
+- Render's free service can sleep when idle, so the first webhook after inactivity may be delayed while it wakes. A production SLA would require an always-on service tier.
 - The replay engine estimates outcomes; it does not execute a load test or production rollback.
 - AI provider mode requires `OPENAI_API_KEY`; the deployed fallback remains deterministic without it.
 - Decision records currently share the activity table.
