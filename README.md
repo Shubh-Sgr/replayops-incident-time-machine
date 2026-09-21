@@ -1,6 +1,6 @@
 # ReplayOps
 
-ReplayOps is a production-incident time machine. It reconstructs operational evidence into a causal timeline, ranks competing root-cause hypotheses, exposes what evidence is missing, proposes the next safe falsification test, and replays a candidate mitigation against the recorded sequence.
+ReplayOps is a production-incident time machine. It reconstructs operational evidence into a causal timeline, ranks competing root-cause hypotheses, exposes what evidence is missing, proposes the next safe falsification test, and replays a candidate mitigation against the recorded sequence..
 
 It can populate that workbench automatically: signed GitHub webhooks, OTLP HTTP/JSON traces, logs and metrics, Grafana alerts, and normalized generic webhooks are verified, deduplicated, buffered, correlated, and attached to incidents without manual copying.
 
