@@ -62,7 +62,7 @@ Uses the evidence and decision history after an incident to identify recurring s
 
 **Why it matters:** Authentication is not merely a login screen; it is the boundary that protects operational evidence.
 
-**Current limitation:** Invitations use expiring shareable links rather than outbound email, and the newest joined workspace is selected automatically because a workspace switcher is not yet included.
+**Current limitation:** Invitation email requires a configured Resend key and verified sender domain. Without those settings, ReplayOps clearly falls back to a copyable link. The newest joined workspace is selected automatically because a workspace switcher is not yet included.
 
 ### 4.2 Operations dashboard
 
@@ -391,7 +391,7 @@ Incoming deliveries are authenticated, normalized into one evidence model, and d
 
 **User problem:** Real teams need shared workspaces without giving every person permission to change connectors or delete evidence.
 
-**What is live:** Create email-bound links that expire after seven days, accept them only from the matching authenticated account, assign admin/responder/viewer roles, and enforce mutation permissions in the API.
+**What is live:** Send email-bound links that expire after seven days, report provider acceptance or failure, retain a copyable fallback, accept invitations only from the matching authenticated account, assign admin/responder/viewer roles, and enforce mutation permissions in the API.
 
 **Example:** A viewer can inspect a postmortem but cannot rotate connector credentials; a responder can add evidence but cannot delete the organization.
 

@@ -1,7 +1,8 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import { config } from "./config.js";
-import type { AuditEntry, IncidentPolicy, MitigationRequest, ServiceDefinition, TeamInvitation, TeamMember, WorkspaceContext, WorkspaceRole } from "./types.js";
+import { sendInvitationEmail } from "./mailer.js";
+import type { ActionNotification, AuditEntry, HypothesisTest, HypothesisTestStatus, IncidentPolicy, IncidentPostmortem, MitigationRequest, RecoveryVerification, ReplayResult, ServiceDefinition, TeamInvitation, TeamMember, WorkspaceContext, WorkspaceRole } from "./types.js";
 
 type Row = Record<string, unknown>;
 type ServiceInput = Pick<ServiceDefinition, "name" | "ownerTeam" | "tier" | "repositoryUrl" | "runbookUrl" | "dependencies">;
@@ -21,6 +22,9 @@ const mapMember = (row: Row): TeamMember => ({
 });
 const mapInvite = (row: Row): TeamInvitation => ({
   id: String(row.id), email: String(row.email), role: row.role as WorkspaceRole, status: row.status as TeamInvitation["status"],
+  emailDeliveryStatus: (row.email_delivery_status ?? "manual") as TeamInvitation["emailDeliveryStatus"],
+  emailedAt: row.emailed_at ? new Date(String(row.emailed_at)).toISOString() : null,
+  emailLastError: row.email_last_error ? String(row.email_last_error) : null,
   expiresAt: new Date(String(row.expires_at)).toISOString(), createdAt: new Date(String(row.created_at)).toISOString()
 });
 const mapAudit = (row: Row): AuditEntry => ({
@@ -30,7 +34,18 @@ const mapAudit = (row: Row): AuditEntry => ({
 const mapMitigation = (row: Row): MitigationRequest => ({
   id: String(row.id), incidentId: String(row.incident_id), requestedBy: String(row.requested_by), reviewedBy: row.reviewed_by ? String(row.reviewed_by) : null,
   title: String(row.title), action: String(row.action), rollbackPlan: String(row.rollback_plan), status: row.status as MitigationRequest["status"],
+  replayRunId: row.replay_run_id ? String(row.replay_run_id) : "", replayConfig: (row.replay_config ?? { retryCeiling: 0, concurrencyCap: 0, timeoutMs: 0 }) as MitigationRequest["replayConfig"], replayProjection: (row.replay_projection ?? { baselinePeak: 0, projectedPeak: 0, avoidedHighImpactEvents: 0, recoveryGainMinutes: 0, confidence: 0, state: "critical", summary: "Legacy approval created before replay binding was enabled.", signals: [] }) as MitigationRequest["replayProjection"],
+  evidenceVersion: new Date(String(row.evidence_version ?? row.created_at)).toISOString(), stale: !row.replay_run_id || (row.incident_updated_at ? new Date(String(row.incident_updated_at)).toISOString() !== new Date(String(row.evidence_version ?? row.created_at)).toISOString() : false),
   createdAt: new Date(String(row.created_at)).toISOString(), reviewedAt: row.reviewed_at ? new Date(String(row.reviewed_at)).toISOString() : null
+});
+const mapHypothesisTest = (row: Row): HypothesisTest => ({
+  id: String(row.id), incidentId: String(row.incident_id), hypothesisId: String(row.hypothesis_id), title: String(row.title), instruction: String(row.instruction), assignee: String(row.assignee), status: row.status as HypothesisTestStatus, result: String(row.result ?? ""), createdAt: new Date(String(row.created_at)).toISOString(), updatedAt: new Date(String(row.updated_at)).toISOString(), completedAt: row.completed_at ? new Date(String(row.completed_at)).toISOString() : null
+});
+const mapRecovery = (row: Row): RecoveryVerification => ({
+  id: String(row.id), incidentId: String(row.incident_id), metric: String(row.metric), targetValue: Number(row.target_value), baselineValue: Number(row.baseline_value), observedValue: row.observed_value === null || row.observed_value === undefined ? null : Number(row.observed_value), observationMinutes: Number(row.observation_minutes), status: row.status as RecoveryVerification["status"], reason: String(row.reason ?? ""), createdAt: new Date(String(row.created_at)).toISOString(), updatedAt: new Date(String(row.updated_at)).toISOString()
+});
+const mapPostmortem = (row: Row): IncidentPostmortem => ({
+  incidentId: String(row.incident_id), summary: String(row.summary), rootCause: String(row.root_cause), impact: String(row.impact), recovery: String(row.recovery), followUps: String(row.follow_ups), status: row.status as IncidentPostmortem["status"], updatedAt: new Date(String(row.updated_at)).toISOString()
 });
 
 class WorkspaceService {
@@ -44,6 +59,9 @@ class WorkspaceService {
   private memoryInvites: TeamInvitation[] = [];
   private memoryAudit: AuditEntry[] = [];
   private memoryMitigations: MitigationRequest[] = [];
+  private memoryHypothesisTests: HypothesisTest[] = [];
+  private memoryRecoveries: RecoveryVerification[] = [];
+  private memoryPostmortems: IncidentPostmortem[] = [];
 
   constructor() {
     if (config.databaseUrl) this.pool = new Pool({ connectionString: config.databaseUrl, ssl: config.databaseUrl.includes("localhost") ? false : { rejectUnauthorized: false }, max: 3 });
@@ -70,8 +88,17 @@ class WorkspaceService {
       create table if not exists organization_invitations (
         id uuid primary key default gen_random_uuid(), organization_id uuid not null references organizations(id) on delete cascade, email text not null,
         role text not null check (role in ('admin','responder','viewer')), token_hash text not null unique, status text not null default 'pending' check (status in ('pending','accepted','revoked','expired')),
-        expires_at timestamptz not null, created_by uuid, created_at timestamptz not null default now()
+        email_delivery_status text not null default 'manual' check (email_delivery_status in ('sent','manual','failed')),
+        emailed_at timestamptz, email_last_error text, expires_at timestamptz not null, created_by uuid, created_at timestamptz not null default now()
       );
+      alter table organization_invitations add column if not exists email_delivery_status text not null default 'manual';
+      alter table organization_invitations add column if not exists emailed_at timestamptz;
+      alter table organization_invitations add column if not exists email_last_error text;
+      do $$ begin
+        if not exists (select 1 from pg_constraint where conname='organization_invitations_email_delivery_status_check') then
+          alter table organization_invitations add constraint organization_invitations_email_delivery_status_check check (email_delivery_status in ('sent','manual','failed'));
+        end if;
+      end $$;
       create table if not exists workspace_audit_log (
         id uuid primary key default gen_random_uuid(), organization_id uuid not null references organizations(id) on delete cascade,
         actor text not null, action text not null, target_type text not null, target_id text, detail jsonb not null default '{}', created_at timestamptz not null default now()
@@ -81,6 +108,25 @@ class WorkspaceService {
         requested_by text not null, reviewed_by text, title text not null, action text not null, rollback_plan text not null,
         status text not null default 'pending' check (status in ('pending','approved','rejected','executed')), created_at timestamptz not null default now(), reviewed_at timestamptz
       );
+      alter table mitigation_requests add column if not exists replay_run_id uuid references replay_runs(id) on delete restrict;
+      alter table mitigation_requests add column if not exists replay_config jsonb;
+      alter table mitigation_requests add column if not exists replay_projection jsonb;
+      alter table mitigation_requests add column if not exists evidence_version timestamptz;
+      create table if not exists hypothesis_tests (
+        id uuid primary key default gen_random_uuid(), organization_id uuid not null references organizations(id) on delete cascade, incident_id uuid not null references incidents(id) on delete cascade,
+        hypothesis_id text not null, title text not null, instruction text not null, assignee text not null, status text not null default 'planned' check(status in ('planned','running','supported','disproved','inconclusive')),
+        result text not null default '', created_at timestamptz not null default now(), updated_at timestamptz not null default now(), completed_at timestamptz
+      );
+      create table if not exists recovery_verifications (
+        id uuid primary key default gen_random_uuid(), organization_id uuid not null references organizations(id) on delete cascade, incident_id uuid not null references incidents(id) on delete cascade,
+        metric text not null, target_value numeric not null, baseline_value numeric not null, observed_value numeric, observation_minutes integer not null check(observation_minutes between 1 and 10080),
+        status text not null default 'pending' check(status in ('pending','verified','failed')), reason text not null default '', created_at timestamptz not null default now(), updated_at timestamptz not null default now()
+      );
+      create table if not exists incident_postmortems (
+        incident_id uuid primary key references incidents(id) on delete cascade, organization_id uuid not null references organizations(id) on delete cascade,
+        summary text not null default '', root_cause text not null default '', impact text not null default '', recovery text not null default '', follow_ups text not null default '',
+        status text not null default 'draft' check(status in ('draft','published')), updated_at timestamptz not null default now()
+      );
       create index if not exists service_catalog_org_idx on service_catalog(organization_id,name);
       create index if not exists workspace_audit_org_idx on workspace_audit_log(organization_id,created_at desc);
       create index if not exists mitigation_incident_idx on mitigation_requests(incident_id,created_at desc);
@@ -89,6 +135,9 @@ class WorkspaceService {
       alter table organization_invitations enable row level security;
       alter table workspace_audit_log enable row level security;
       alter table mitigation_requests enable row level security;
+      alter table hypothesis_tests enable row level security;
+      alter table recovery_verifications enable row level security;
+      alter table incident_postmortems enable row level security;
     `);
   }
 
@@ -200,13 +249,21 @@ class WorkspaceService {
     const tokenHash = createHash("sha256").update(token).digest("hex");
     let invite: TeamInvitation;
     if (!this.pool) {
-      invite = { id: randomUUID(), email, role, status: "pending", expiresAt: new Date(Date.now() + 7 * 86_400_000).toISOString(), createdAt: new Date().toISOString(), inviteToken: token };
+      invite = { id: randomUUID(), email, role, status: "pending", emailDeliveryStatus: "manual", emailedAt: null, emailLastError: null, expiresAt: new Date(Date.now() + 7 * 86_400_000).toISOString(), createdAt: new Date().toISOString(), inviteToken: token };
       this.memoryInvites.unshift(invite);
     } else {
       const result = await this.pool.query(`insert into organization_invitations(organization_id,email,role,token_hash,expires_at,created_by) values($1,$2,$3,$4,now()+interval '7 days',$5) returning *`, [context.organizationId, email.toLowerCase(), role, tokenHash, userId]);
       invite = { ...mapInvite(result.rows[0] as Row), inviteToken: token };
     }
-    await this.audit(userId, actor, "created invitation", "invitation", invite.id, { email, role });
+    const baseWebUrl = config.publicWebUrl ?? config.webOrigin.split(",")[0]?.trim() ?? "http://localhost:5173";
+    const delivery = await sendInvitationEmail({ invitationId: invite.id, to: invite.email, role, organizationName: context.organizationName, invitedBy: actor, inviteUrl: `${baseWebUrl}/accept-invite?token=${encodeURIComponent(token)}` });
+    invite.emailDeliveryStatus = delivery.status;
+    invite.emailedAt = delivery.status === "sent" ? new Date().toISOString() : null;
+    invite.emailLastError = delivery.error ?? null;
+    if (this.pool) {
+      await this.pool.query(`update organization_invitations set email_delivery_status=$2,emailed_at=case when $2='sent' then now() else null end,email_last_error=$3 where id=$1`, [invite.id, delivery.status, delivery.error ?? null]);
+    }
+    await this.audit(userId, actor, "created invitation", "invitation", invite.id, { email, role, emailDeliveryStatus: delivery.status, providerMessageId: delivery.providerMessageId });
     return invite;
   }
 
@@ -242,17 +299,17 @@ class WorkspaceService {
   async listMitigations(userId: string, incidentId: string) {
     const context = await this.context(userId);
     if (!this.pool) return structuredClone(this.memoryMitigations.filter((item) => item.incidentId === incidentId));
-    return (await this.pool.query(`select * from mitigation_requests where organization_id=$1 and incident_id=$2 order by created_at desc`, [context.organizationId, incidentId])).rows.map(mapMitigation);
+    return (await this.pool.query(`select m.*,i.updated_at as incident_updated_at from mitigation_requests m join incidents i on i.id=m.incident_id where m.organization_id=$1 and m.incident_id=$2 order by m.created_at desc`, [context.organizationId, incidentId])).rows.map(mapMitigation);
   }
 
-  async requestMitigation(userId: string, actor: string, incidentId: string, input: Pick<MitigationRequest, "title" | "action" | "rollbackPlan">) {
+  async requestMitigation(userId: string, actor: string, incidentId: string, input: Pick<MitigationRequest, "title" | "action" | "rollbackPlan"> & { replay: ReplayResult }) {
     const context = await this.assertRole(userId, ["admin", "responder"]);
     let request: MitigationRequest;
     if (!this.pool) {
-      request = { id: randomUUID(), incidentId, requestedBy: actor, title: input.title, action: input.action, rollbackPlan: input.rollbackPlan, status: "pending", createdAt: new Date().toISOString() };
+      request = { id: randomUUID(), incidentId, requestedBy: actor, title: input.title, action: input.action, rollbackPlan: input.rollbackPlan, replayRunId: input.replay.id, replayConfig: input.replay.config, replayProjection: input.replay.projection, evidenceVersion: input.replay.evidenceVersion, stale: false, status: "pending", createdAt: new Date().toISOString() };
       this.memoryMitigations.unshift(request);
     } else {
-      const result = await this.pool.query(`insert into mitigation_requests(organization_id,incident_id,requested_by,title,action,rollback_plan) select $1,i.id,$3,$4,$5,$6 from incidents i where i.id=$2 and i.organization_id=$1 returning *`, [context.organizationId, incidentId, actor, input.title, input.action, input.rollbackPlan]);
+      const result = await this.pool.query(`insert into mitigation_requests(organization_id,incident_id,requested_by,title,action,rollback_plan,replay_run_id,replay_config,replay_projection,evidence_version) select $1,i.id,$3,$4,$5,$6,$7,$8,$9,$10 from incidents i where i.id=$2 and i.organization_id=$1 returning *,null::timestamptz as incident_updated_at`, [context.organizationId, incidentId, actor, input.title, input.action, input.rollbackPlan, input.replay.id, input.replay.config, input.replay.projection, input.replay.evidenceVersion]);
       if (!result.rows[0]) throw new Error("Incident not found in this workspace.");
       request = mapMitigation(result.rows[0] as Row);
     }
@@ -268,12 +325,63 @@ class WorkspaceService {
       if (request?.requestedBy === actor) throw new Error("A mitigation requester cannot approve their own production action.");
       if (request) Object.assign(request, { status, reviewedBy: actor, reviewedAt: new Date().toISOString() });
     } else {
-      const result = await this.pool.query(`update mitigation_requests set status=$3,reviewed_by=$4,reviewed_at=now() where id=$2 and organization_id=$1 and status='pending' and requested_by<>$4 returning *`, [context.organizationId, requestId, status, actor]);
+      const result = await this.pool.query(`update mitigation_requests m set status=$3,reviewed_by=$4,reviewed_at=now() from incidents i where m.id=$2 and m.organization_id=$1 and m.status='pending' and m.requested_by<>$4 and i.id=m.incident_id and i.updated_at=m.evidence_version returning m.*,i.updated_at as incident_updated_at`, [context.organizationId, requestId, status, actor]);
       request = result.rows[0] ? mapMitigation(result.rows[0] as Row) : undefined;
     }
     if (!request) throw new Error("This request is unavailable, already reviewed, or cannot be self-approved.");
     await this.audit(userId, actor, `${status} mitigation`, "mitigation", request.id, { incidentId: request.incidentId });
     return request;
+  }
+
+  async listHypothesisTests(userId: string, incidentId: string) {
+    const context = await this.context(userId);
+    if (!this.pool) return structuredClone(this.memoryHypothesisTests.filter((item) => item.incidentId === incidentId));
+    return (await this.pool.query(`select * from hypothesis_tests where organization_id=$1 and incident_id=$2 order by created_at desc`, [context.organizationId, incidentId])).rows.map(mapHypothesisTest);
+  }
+
+  async createHypothesisTest(userId: string, actor: string, incidentId: string, input: Pick<HypothesisTest, "hypothesisId" | "title" | "instruction" | "assignee">) {
+    const context = await this.assertRole(userId, ["admin", "responder"]);
+    let value: HypothesisTest;
+    if (!this.pool) {
+      const now = new Date().toISOString(); value = { id: randomUUID(), incidentId, ...input, status: "planned", result: "", createdAt: now, updatedAt: now }; this.memoryHypothesisTests.unshift(value);
+    } else {
+      const result = await this.pool.query(`insert into hypothesis_tests(organization_id,incident_id,hypothesis_id,title,instruction,assignee) select $1,i.id,$3,$4,$5,$6 from incidents i where i.id=$2 and i.organization_id=$1 returning *`, [context.organizationId, incidentId, input.hypothesisId, input.title, input.instruction, input.assignee]);
+      if (!result.rows[0]) throw new Error("Incident not found in this workspace."); value = mapHypothesisTest(result.rows[0] as Row);
+    }
+    await this.audit(userId, actor, "created hypothesis test", "hypothesis-test", value.id, { incidentId, hypothesisId: input.hypothesisId, assignee: input.assignee }); return value;
+  }
+
+  async updateHypothesisTest(userId: string, actor: string, id: string, input: { status: HypothesisTestStatus; result: string }) {
+    const context = await this.assertRole(userId, ["admin", "responder"]); let value: HypothesisTest | undefined;
+    if (!this.pool) { value = this.memoryHypothesisTests.find((item) => item.id === id); if (value) Object.assign(value, input, { updatedAt: new Date().toISOString(), completedAt: ["supported","disproved","inconclusive"].includes(input.status) ? new Date().toISOString() : null }); }
+    else { const result = await this.pool.query(`update hypothesis_tests set status=$3,result=$4,updated_at=now(),completed_at=case when $3 in ('supported','disproved','inconclusive') then now() else null end where organization_id=$1 and id=$2 returning *`, [context.organizationId, id, input.status, input.result]); value = result.rows[0] ? mapHypothesisTest(result.rows[0] as Row) : undefined; }
+    if (!value) throw new Error("Hypothesis test not found."); await this.audit(userId, actor, "updated hypothesis test", "hypothesis-test", id, { status: input.status }); return value;
+  }
+
+  async listRecoveries(userId: string, incidentId: string) { const context = await this.context(userId); if (!this.pool) return structuredClone(this.memoryRecoveries.filter((item) => item.incidentId === incidentId)); return (await this.pool.query(`select * from recovery_verifications where organization_id=$1 and incident_id=$2 order by created_at desc`, [context.organizationId, incidentId])).rows.map(mapRecovery); }
+  async saveRecovery(userId: string, actor: string, incidentId: string, input: Omit<RecoveryVerification, "id" | "incidentId" | "createdAt" | "updatedAt">) {
+    const context = await this.assertRole(userId, ["admin", "responder"]); let value: RecoveryVerification;
+    if (!this.pool) { const now = new Date().toISOString(); value = { id: randomUUID(), incidentId, ...input, createdAt: now, updatedAt: now }; this.memoryRecoveries.unshift(value); }
+    else { const result = await this.pool.query(`insert into recovery_verifications(organization_id,incident_id,metric,target_value,baseline_value,observed_value,observation_minutes,status,reason) select $1,i.id,$3,$4,$5,$6,$7,$8,$9 from incidents i where i.id=$2 and i.organization_id=$1 returning *`, [context.organizationId, incidentId, input.metric, input.targetValue, input.baselineValue, input.observedValue ?? null, input.observationMinutes, input.status, input.reason]); if (!result.rows[0]) throw new Error("Incident not found in this workspace."); value = mapRecovery(result.rows[0] as Row); }
+    await this.audit(userId, actor, "recorded recovery verification", "recovery", value.id, { incidentId, status: input.status }); return value;
+  }
+  async assertRecoveryVerified(userId: string, incidentId: string) { const values = await this.listRecoveries(userId, incidentId); if (!values.some((item) => item.status === "verified")) throw new Error("Record a verified recovery observation before resolving this incident."); }
+
+  async getPostmortem(userId: string, incidentId: string) { const context = await this.context(userId); if (!this.pool) return this.memoryPostmortems.find((item) => item.incidentId === incidentId) ?? null; const result = await this.pool.query(`select * from incident_postmortems where organization_id=$1 and incident_id=$2`, [context.organizationId, incidentId]); return result.rows[0] ? mapPostmortem(result.rows[0] as Row) : null; }
+  async savePostmortem(userId: string, actor: string, incidentId: string, input: Omit<IncidentPostmortem, "incidentId" | "updatedAt">) { const context = await this.assertRole(userId, ["admin", "responder"]); let value: IncidentPostmortem; if (!this.pool) { value = { incidentId, ...input, updatedAt: new Date().toISOString() }; this.memoryPostmortems = [value, ...this.memoryPostmortems.filter((item) => item.incidentId !== incidentId)]; } else { const result = await this.pool.query(`insert into incident_postmortems(incident_id,organization_id,summary,root_cause,impact,recovery,follow_ups,status) select i.id,$1,$3,$4,$5,$6,$7,$8 from incidents i where i.id=$2 and i.organization_id=$1 on conflict(incident_id) do update set summary=excluded.summary,root_cause=excluded.root_cause,impact=excluded.impact,recovery=excluded.recovery,follow_ups=excluded.follow_ups,status=excluded.status,updated_at=now() returning *`, [context.organizationId, incidentId, input.summary, input.rootCause, input.impact, input.recovery, input.followUps, input.status]); if (!result.rows[0]) throw new Error("Incident not found in this workspace."); value = mapPostmortem(result.rows[0] as Row); } await this.audit(userId, actor, "saved postmortem", "postmortem", incidentId, { status: input.status }); return value; }
+
+  async listNotifications(userId: string, actor: string): Promise<ActionNotification[]> {
+    const context = await this.context(userId);
+    if (!this.pool) return [
+      ...this.memoryMitigations.filter((item) => item.status === "pending" && item.requestedBy !== actor).map((item) => ({ id: `approval-${item.id}`, kind: "approval" as const, title: "Mitigation approval required", detail: item.title, incidentId: item.incidentId, href: `/incidents/${item.incidentId}`, createdAt: item.createdAt })),
+      ...this.memoryHypothesisTests.filter((item) => item.assignee === actor && ["planned","running"].includes(item.status)).map((item) => ({ id: `test-${item.id}`, kind: "hypothesis" as const, title: "Hypothesis test assigned", detail: item.title, incidentId: item.incidentId, href: `/incidents/${item.incidentId}`, createdAt: item.createdAt }))
+    ];
+    const result = await this.pool.query(`
+      select 'approval-'||m.id as id,'approval' as kind,'Mitigation approval required' as title,m.title as detail,m.incident_id,m.created_at from mitigation_requests m where m.organization_id=$1 and m.status='pending' and m.requested_by<>$2
+      union all select 'test-'||h.id,'hypothesis','Hypothesis test assigned',h.title,h.incident_id,h.created_at from hypothesis_tests h where h.organization_id=$1 and lower(h.assignee)=lower($2) and h.status in ('planned','running')
+      union all select 'queue-'||q.id,'ingestion','Ingestion delivery needs attention',coalesce(q.last_error,'Delivery exhausted its retries'),null,q.updated_at from ingestion_queue q join integrations i on i.id=q.integration_id where i.organization_id=$1 and q.status='dead_letter'
+      order by created_at desc limit 30`, [context.organizationId, actor]);
+    return (result.rows as Row[]).map((row) => ({ id: String(row.id), kind: row.kind as ActionNotification["kind"], title: String(row.title), detail: String(row.detail), ...(row.incident_id ? { incidentId: String(row.incident_id) } : {}), href: row.incident_id ? `/incidents/${row.incident_id}` : "/integrations", createdAt: new Date(String(row.created_at)).toISOString() }));
   }
 }
 

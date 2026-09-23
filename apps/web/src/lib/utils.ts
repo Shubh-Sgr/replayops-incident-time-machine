@@ -9,6 +9,12 @@ export function formatClock(value: string) {
   return new Intl.DateTimeFormat("en", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(new Date(value));
 }
 
+export function toLocalDateTimeInput(value?: string | null) {
+  if (!value) return "";
+  const date = new Date(value);
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
+}
+
 export function formatRelative(value: string) {
   const delta = Date.now() - new Date(value).getTime();
   const minutes = Math.max(1, Math.round(delta / 60000));

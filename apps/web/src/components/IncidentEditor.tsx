@@ -2,11 +2,12 @@ import { AnimatePresence, motion } from "framer-motion";
 import { LoaderCircle, X } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { createPortal } from "react-dom";
+import { useQuery } from "@tanstack/react-query";
 import type { Incident, IncidentStatus, Severity } from "../types";
+import { api } from "../lib/api";
+import { toLocalDateTimeInput } from "../lib/utils";
 
 export type IncidentDraft = Omit<Incident, "id" | "code" | "createdAt" | "updatedAt" | "events">;
-
-const dateInputValue = (value?: string | null) => value ? new Date(value).toISOString().slice(0, 16) : "";
 
 export function IncidentEditor({
   open,
@@ -30,6 +31,7 @@ export function IncidentEditor({
   const [status, setStatus] = useState<IncidentStatus>("investigating");
   const [owner, setOwner] = useState("");
   const [startedAt, setStartedAt] = useState("");
+  const members = useQuery({ queryKey: ["team-members"], queryFn: api.teamMembers, enabled: open });
 
   useEffect(() => {
     if (!open) return;
@@ -39,7 +41,7 @@ export function IncidentEditor({
     setSeverity(incident?.severity ?? "high");
     setStatus(incident?.status ?? "investigating");
     setOwner(incident?.owner ?? "");
-    setStartedAt(dateInputValue(incident?.startedAt ?? new Date().toISOString()));
+    setStartedAt(toLocalDateTimeInput(incident?.startedAt ?? new Date().toISOString()));
   }, [incident, open]);
 
   function submit(event: FormEvent) {
@@ -85,7 +87,7 @@ export function IncidentEditor({
               <label className="block text-sm font-semibold">Evidence summary<textarea className="field mt-2 min-h-28 resize-y py-3" value={summary} onChange={(event) => setSummary(event.target.value)} minLength={12} maxLength={800} required placeholder="State what is observed without over-claiming root cause" /></label>
               <div className="grid gap-4 sm:grid-cols-2">
                 <label className="block text-sm font-semibold">Primary service<input className="field mt-2" value={service} onChange={(event) => setService(event.target.value)} required placeholder="checkout-api" /></label>
-                <label className="block text-sm font-semibold">Owner<input className="field mt-2" value={owner} onChange={(event) => setOwner(event.target.value)} required placeholder="On-call responder" /></label>
+                <label className="block text-sm font-semibold">Owner<select className="field mt-2" value={owner} onChange={(event) => setOwner(event.target.value)} required><option value="" disabled>Select a responder</option>{members.data?.map((member) => <option key={member.userId} value={member.email}>{member.displayName} · {member.role}</option>)}{owner && !members.data?.some((member) => member.email === owner) && <option value={owner}>{owner}</option>}</select></label>
                 <label className="block text-sm font-semibold">Severity<select className="field mt-2" value={severity} onChange={(event) => setSeverity(event.target.value as Severity)}><option value="critical">Critical</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></label>
                 <label className="block text-sm font-semibold">Status<select className="field mt-2" value={status} onChange={(event) => setStatus(event.target.value as IncidentStatus)}><option value="investigating">Investigating</option><option value="identified">Identified</option><option value="monitoring">Monitoring</option><option value="resolved">Resolved</option></select></label>
               </div>

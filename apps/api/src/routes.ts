@@ -61,8 +61,12 @@ const serviceSchema = z.object({
 const policySchema = z.object({ incidentThreshold: z.number().int().min(1).max(100), groupingWindowMinutes: z.number().int().min(5).max(1440), suppressLowSeverity: z.boolean(), maintenanceMode: z.boolean() });
 const roleSchema = z.enum(["admin", "responder", "viewer"]);
 const inviteSchema = z.object({ email: z.string().email(), role: roleSchema });
-const mitigationSchema = z.object({ title: z.string().min(4).max(120), action: z.string().min(12).max(1200), rollbackPlan: z.string().min(12).max(1200) });
+const mitigationSchema = z.object({ replayRunId: z.string().uuid(), title: z.string().min(4).max(120), action: z.string().min(12).max(1200), rollbackPlan: z.string().min(12).max(1200) });
 const mitigationReviewSchema = z.object({ status: z.enum(["approved", "rejected"]) });
+const hypothesisTestSchema = z.object({ hypothesisId: z.string().min(2).max(160), title: z.string().min(4).max(180), instruction: z.string().min(8).max(1600), assignee: z.string().min(2).max(160) });
+const hypothesisOutcomeSchema = z.object({ status: z.enum(["planned", "running", "supported", "disproved", "inconclusive"]), result: z.string().max(2000) });
+const recoverySchema = z.object({ metric: z.string().min(2).max(160), targetValue: z.number(), baselineValue: z.number(), observedValue: z.number().nullable().optional(), observationMinutes: z.number().int().min(1).max(10080), status: z.enum(["pending", "verified", "failed"]), reason: z.string().max(1600) });
+const postmortemSchema = z.object({ summary: z.string().max(4000), rootCause: z.string().max(4000), impact: z.string().max(4000), recovery: z.string().max(4000), followUps: z.string().max(4000), status: z.enum(["draft", "published"]) });
 
 const parseOrReply = <T>(schema: z.ZodSchema<T>, value: unknown) => {
   const result = schema.safeParse(value);
@@ -150,6 +154,7 @@ apiRouter.patch("/incidents/:id", async (req, res) => {
     res.status(400).json(parsed);
     return;
   }
+  if (parsed.data.status === "resolved") await workspaceService.assertRecoveryVerified(userId(req), req.params.id);
   const embedding = parsed.data.title || parsed.data.summary || parsed.data.service
     ? await embedText(`${parsed.data.title ?? ""}\n${parsed.data.summary ?? ""}\n${parsed.data.service ?? ""}`)
     : undefined;
@@ -207,6 +212,12 @@ apiRouter.post("/incidents/:id/replays", async (req, res) => {
   res.status(201).json(result);
 });
 
+apiRouter.get("/incidents/:id/replays", async (req, res) => {
+  const incident = await repository.getIncident(userId(req), req.params.id);
+  if (!incident) { res.status(404).json({ error: "Incident not found." }); return; }
+  res.json(await repository.listReplays(userId(req), req.params.id));
+});
+
 apiRouter.post("/incidents/:id/events", async (req, res) => {
   const parsed = parseOrReply(eventSchema, req.body);
   if ("error" in parsed) {
@@ -242,6 +253,15 @@ apiRouter.delete("/incidents/:incidentId/events/:eventId", async (req, res) => {
     return;
   }
   res.status(204).send();
+});
+
+apiRouter.post("/incidents/:incidentId/events/:eventId/move", async (req, res) => {
+  const parsed = parseOrReply(z.object({ targetIncidentId: z.string().min(1) }), req.body);
+  if ("error" in parsed) { res.status(400).json(parsed); return; }
+  const event = await repository.moveEvent(userId(req), req.params.incidentId, req.params.eventId, parsed.data.targetIncidentId);
+  if (!event) { res.status(404).json({ error: "The source event or target incident was not found in this workspace." }); return; }
+  await workspaceService.audit(userId(req), actor(req), "moved grouped evidence", "incident-event", event.id, { fromIncidentId: req.params.incidentId, toIncidentId: parsed.data.targetIncidentId });
+  res.json(event);
 });
 
 apiRouter.post("/search", async (req, res) => {
@@ -378,6 +398,8 @@ apiRouter.get("/audit", async (req, res) => {
   res.json(await workspaceService.listAudit(userId(req)));
 });
 
+apiRouter.get("/notifications", async (req: AuthenticatedRequest, res) => res.json(await workspaceService.listNotifications(userId(req), actor(req))));
+
 apiRouter.get("/ingestion-queue", async (req, res) => {
   res.json(await ingestionQueue.list(userId(req)));
 });
@@ -395,7 +417,10 @@ apiRouter.get("/incidents/:id/mitigations", async (req, res) => {
 apiRouter.post("/incidents/:id/mitigations", async (req: AuthenticatedRequest, res) => {
   const parsed = parseOrReply(mitigationSchema, req.body);
   if ("error" in parsed) { res.status(400).json(parsed); return; }
-  res.status(201).json(await workspaceService.requestMitigation(userId(req), actor(req), String(req.params.id), parsed.data));
+  const replay = (await repository.listReplays(userId(req), String(req.params.id))).find((item) => item.id === parsed.data.replayRunId);
+  if (!replay) { res.status(400).json({ error: "Run and save a replay before requesting production approval." }); return; }
+  const { replayRunId: _replayRunId, ...request } = parsed.data;
+  res.status(201).json(await workspaceService.requestMitigation(userId(req), actor(req), String(req.params.id), { ...request, replay }));
 });
 
 apiRouter.patch("/mitigations/:id", async (req: AuthenticatedRequest, res) => {
@@ -403,3 +428,13 @@ apiRouter.patch("/mitigations/:id", async (req: AuthenticatedRequest, res) => {
   if ("error" in parsed) { res.status(400).json(parsed); return; }
   res.json(await workspaceService.reviewMitigation(userId(req), actor(req), String(req.params.id), parsed.data.status));
 });
+
+apiRouter.get("/incidents/:id/hypothesis-tests", async (req, res) => res.json(await workspaceService.listHypothesisTests(userId(req), String(req.params.id))));
+apiRouter.post("/incidents/:id/hypothesis-tests", async (req: AuthenticatedRequest, res) => { const parsed = parseOrReply(hypothesisTestSchema, req.body); if ("error" in parsed) { res.status(400).json(parsed); return; } res.status(201).json(await workspaceService.createHypothesisTest(userId(req), actor(req), String(req.params.id), parsed.data)); });
+apiRouter.patch("/hypothesis-tests/:id", async (req: AuthenticatedRequest, res) => { const parsed = parseOrReply(hypothesisOutcomeSchema, req.body); if ("error" in parsed) { res.status(400).json(parsed); return; } res.json(await workspaceService.updateHypothesisTest(userId(req), actor(req), String(req.params.id), parsed.data)); });
+
+apiRouter.get("/incidents/:id/recovery", async (req, res) => res.json(await workspaceService.listRecoveries(userId(req), String(req.params.id))));
+apiRouter.post("/incidents/:id/recovery", async (req: AuthenticatedRequest, res) => { const parsed = parseOrReply(recoverySchema, req.body); if ("error" in parsed) { res.status(400).json(parsed); return; } res.status(201).json(await workspaceService.saveRecovery(userId(req), actor(req), String(req.params.id), parsed.data)); });
+
+apiRouter.get("/incidents/:id/postmortem", async (req, res) => res.json(await workspaceService.getPostmortem(userId(req), String(req.params.id))));
+apiRouter.put("/incidents/:id/postmortem", async (req: AuthenticatedRequest, res) => { const parsed = parseOrReply(postmortemSchema, req.body); if ("error" in parsed) { res.status(400).json(parsed); return; } res.json(await workspaceService.savePostmortem(userId(req), actor(req), String(req.params.id), parsed.data)); });

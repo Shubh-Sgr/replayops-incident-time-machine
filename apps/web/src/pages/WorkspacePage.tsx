@@ -1,10 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AnimatePresence, motion } from "framer-motion";
-import { Activity, BookOpenCheck, Boxes, CheckCircle2, Copy, DatabaseZap, GitBranch, LoaderCircle, Plus, RotateCcw, ShieldCheck, TriangleAlert, UserPlus, UsersRound, Wrench } from "lucide-react";
+import { Activity, BookOpenCheck, Boxes, CheckCircle2, Copy, DatabaseZap, GitBranch, LoaderCircle, MailCheck, Plus, RotateCcw, Send, ShieldCheck, TriangleAlert, UserPlus, UsersRound, Wrench } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { api } from "../lib/api";
 import { cn, formatRelative } from "../lib/utils";
-import type { IncidentPolicy, ServiceDefinition, WorkspaceRole } from "../types";
+import type { IncidentPolicy, ServiceDefinition, TeamInvitation, WorkspaceRole } from "../types";
 
 type Mode = "services" | "intake" | "team" | "audit" | "queue";
 const modes = [
@@ -77,13 +77,55 @@ function TeamAccess() {
   const workspace = useQuery({ queryKey: ["workspace"], queryFn: api.workspace });
   const members = useQuery({ queryKey: ["team-members"], queryFn: api.teamMembers });
   const invitations = useQuery({ queryKey: ["invitations"], queryFn: api.invitations, enabled: workspace.data?.role === "admin" });
-  const [email, setEmail] = useState(""); const [role, setRole] = useState<WorkspaceRole>("responder"); const [inviteLink, setInviteLink] = useState("");
-  const invite = useMutation({ mutationFn: () => api.createInvitation(email, role), onSuccess: (value) => { setInviteLink(`${window.location.origin}/accept-invite?token=${value.inviteToken}`); setEmail(""); void queryClient.invalidateQueries({ queryKey: ["invitations"] }); } });
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState<WorkspaceRole>("responder");
+  const [inviteResult, setInviteResult] = useState<TeamInvitation | null>(null);
+  const [copied, setCopied] = useState(false);
+  const inviteLink = inviteResult?.inviteToken ? `${window.location.origin}/accept-invite?token=${encodeURIComponent(inviteResult.inviteToken)}` : "";
+  const invite = useMutation({
+    mutationFn: () => api.createInvitation(email, role),
+    onSuccess: (value) => {
+      setInviteResult(value);
+      setCopied(false);
+      setEmail("");
+      void queryClient.invalidateQueries({ queryKey: ["invitations"] });
+    }
+  });
+  const copyInviteLink = async () => {
+    if (!inviteLink) return;
+    try {
+      await navigator.clipboard.writeText(inviteLink);
+      setCopied(true);
+    } catch {
+      setCopied(false);
+    }
+  };
   const updateRole = useMutation({ mutationFn: ({ id, value }: { id: string; value: WorkspaceRole }) => api.updateMemberRole(id, value), onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["team-members"] }) });
-  return <div className="grid gap-6 xl:grid-cols-[minmax(0,1.25fr)_minmax(300px,0.75fr)]"><section className="surface-lined overflow-hidden"><div className="px-5 py-5 sm:px-6"><h2 className="section-title">Workspace members</h2><p className="mt-1 text-sm text-muted">Roles are enforced by the API, not only by the interface.</p></div><div className="divide-y divide-line border-t border-line">{members.data?.map((member) => <div key={member.userId} className="flex flex-col gap-3 px-5 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-6"><div><p className="font-semibold">{member.displayName}</p><p className="mt-1 text-xs text-muted">{member.email} · joined {formatRelative(member.joinedAt)}</p></div><select aria-label={`Role for ${member.email}`} className="field w-full sm:w-40" value={member.role} disabled={workspace.data?.role !== "admin" || updateRole.isPending} onChange={(e) => updateRole.mutate({ id: member.userId, value: e.target.value as WorkspaceRole })}><option value="admin">Admin</option><option value="responder">Responder</option><option value="viewer">Viewer</option></select></div>)}</div></section>
-    <div className="space-y-6"><form className="surface-lined p-5 sm:p-6" onSubmit={(e) => { e.preventDefault(); invite.mutate(); }}><UserPlus className="h-6 w-6 text-accent" /><h2 className="mt-4 section-title">Invite a teammate</h2><p className="mt-2 text-sm leading-6 text-muted">ReplayOps creates a seven-day invite link. Share it through your approved channel.</p><label className="mt-5 block text-sm font-semibold">Email<input type="email" className="field mt-2" value={email} onChange={(e) => setEmail(e.target.value)} required /></label><label className="mt-4 block text-sm font-semibold">Role<select className="field mt-2" value={role} onChange={(e) => setRole(e.target.value as WorkspaceRole)}><option value="responder">Responder</option><option value="viewer">Viewer</option><option value="admin">Admin</option></select></label><button className="control-primary mt-4 w-full" disabled={invite.isPending || workspace.data?.role !== "admin"}>Create invite link</button>{inviteLink && <div className="mt-4 rounded-control bg-elevated p-3"><p className="text-xs text-muted">Link shown once</p><button type="button" className="mt-2 flex w-full items-center gap-2 text-left text-xs font-semibold" onClick={() => void navigator.clipboard.writeText(inviteLink)}><Copy className="h-4 w-4 shrink-0" /><span className="truncate">{inviteLink}</span></button></div>}{invite.error && <p className="mt-3 text-sm text-danger">{invite.error.message}</p>}</form>
-      {invitations.data?.length ? <section className="surface-lined p-5"><h3 className="font-semibold">Pending invitations</h3><div className="mt-3 space-y-3">{invitations.data.slice(0, 4).map((item) => <div key={item.id} className="text-sm"><p className="font-semibold">{item.email}</p><p className="mt-1 text-xs text-muted">{item.role} · {item.status}</p></div>)}</div></section> : null}
-    </div></div>;
+  return <div className="grid gap-6 xl:grid-cols-[minmax(0,1.25fr)_minmax(300px,0.75fr)]">
+    <section className="surface-lined overflow-hidden">
+      <div className="px-5 py-5 sm:px-6"><h2 className="section-title">Workspace members</h2><p className="mt-1 text-sm text-muted">Roles are enforced by the API, not only by the interface.</p></div>
+      <div className="divide-y divide-line border-t border-line">{members.data?.map((member) => <div key={member.userId} className="flex flex-col gap-3 px-5 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-6"><div className="min-w-0"><p className="truncate font-semibold">{member.displayName}</p><p className="mt-1 break-all text-xs text-muted">{member.email} · joined {formatRelative(member.joinedAt)}</p></div><select aria-label={`Role for ${member.email}`} className="field w-full sm:w-40" value={member.role} disabled={workspace.data?.role !== "admin" || updateRole.isPending} onChange={(e) => updateRole.mutate({ id: member.userId, value: e.target.value as WorkspaceRole })}><option value="admin">Admin</option><option value="responder">Responder</option><option value="viewer">Viewer</option></select></div>)}</div>
+    </section>
+    <div className="space-y-6">
+      <form className="surface-lined p-5 sm:p-6" onSubmit={(e) => { e.preventDefault(); invite.mutate(); }}>
+        <UserPlus className="h-6 w-6 text-accent" />
+        <h2 className="mt-4 section-title">Send a secure invitation</h2>
+        <p className="mt-2 text-sm leading-6 text-muted">ReplayOps emails a seven-day, email-bound link when delivery is configured. A copyable fallback is always generated.</p>
+        <label className="mt-5 block text-sm font-semibold">Email<input type="email" className="field mt-2" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" maxLength={254} required /></label>
+        <label className="mt-4 block text-sm font-semibold">Role<select className="field mt-2" value={role} onChange={(e) => setRole(e.target.value as WorkspaceRole)}><option value="responder">Responder</option><option value="viewer">Viewer</option><option value="admin">Admin</option></select></label>
+        <button className="control-primary mt-4 inline-flex w-full items-center justify-center gap-2" disabled={invite.isPending || workspace.data?.role !== "admin"}>{invite.isPending ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}{invite.isPending ? "Sending invitation…" : "Send invitation"}</button>
+        {inviteResult && inviteLink && <div className={cn("mt-4 rounded-control p-4", inviteResult.emailDeliveryStatus === "sent" ? "bg-success/10" : inviteResult.emailDeliveryStatus === "failed" ? "bg-danger/10" : "bg-warning/12")} aria-live="polite">
+          <div className="flex items-start gap-3">
+            {inviteResult.emailDeliveryStatus === "sent" ? <MailCheck className="mt-0.5 h-5 w-5 shrink-0 text-success" /> : <TriangleAlert className={cn("mt-0.5 h-5 w-5 shrink-0", inviteResult.emailDeliveryStatus === "failed" ? "text-danger" : "text-warning")} />}
+            <div className="min-w-0"><p className="text-sm font-semibold">{inviteResult.emailDeliveryStatus === "sent" ? "Invitation accepted for email delivery" : inviteResult.emailDeliveryStatus === "failed" ? "Email delivery failed" : "Email delivery is not configured"}</p><p className="mt-1 text-xs leading-5 text-muted">{inviteResult.emailDeliveryStatus === "sent" ? `The provider accepted the message for ${inviteResult.email}. Keep the link below as a fallback.` : inviteResult.emailLastError ?? "The invitation is valid, but no email was sent. Copy and share this link through a trusted channel."}</p></div>
+          </div>
+          <button type="button" className="control-secondary mt-3 inline-flex w-full items-center justify-center gap-2 !min-h-10" onClick={() => void copyInviteLink()}><Copy className="h-4 w-4" />{copied ? "Link copied" : "Copy invitation link"}</button>
+        </div>}
+        {invite.error && <p role="alert" className="mt-3 rounded-control bg-danger/10 p-3 text-sm text-danger">Invitation was not created. {invite.error.message}</p>}
+      </form>
+      {invitations.data?.length ? <section className="surface-lined p-5"><h3 className="font-semibold">Recent invitations</h3><div className="mt-3 divide-y divide-line">{invitations.data.slice(0, 6).map((item) => <div key={item.id} className="py-3 first:pt-0 last:pb-0"><p className="break-all text-sm font-semibold">{item.email}</p><p className="mt-1 text-xs text-muted"><span className="capitalize">{item.role}</span> · {item.status} · {item.emailDeliveryStatus === "sent" ? "email sent" : item.emailDeliveryStatus === "failed" ? "delivery failed" : "link only"}</p></div>)}</div></section> : null}
+    </div>
+  </div>;
 }
 
 function AuditTrail() { const audit = useQuery({ queryKey: ["audit"], queryFn: api.audit }); return <section className="surface-lined overflow-hidden"><div className="px-5 py-5 sm:px-6"><h2 className="section-title">Immutable operations trail</h2><p className="mt-1 text-sm text-muted">Successful mutations and governed actions are recorded with actor, target, and time.</p></div><div className="divide-y divide-line border-t border-line">{audit.data?.map((entry) => <article key={entry.id} className="grid gap-2 px-5 py-4 sm:grid-cols-[170px_minmax(0,1fr)_auto] sm:items-start sm:px-6"><span className="measurement-number text-xs text-muted">{new Date(entry.createdAt).toLocaleString()}</span><div><p className="text-sm font-semibold">{entry.action}</p><p className="mt-1 text-xs text-muted">{entry.actor} · {entry.targetType}{entry.targetId ? ` · ${entry.targetId.slice(0, 12)}` : ""}</p></div><ShieldCheck className="h-4 w-4 text-success" /></article>)}{audit.data && !audit.data.length && <div className="px-6 py-12 text-center"><Activity className="mx-auto h-6 w-6 text-faint" /><p className="mt-3 font-semibold">No governed changes yet</p></div>}</div></section>; }

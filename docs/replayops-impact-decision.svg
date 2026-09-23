@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="780" viewBox="0 0 1440 780" role="img" aria-labelledby="title desc">
+  <title id="title">ReplayOps impact scoring and incident decision flow</title>
+  <desc id="desc">Provider events receive deterministic impact scores, are clamped to zero through one hundred, pass maintenance and suppression checks, then either join an existing incident, open a new incident at the threshold, or remain buffered evidence.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#60778a"/></marker>
+    <style>
+      .bg{fill:#edf3f6}.panel{fill:#f8fafb;stroke:#c7d6df;stroke-width:1}.ink{fill:#22313e}.muted{fill:#60778a}.red{fill:#f4d9d8}.amber{fill:#f7ead0}.green{fill:#dff1e8}.cyan{fill:#d9edf1}.dark{fill:#22384a}.white{fill:#f7fafc}.accent{fill:#e9753d}.title{font:600 31px Outfit,Arial,sans-serif}.label{font:600 14px 'IBM Plex Sans',Arial,sans-serif}.sub{font:400 13px 'IBM Plex Sans',Arial,sans-serif}.small{font:500 11px 'JetBrains Mono',monospace;letter-spacing:.02em}.line{stroke:#60778a;stroke-width:2;fill:none;marker-end:url(#arrow)}
+    </style>
+  </defs>
+  <rect class="bg" width="1440" height="780" rx="24"/>
+  <text x="64" y="68" class="title ink">How one injected signal becomes—or does not become—an incident</text>
+  <text x="64" y="98" class="sub muted">Current implementation: transparent provider rules and operator-owned policy; AI does not gate creation</text>
+
+  <g transform="translate(64 148)">
+    <text class="small muted" x="0" y="0">1 · PROVIDER RULE</text>
+    <rect class="panel" x="0" y="22" width="260" height="70" rx="14"/><text class="label ink" x="20" y="51">GitHub failure</text><text class="sub muted" x="20" y="73">workflow 76 · deployment 78</text>
+    <rect class="panel" x="0" y="106" width="260" height="70" rx="14"/><text class="label ink" x="20" y="135">Grafana firing</text><text class="sub muted" x="20" y="157">impact 78</text>
+    <rect class="panel" x="0" y="190" width="260" height="70" rx="14"/><text class="label ink" x="20" y="219">OTLP failed span</text><text class="sub muted" x="20" y="241">76 + duration contribution · max 96</text>
+    <rect class="panel" x="0" y="274" width="260" height="70" rx="14"/><text class="label ink" x="20" y="303">Generic event</text><text class="sub muted" x="20" y="325">provided score or kind default</text>
+  </g>
+
+  <path class="line" d="M324 342H386"/>
+
+  <g transform="translate(387 148)">
+    <text class="small muted" x="0" y="0">2 · NORMALIZE</text>
+    <rect class="cyan" x="0" y="22" width="244" height="154" rx="14"/>
+    <text class="label ink" x="22" y="56">Clamp impact to 0–100</text>
+    <text class="sub muted" x="22" y="84">≥ 88 critical</text>
+    <text class="sub muted" x="22" y="106">≥ 70 high</text>
+    <text class="sub muted" x="22" y="128">≥ 45 medium</text>
+    <text class="sub muted" x="22" y="150">otherwise low</text>
+    <rect class="panel" x="0" y="196" width="244" height="148" rx="14"/>
+    <text class="label ink" x="22" y="230">Attach context</text>
+    <text class="sub muted" x="22" y="258">service · timestamp · kind</text>
+    <text class="sub muted" x="22" y="280">correlation key · trace ID</text>
+    <text class="sub muted" x="22" y="302">environment · source URL</text>
+    <text class="small muted" x="22" y="326">ONE SIGNAL CONTRACT</text>
+  </g>
+
+  <path class="line" d="M631 342H693"/>
+
+  <g transform="translate(694 148)">
+    <text class="small muted" x="0" y="0">3 · POLICY GATES</text>
+    <rect class="amber" x="0" y="22" width="260" height="88" rx="14"/><text class="label ink" x="20" y="55">Maintenance mode?</text><text class="sub muted" x="20" y="79">Yes → retain evidence; do not create</text>
+    <rect class="amber" x="0" y="126" width="260" height="88" rx="14"/><text class="label ink" x="20" y="159">Suppress low severity?</text><text class="sub muted" x="20" y="183">Yes + low → retain evidence</text>
+    <rect class="amber" x="0" y="230" width="260" height="114" rx="14"/><text class="label ink" x="20" y="263">Crosses threshold?</text><text class="sub muted" x="20" y="287">Default threshold: 65</text><text class="sub muted" x="20" y="309">Operator configurable</text><text class="small muted" x="20" y="331">DETERMINISTIC DECISION</text>
+  </g>
+
+  <path class="line" d="M954 342H1016"/>
+
+  <g transform="translate(1017 148)">
+    <text class="small muted" x="0" y="0">4 · GROUP OR CREATE</text>
+    <rect class="cyan" x="0" y="22" width="359" height="94" rx="14"/><text class="label ink" x="22" y="55">Matching open incident exists</text><text class="sub muted" x="22" y="79">correlation → service/dependency → time window</text>
+    <rect class="red" x="0" y="136" width="359" height="94" rx="14"/><text class="label ink" x="22" y="169">No match + score ≥ threshold</text><text class="sub muted" x="22" y="193">Create AUTO-* incident and backfill precursor</text>
+    <rect class="green" x="0" y="250" width="359" height="94" rx="14"/><text class="label ink" x="22" y="283">No match + score &lt; threshold</text><text class="sub muted" x="22" y="307">Keep buffered for a later related trigger</text>
+  </g>
+
+  <g transform="translate(64 584)">
+    <rect class="dark" width="1312" height="112" rx="14"/>
+    <text x="24" y="38" class="label white">Example · successful versus failed GitHub workflow</text>
+    <text x="24" y="68" class="sub" fill="#c7d8e5">Success scores 26: queue completes, connector health updates, no incident at threshold 65.</text>
+    <text x="24" y="92" class="sub" fill="#c7d8e5">Failure scores 76: creates or joins an incident, unless maintenance or suppression prevents creation.</text>
+  </g>
+</svg>

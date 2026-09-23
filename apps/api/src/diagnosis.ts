@@ -57,6 +57,9 @@ export function diagnoseIncident(incident: Incident): IncidentDiagnosis {
       generatedAt: new Date().toISOString(),
       servicePath: [],
       confidence: 12,
+      evidenceCompleteness: 0,
+      causalConfidence: 12,
+      scoreExplanation: ["No timestamped evidence is available."],
       changeCandidates: [],
       signalDeltas: [],
       hypotheses: [],
@@ -93,7 +96,16 @@ export function diagnoseIncident(incident: Incident): IncidentDiagnosis {
   const servicePath = [...new Set(events.map((event) => event.service))];
   const hasRecovery = events.some((event) => event.kind === "recovery");
   const hasChange = events.some((event) => event.kind === "deploy" || event.kind === "dependency");
-  const confidence = clamp(36 + Math.min(24, events.length * 4) + Math.min(10, servicePath.length * 3) + (hasRecovery ? 7 : 0) + (hasChange ? 7 : 0) + (correlated ? 8 : 0), 12, 92);
+  const hasHealthyCohort = events.some((event) => /healthy|control|baseline|successful/i.test(`${event.title} ${event.detail}`));
+  const evidenceCompleteness = clamp(Math.min(30, events.length * 5) + Math.min(15, servicePath.length * 5) + (hasRecovery ? 15 : 0) + (hasChange ? 15 : 0) + (correlated ? 15 : 0) + (hasHealthyCohort ? 10 : 0), 0, 100);
+  const causalConfidence = clamp(24 + (hasChange ? 14 : 0) + (correlated ? 22 : 0) + (hasHealthyCohort ? 18 : 0) + (hasRecovery ? 10 : 0) + Math.min(12, events.length * 2), 12, 94);
+  const confidence = causalConfidence;
+  const scoreExplanation = [
+    `${events.length} ordered evidence event${events.length === 1 ? "" : "s"} across ${servicePath.length} service${servicePath.length === 1 ? "" : "s"}.`,
+    correlated ? "Trace or request correlation is present." : "No trace-backed request relationship is present.",
+    hasHealthyCohort ? "A healthy or control cohort is recorded." : "No healthy-versus-failing cohort comparison is recorded.",
+    hasRecovery ? "A recovery observation closes the evidence window." : "No recovery observation closes the evidence window."
+  ];
   const primaryTest = testFor(topCandidate, symptom);
   const evidenceSpan = secondsBetween(topCandidate.timestamp, symptom.timestamp);
   const peak = events.reduce((highest, event) => event.impactScore > highest.impactScore ? event : highest, events[0]!);
@@ -157,6 +169,9 @@ export function diagnoseIncident(incident: Incident): IncidentDiagnosis {
     originService: topCandidate.service,
     servicePath,
     confidence,
+    evidenceCompleteness,
+    causalConfidence,
+    scoreExplanation,
     changeCandidates,
     signalDeltas: signalDeltas(events, symptom),
     hypotheses,

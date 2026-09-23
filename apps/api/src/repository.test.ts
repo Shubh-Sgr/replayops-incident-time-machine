@@ -61,6 +61,8 @@ describe("MemoryRepository", () => {
     expect(await repository.listDecisions(userId, incident.id)).toHaveLength(1);
     expect(replay?.projection.projectedPeak).toBeLessThan(replay?.projection.baselinePeak ?? 0);
     expect(replay?.progress).toBe(100);
+    expect((await repository.listReplays(userId, incident.id))[0]?.config).toEqual({ retryCeiling: 1, concurrencyCap: 18, timeoutMs: 1800 });
+    expect(replay?.evidenceVersion).toBe(incident.updatedAt);
   });
 
   it("makes the replay model reproducible for identical inputs", () => {
@@ -77,6 +79,8 @@ describe("MemoryRepository", () => {
     expect(diagnosis.hypotheses[0]?.conflictingEvidence.length).toBeGreaterThan(0);
     expect(diagnosis.evidenceGaps).toContain("No trace, span, or request ID is attached; cross-service causality cannot be verified.");
     expect(diagnosis.signalDeltas.length).toBeGreaterThan(0);
+    expect(diagnosis.evidenceCompleteness).toBeGreaterThan(diagnosis.causalConfidence);
+    expect(diagnosis.scoreExplanation).toContain("No trace-backed request relationship is present.");
   });
 
   it("refuses to invent a diagnosis without evidence", () => {
@@ -85,5 +89,16 @@ describe("MemoryRepository", () => {
     expect(diagnosis.hypotheses).toEqual([]);
     expect(diagnosis.confidence).toBe(12);
     expect(diagnosis.evidenceGaps[0]).toContain("No timestamped evidence");
+  });
+
+  it("moves incorrectly grouped evidence without losing provenance", async () => {
+    const repository = new MemoryRepository();
+    const [source, target] = await repository.listIncidents(userId);
+    const event = source!.events[0]!;
+    const moved = await repository.moveEvent(userId, source!.id, event.id, target!.id);
+    expect(moved?.incidentId).toBe(target!.id);
+    expect(moved?.metadata).toEqual(event.metadata);
+    expect((await repository.getIncident(userId, source!.id))?.events.some((item) => item.id === event.id)).toBe(false);
+    expect((await repository.getIncident(userId, target!.id))?.events.some((item) => item.id === event.id)).toBe(true);
   });
 });

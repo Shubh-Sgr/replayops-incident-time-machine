@@ -1,5 +1,5 @@
 import { supabase } from "./supabase";
-import type { AssistantResponse, AuditEntry, DashboardData, Incident, IncidentDecision, IncidentDiagnosis, IncidentEvent, IncidentPolicy, IngestionResult, Integration, IntegrationProvider, MitigationRequest, QueueJob, ReplayConfig, ReplayResult, SearchResult, ServiceDefinition, TeamInvitation, TeamMember, WorkspaceContext, WorkspaceRole } from "../types";
+import type { ActionNotification, AssistantResponse, AuditEntry, DashboardData, HypothesisTest, HypothesisTestStatus, Incident, IncidentDecision, IncidentDiagnosis, IncidentEvent, IncidentPolicy, IncidentPostmortem, IngestionResult, Integration, IntegrationProvider, MitigationRequest, QueueJob, RecoveryVerification, ReplayConfig, ReplayResult, SearchResult, ServiceDefinition, TeamInvitation, TeamMember, WorkspaceContext, WorkspaceRole } from "../types";
 
 const API_URL = (import.meta.env.VITE_API_URL ?? "http://localhost:8787/api").replace(/\/$/, "");
 
@@ -37,9 +37,11 @@ export const api = {
   createEvent: (incidentId: string, event: Omit<IncidentEvent, "id" | "incidentId">) => request<IncidentEvent>(`/incidents/${incidentId}/events`, { method: "POST", body: JSON.stringify(event) }),
   updateEvent: (incidentId: string, eventId: string, event: Partial<IncidentEvent>) => request<IncidentEvent>(`/incidents/${incidentId}/events/${eventId}`, { method: "PATCH", body: JSON.stringify(event) }),
   deleteEvent: (incidentId: string, eventId: string) => request<void>(`/incidents/${incidentId}/events/${eventId}`, { method: "DELETE" }),
+  moveEvent: (incidentId: string, eventId: string, targetIncidentId: string) => request<IncidentEvent>(`/incidents/${incidentId}/events/${eventId}/move`, { method: "POST", body: JSON.stringify({ targetIncidentId }) }),
   decisions: (incidentId: string) => request<IncidentDecision[]>(`/incidents/${incidentId}/decisions`),
   createDecision: (incidentId: string, decision: Pick<IncidentDecision, "kind" | "status" | "title" | "detail">) => request<IncidentDecision>(`/incidents/${incidentId}/decisions`, { method: "POST", body: JSON.stringify(decision) }),
   runReplay: (incidentId: string, config: ReplayConfig) => request<ReplayResult>(`/incidents/${incidentId}/replays`, { method: "POST", body: JSON.stringify(config) }),
+  replays: (incidentId: string) => request<ReplayResult[]>(`/incidents/${incidentId}/replays`),
   search: (query: string) => request<SearchResult[]>("/search", { method: "POST", body: JSON.stringify({ query }) }),
   ask: (question: string, incidentId?: string) => request<AssistantResponse>("/assistant", { method: "POST", body: JSON.stringify({ question, incidentId }) }),
   integrations: () => request<Integration[]>("/integrations"),
@@ -57,9 +59,17 @@ export const api = {
   createInvitation: (email: string, role: WorkspaceRole) => request<TeamInvitation>("/team/invitations", { method: "POST", body: JSON.stringify({ email, role }) }),
   acceptInvitation: (token: string) => request<{ organizationName: string; role: WorkspaceRole }>("/team/invitations/accept", { method: "POST", body: JSON.stringify({ token }) }),
   audit: () => request<AuditEntry[]>("/audit"),
+  notifications: () => request<ActionNotification[]>("/notifications"),
   queue: () => request<QueueJob[]>("/ingestion-queue"),
   retryQueueJob: (id: string) => request<QueueJob>(`/ingestion-queue/${id}/retry`, { method: "POST" }),
   mitigations: (incidentId: string) => request<MitigationRequest[]>(`/incidents/${incidentId}/mitigations`),
-  requestMitigation: (incidentId: string, input: Pick<MitigationRequest, "title" | "action" | "rollbackPlan">) => request<MitigationRequest>(`/incidents/${incidentId}/mitigations`, { method: "POST", body: JSON.stringify(input) }),
-  reviewMitigation: (id: string, status: "approved" | "rejected") => request<MitigationRequest>(`/mitigations/${id}`, { method: "PATCH", body: JSON.stringify({ status }) })
+  requestMitigation: (incidentId: string, input: Pick<MitigationRequest, "replayRunId" | "title" | "action" | "rollbackPlan">) => request<MitigationRequest>(`/incidents/${incidentId}/mitigations`, { method: "POST", body: JSON.stringify(input) }),
+  reviewMitigation: (id: string, status: "approved" | "rejected") => request<MitigationRequest>(`/mitigations/${id}`, { method: "PATCH", body: JSON.stringify({ status }) }),
+  hypothesisTests: (incidentId: string) => request<HypothesisTest[]>(`/incidents/${incidentId}/hypothesis-tests`),
+  createHypothesisTest: (incidentId: string, input: Pick<HypothesisTest, "hypothesisId" | "title" | "instruction" | "assignee">) => request<HypothesisTest>(`/incidents/${incidentId}/hypothesis-tests`, { method: "POST", body: JSON.stringify(input) }),
+  updateHypothesisTest: (id: string, status: HypothesisTestStatus, result: string) => request<HypothesisTest>(`/hypothesis-tests/${id}`, { method: "PATCH", body: JSON.stringify({ status, result }) }),
+  recoveries: (incidentId: string) => request<RecoveryVerification[]>(`/incidents/${incidentId}/recovery`),
+  saveRecovery: (incidentId: string, input: Omit<RecoveryVerification, "id" | "incidentId" | "createdAt" | "updatedAt">) => request<RecoveryVerification>(`/incidents/${incidentId}/recovery`, { method: "POST", body: JSON.stringify(input) }),
+  postmortem: (incidentId: string) => request<IncidentPostmortem | null>(`/incidents/${incidentId}/postmortem`),
+  savePostmortem: (incidentId: string, input: Omit<IncidentPostmortem, "incidentId" | "updatedAt">) => request<IncidentPostmortem>(`/incidents/${incidentId}/postmortem`, { method: "PUT", body: JSON.stringify(input) })
 };

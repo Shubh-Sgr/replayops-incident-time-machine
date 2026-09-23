@@ -62,9 +62,15 @@ ReplayOps is an incident time machine, not another monitoring dashboard or incid
 - Automatic precursor backfill: ordinary deploys and metrics stay buffered, then attach when a related high-impact signal opens an incident.
 - Adversarial AI review for disconfirming evidence and falsification tests; model output remains subordinate to recorded evidence.
 - Counterfactual mitigation replay with repeatable inputs and clearly labeled synthetic projections.
+- Immutable replay history with exact configuration, evidence-version binding, stale-approval detection, and side-by-side candidate selection.
+- Assignable hypothesis tests with explicit supported, disproved, and inconclusive outcomes.
+- Separate evidence-completeness and causal-confidence scores with visible score inputs.
+- Live workbench refresh, exact-event drill-down, source telemetry links, and reversible grouping correction.
+- Measured recovery verification required before resolution, plus persistent handoff and postmortem records.
+- Free in-app action notifications for approvals, assigned tests, and dead-letter ingestion.
 - Supabase-backed durable intake jobs with retry backoff, dead-letter review, and operator replay.
 - Service ownership/dependency context plus configurable grouping, threshold, suppression, and maintenance policies.
-- Team roles, expiring invite links, immutable workspace audit entries, and independent mitigation approval.
+- Team roles, email-delivered expiring invitations with manual fallback, immutable workspace audit entries, and independent mitigation approval.
 - Evidence-level AI citations and secret/PII redaction before provider-assisted analysis.
 - Responsive light and dark modes.
 - Free-tier Vercel, Render, and Supabase deployment configuration.

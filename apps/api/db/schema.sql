@@ -68,6 +68,10 @@ create table if not exists replay_runs (
   name text not null,
   status text not null check (status in ('queued', 'running', 'passed', 'failed')),
   progress integer not null check (progress between 0 and 100),
+  config jsonb,
+  projection jsonb,
+  evidence_version timestamptz,
+  event_count integer,
   created_at timestamptz not null default now(),
   unique (organization_id, name)
 );
@@ -170,6 +174,9 @@ create table if not exists organization_invitations (
   role text not null check (role in ('admin','responder','viewer')),
   token_hash text not null unique,
   status text not null default 'pending' check (status in ('pending','accepted','revoked','expired')),
+  email_delivery_status text not null default 'manual' check (email_delivery_status in ('sent','manual','failed')),
+  emailed_at timestamptz,
+  email_last_error text,
   expires_at timestamptz not null,
   created_by uuid,
   created_at timestamptz not null default now()
@@ -195,9 +202,33 @@ create table if not exists mitigation_requests (
   title text not null,
   action text not null,
   rollback_plan text not null,
+  replay_run_id uuid references replay_runs(id) on delete restrict,
+  replay_config jsonb,
+  replay_projection jsonb,
+  evidence_version timestamptz,
   status text not null default 'pending' check (status in ('pending','approved','rejected','executed')),
   created_at timestamptz not null default now(),
   reviewed_at timestamptz
+);
+
+create table if not exists hypothesis_tests (
+  id uuid primary key default gen_random_uuid(), organization_id uuid not null references organizations(id) on delete cascade,
+  incident_id uuid not null references incidents(id) on delete cascade, hypothesis_id text not null, title text not null, instruction text not null,
+  assignee text not null, status text not null default 'planned' check(status in ('planned','running','supported','disproved','inconclusive')),
+  result text not null default '', created_at timestamptz not null default now(), updated_at timestamptz not null default now(), completed_at timestamptz
+);
+
+create table if not exists recovery_verifications (
+  id uuid primary key default gen_random_uuid(), organization_id uuid not null references organizations(id) on delete cascade,
+  incident_id uuid not null references incidents(id) on delete cascade, metric text not null, target_value numeric not null, baseline_value numeric not null,
+  observed_value numeric, observation_minutes integer not null check(observation_minutes between 1 and 10080), status text not null default 'pending' check(status in ('pending','verified','failed')),
+  reason text not null default '', created_at timestamptz not null default now(), updated_at timestamptz not null default now()
+);
+
+create table if not exists incident_postmortems (
+  incident_id uuid primary key references incidents(id) on delete cascade, organization_id uuid not null references organizations(id) on delete cascade,
+  summary text not null default '', root_cause text not null default '', impact text not null default '', recovery text not null default '', follow_ups text not null default '',
+  status text not null default 'draft' check(status in ('draft','published')), updated_at timestamptz not null default now()
 );
 
 create table if not exists ingestion_queue (
@@ -247,6 +278,9 @@ alter table incident_policies enable row level security;
 alter table organization_invitations enable row level security;
 alter table workspace_audit_log enable row level security;
 alter table mitigation_requests enable row level security;
+alter table hypothesis_tests enable row level security;
+alter table recovery_verifications enable row level security;
+alter table incident_postmortems enable row level security;
 alter table ingestion_queue enable row level security;
 
 create policy "members can read own memberships" on organization_members for select
@@ -283,6 +317,24 @@ using (exists (select 1 from organization_members m where m.organization_id = in
 
 create policy "members can read replay runs" on replay_runs for select
 using (exists (select 1 from organization_members m where m.organization_id = replay_runs.organization_id and m.user_id = auth.uid()));
+
+create policy "members can read hypothesis tests" on hypothesis_tests for select
+using (exists (select 1 from organization_members m where m.organization_id = hypothesis_tests.organization_id and m.user_id = auth.uid()));
+create policy "responders can manage hypothesis tests" on hypothesis_tests for all
+using (exists (select 1 from organization_members m where m.organization_id = hypothesis_tests.organization_id and m.user_id = auth.uid() and m.role in ('admin','responder')))
+with check (exists (select 1 from organization_members m where m.organization_id = hypothesis_tests.organization_id and m.user_id = auth.uid() and m.role in ('admin','responder')));
+
+create policy "members can read recovery verifications" on recovery_verifications for select
+using (exists (select 1 from organization_members m where m.organization_id = recovery_verifications.organization_id and m.user_id = auth.uid()));
+create policy "responders can manage recovery verifications" on recovery_verifications for all
+using (exists (select 1 from organization_members m where m.organization_id = recovery_verifications.organization_id and m.user_id = auth.uid() and m.role in ('admin','responder')))
+with check (exists (select 1 from organization_members m where m.organization_id = recovery_verifications.organization_id and m.user_id = auth.uid() and m.role in ('admin','responder')));
+
+create policy "members can read incident postmortems" on incident_postmortems for select
+using (exists (select 1 from organization_members m where m.organization_id = incident_postmortems.organization_id and m.user_id = auth.uid()));
+create policy "responders can manage incident postmortems" on incident_postmortems for all
+using (exists (select 1 from organization_members m where m.organization_id = incident_postmortems.organization_id and m.user_id = auth.uid() and m.role in ('admin','responder')))
+with check (exists (select 1 from organization_members m where m.organization_id = incident_postmortems.organization_id and m.user_id = auth.uid() and m.role in ('admin','responder')));
 
 create policy "members can read service health" on service_health_snapshots for select
 using (exists (select 1 from organization_members m where m.organization_id = service_health_snapshots.organization_id and m.user_id = auth.uid()));

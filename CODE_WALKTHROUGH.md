@@ -87,7 +87,7 @@ The core product principle is: **AI may challenge a diagnosis, but evidence and 
 - A durable PostgreSQL queue with exponential retry and dead-letter recovery.
 - Service ownership and dependency catalog used during cross-service incident grouping.
 - Configurable incident threshold, grouping window, low-severity suppression, and maintenance mode.
-- Email-bound, expiring team invitations with admin, responder, and viewer roles.
+- Email-delivered, expiring team invitations with delivery tracking, copy-link fallback, and admin, responder, and viewer roles.
 - A workspace audit trail for successful mutations and governed response decisions.
 
 ## 3. Repository Map
@@ -199,7 +199,7 @@ The frontend sends the Supabase access token to the API. Local demo mode sends t
 
 - **Service map:** ownership, criticality, code/runbook links, and dependencies.
 - **Intake policy:** noise suppression and correlation thresholds.
-- **Team access:** role changes and shareable, expiring invite links.
+- **Team access:** role changes and email-delivered, expiring invite links with manual fallback.
 - **Audit trail:** who changed what and when.
 - **Delivery queue:** pending work, retries, failures, and dead-letter recovery.
 
@@ -318,7 +318,7 @@ The production schema is in `apps/api/db/schema.sql`.
 | `ingestion_queue` | Durable normalized delivery jobs, attempts, retry timing, and dead-letter state |
 | `service_catalog` | Service owner, criticality, links, and dependency graph |
 | `incident_policies` | Workspace grouping, threshold, suppression, and maintenance controls |
-| `organization_invitations` | Hashed, expiring, email-bound team invitations |
+| `organization_invitations` | Hashed, expiring, email-bound team invitations plus delivery status and errors |
 | `workspace_audit_log` | Actor, action, target, detail, and timestamp for governed changes |
 | `mitigation_requests` | Exact proposed action, rollback plan, requester, reviewer, and disposition |
 
@@ -495,7 +495,7 @@ The deployed application is fully usable as an interactive portfolio and archite
 - AI provider mode requires `OPENAI_API_KEY`; the deployed fallback remains deterministic without it.
 - One active workspace is selected automatically; a workspace switcher is not yet included for users who belong to several organizations.
 - The database-backed queue is intentionally single-worker and polling-based for the free tier. Higher sustained volume should move execution to a dedicated worker with leases and metrics.
-- Invitations are shareable links rather than outbound email because Slack/Teams/email notification delivery is intentionally excluded from this implementation.
+- Team invitations use Resend for outbound email when configured. Provider requests are idempotent, delivery state is auditable, and a copyable secure link remains available when email is unavailable.
 - Real enterprise use should still add audit export, retention policies, managed secret rotation, per-tenant rate limits, SSO/SCIM, and a separately isolated mitigation executor if execution is ever enabled.
 
 These boundaries are deliberate. ReplayOps should earn trust by clearly separating recorded evidence, deterministic inference, model-generated review, and synthetic projection.

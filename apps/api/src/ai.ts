@@ -20,11 +20,14 @@ export function redactSensitiveText(input: string) {
 }
 
 export async function embedText(text: string): Promise<number[] | undefined> {
-  if (!config.openAiKey) return undefined;
-  const response = await fetch(`${config.openAiBaseUrl}/embeddings`, {
+  const key = config.googleAiKey ?? config.openAiKey;
+  if (!key) return undefined;
+  const baseUrl = config.googleAiKey ? "https://generativelanguage.googleapis.com/v1beta/openai" : config.openAiBaseUrl;
+  const model = config.googleAiKey ? config.googleEmbeddingModel : config.embeddingModel;
+  const response = await fetch(`${baseUrl}/embeddings`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${config.openAiKey}` },
-    body: JSON.stringify({ model: config.embeddingModel, input: text.slice(0, 8000) })
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+    body: JSON.stringify({ model, input: text.slice(0, 8000), dimensions: 1536 })
   });
   if (!response.ok) return undefined;
   const data = await response.json() as { data?: Array<{ embedding: number[] }> };
@@ -47,7 +50,8 @@ export async function answerQuestion(question: string, evidence: SearchResult[])
   const evidenceBoundary = evidence.length
     ? `${citations.length} incident record${citations.length === 1 ? "" : "s"} and ${citations.reduce((count, citation) => count + citation.eventIds.length, 0)} cited events`
     : "No matching incident evidence";
-  if (!config.openAiKey) {
+  const providerKey = config.googleAiKey ?? config.openAiKey;
+  if (!providerKey) {
     const lead = evidence[0]?.incident;
     if (lead && /adversarial|challenge|disconfirm|falsif/i.test(question)) {
       const events = [...lead.events].sort((left, right) => left.timestamp.localeCompare(right.timestamp));
@@ -68,11 +72,13 @@ export async function answerQuestion(question: string, evidence: SearchResult[])
       citations, confidence: lead ? 0.63 : 0.18, mode: "deterministic" as const, redactions: redactions + safeAnswer.redactions, evidenceBoundary
     };
   }
-  const response = await fetch(`${config.openAiBaseUrl}/chat/completions`, {
+  const providerBaseUrl = config.googleAiKey ? "https://generativelanguage.googleapis.com/v1beta/openai" : config.openAiBaseUrl;
+  const providerModel = config.googleAiKey ? config.googleChatModel : config.chatModel;
+  const response = await fetch(`${providerBaseUrl}/chat/completions`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${config.openAiKey}` },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${providerKey}` },
     body: JSON.stringify({
-      model: config.chatModel, temperature: 0.2,
+      model: providerModel, temperature: 0.2,
       messages: [
         { role: "system", content: "You are ReplayOps. Use only supplied evidence, separate observation from hypothesis, cite incident codes, state uncertainty, and stay under 180 words." },
         { role: "user", content: `Question: ${safeQuestion.text}\n\nEvidence:\n${evidenceText || "No matching evidence."}` }

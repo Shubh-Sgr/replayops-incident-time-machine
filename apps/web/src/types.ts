@@ -57,6 +57,8 @@ export interface ReplayResult {
   status: "queued" | "running" | "passed" | "failed";
   progress: number;
   createdAt: string;
+  evidenceVersion: string;
+  eventCount: number;
   config: ReplayConfig;
   projection: {
     baselinePeak: number;
@@ -108,6 +110,9 @@ export interface IncidentDiagnosis {
   originService?: string;
   servicePath: string[];
   confidence: number;
+  evidenceCompleteness: number;
+  causalConfidence: number;
+  scoreExplanation: string[];
   changeCandidates: DiagnosisCandidate[];
   signalDeltas: SignalDelta[];
   hypotheses: DiagnosticHypothesis[];
@@ -178,7 +183,12 @@ export interface WorkspaceContext { organizationId: string; organizationName: st
 export interface ServiceDefinition { id: string; name: string; ownerTeam: string; tier: "critical" | "standard" | "internal"; repositoryUrl?: string | null; runbookUrl?: string | null; dependencies: string[]; createdAt: string; updatedAt: string }
 export interface IncidentPolicy { incidentThreshold: number; groupingWindowMinutes: number; suppressLowSeverity: boolean; maintenanceMode: boolean; updatedAt: string }
 export interface TeamMember { userId: string; email: string; displayName: string; role: WorkspaceRole; joinedAt: string }
-export interface TeamInvitation { id: string; email: string; role: WorkspaceRole; status: "pending" | "accepted" | "revoked" | "expired"; expiresAt: string; createdAt: string; inviteToken?: string }
+export interface TeamInvitation { id: string; email: string; role: WorkspaceRole; status: "pending" | "accepted" | "revoked" | "expired"; emailDeliveryStatus: "sent" | "manual" | "failed"; emailedAt?: string | null; emailLastError?: string | null; expiresAt: string; createdAt: string; inviteToken?: string }
 export interface AuditEntry { id: string; actor: string; action: string; targetType: string; targetId?: string | null; detail: Record<string, unknown>; createdAt: string }
 export interface QueueJob { id: string; integrationId: string; externalId: string; status: "queued" | "processing" | "completed" | "retrying" | "dead_letter"; attempts: number; lastError?: string | null; nextAttemptAt: string; createdAt: string; updatedAt: string }
-export interface MitigationRequest { id: string; incidentId: string; requestedBy: string; reviewedBy?: string | null; title: string; action: string; rollbackPlan: string; status: "pending" | "approved" | "rejected" | "executed"; createdAt: string; reviewedAt?: string | null }
+export interface MitigationRequest { id: string; incidentId: string; requestedBy: string; reviewedBy?: string | null; title: string; action: string; rollbackPlan: string; replayRunId: string; replayConfig: ReplayConfig; replayProjection: ReplayResult["projection"]; evidenceVersion: string; stale: boolean; status: "pending" | "approved" | "rejected" | "executed"; createdAt: string; reviewedAt?: string | null }
+export type HypothesisTestStatus = "planned" | "running" | "supported" | "disproved" | "inconclusive";
+export interface HypothesisTest { id: string; incidentId: string; hypothesisId: string; title: string; instruction: string; assignee: string; status: HypothesisTestStatus; result: string; createdAt: string; updatedAt: string; completedAt?: string | null }
+export interface RecoveryVerification { id: string; incidentId: string; metric: string; targetValue: number; baselineValue: number; observedValue?: number | null; observationMinutes: number; status: "pending" | "verified" | "failed"; reason: string; createdAt: string; updatedAt: string }
+export interface IncidentPostmortem { incidentId: string; summary: string; rootCause: string; impact: string; recovery: string; followUps: string; status: "draft" | "published"; updatedAt: string }
+export interface ActionNotification { id: string; kind: "approval" | "ingestion" | "hypothesis"; title: string; detail: string; incidentId?: string; href: string; createdAt: string }

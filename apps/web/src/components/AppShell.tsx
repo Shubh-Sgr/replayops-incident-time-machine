@@ -1,8 +1,10 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { Activity, Bell, Bot, CircleUserRound, Gauge, LogOut, Menu, Moon, RadioTower, Search, Settings2, Sun, X } from "lucide-react";
 import { useEffect, useState } from "react";
-import { NavLink, Outlet, useLocation } from "react-router-dom";
+import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
 import { cn } from "../lib/utils";
+import { api } from "../lib/api";
 import { useAuth } from "../providers/AuthProvider";
 import { useTheme } from "../providers/ThemeProvider";
 import { AssistantDrawer } from "./AssistantDrawer";
@@ -19,10 +21,12 @@ export function AppShell() {
   const [mobileNav, setMobileNav] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [assistantOpen, setAssistantOpen] = useState(false);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
   const { user, signOut } = useAuth();
   const { theme, toggleTheme } = useTheme();
   const location = useLocation();
   const incidentId = location.pathname.startsWith("/incidents/") ? location.pathname.split("/")[2] : undefined;
+  const notifications = useQuery({ queryKey: ["notifications"], queryFn: api.notifications, refetchInterval: 20_000 });
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
@@ -48,7 +52,7 @@ export function AppShell() {
         </div>
         <div>
           <p className="font-heading text-lg font-semibold tracking-[-0.025em]">ReplayOps</p>
-          <p className="measurement-number text-[10px] text-muted">INCIDENT TIME MACHINE</p>
+          <p className="measurement-number text-xs text-muted">INCIDENT TIME MACHINE</p>
         </div>
       </div>
 
@@ -107,11 +111,11 @@ export function AppShell() {
           <button className="flex min-h-10 min-w-0 flex-1 items-center gap-2 rounded-control bg-rail px-3 text-left text-sm text-muted transition-colors hover:bg-elevated hover:text-ink sm:max-w-md" onClick={() => setSearchOpen(true)}>
             <Search className="h-4 w-4 shrink-0" />
             <span className="truncate">Search incident evidence</span>
-            <kbd className="measurement-number ml-auto hidden rounded bg-panel px-1.5 py-0.5 text-[10px] text-faint sm:inline">⌘K</kbd>
+            <kbd className="measurement-number ml-auto hidden rounded bg-panel px-1.5 py-0.5 text-xs text-faint sm:inline">⌘K</kbd>
           </button>
           <div className="ml-auto flex items-center gap-1">
             <button className="control-quiet !px-3" onClick={toggleTheme} aria-label={`Use ${theme === "dark" ? "light" : "dark"} theme`}>{theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}</button>
-            <button className="control-quiet !px-3" aria-label="Notifications"><Bell className="h-4 w-4" /><span className="sr-only">2 unread</span></button>
+            <div className="relative"><button className="control-quiet relative !px-3" aria-label="Action notifications" onClick={() => setNotificationsOpen((value) => !value)}><Bell className="h-4 w-4" />{notifications.data?.length ? <span className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-danger" /> : null}<span className="sr-only">{notifications.data?.length ?? 0} actions need attention</span></button>{notificationsOpen && <div className="absolute right-0 top-12 z-40 w-[min(360px,calc(100vw-2rem))] overflow-hidden rounded-panel border border-line bg-panel shadow-drawer"><div className="border-b border-line px-4 py-3"><p className="text-sm font-semibold">Actions needing attention</p><p className="mt-0.5 text-xs text-muted">Free in-app alerts for approvals, assigned tests, and failed ingestion.</p></div><div className="max-h-96 overflow-y-auto">{notifications.data?.map((item) => <Link key={item.id} to={item.href} onClick={() => setNotificationsOpen(false)} className="block border-b border-line px-4 py-3 last:border-b-0 hover:bg-elevated"><div className="flex items-center justify-between gap-3"><p className="text-sm font-semibold">{item.title}</p><span className="measurement-number text-xs uppercase text-muted">{item.kind}</span></div><p className="mt-1 line-clamp-2 text-xs leading-5 text-muted">{item.detail}</p></Link>)}{notifications.data && !notifications.data.length && <div className="px-4 py-10 text-center text-sm text-muted">No operational actions are waiting.</div>}</div></div>}</div>
             <button className="control-primary !px-3 sm:!px-4" onClick={() => setAssistantOpen(true)} aria-label="Ask ReplayOps"><Bot className="h-4 w-4 sm:mr-2" /><span className="hidden sm:inline">Ask ReplayOps</span></button>
           </div>
         </header>

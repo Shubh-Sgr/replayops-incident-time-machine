@@ -8,7 +8,7 @@ Its differentiated workflow is the diagnostic proof loop: precursor → symptom 
 
 The included workspace is production-configurable and also runs without cloud credentials using a synthetic in-memory organization.
 
-For an end-to-end explanation of the architecture, feature flows, engineering decisions, API routes, database model, and user guide, see [`CODE_WALKTHROUGH.md`](CODE_WALKTHROUGH.md). For a plain-language explanation of every current and planned product capability, see [`FEATURE_GUIDE.md`](FEATURE_GUIDE.md).
+For an end-to-end explanation of the architecture, feature flows, engineering decisions, API routes, database model, and user guide, see [`CODE_WALKTHROUGH.md`](CODE_WALKTHROUGH.md). For a plain-language explanation of every current and planned product capability, see [`FEATURE_GUIDE.md`](FEATURE_GUIDE.md). For a feature-by-feature map tied directly to the implementation, including impact scoring and AI boundaries, see [`docs/REPLAYOPS_FEATURES_WITH_CODE.md`](docs/REPLAYOPS_FEATURES_WITH_CODE.md).
 
 ## Architecture
 
@@ -35,7 +35,7 @@ Every authenticated delivery is now persisted to a Supabase-backed `ingestion_qu
 
 - **Service map:** records owner, criticality, repository, runbook, and dependencies for architecture-aware grouping.
 - **Intake policy:** configures incident threshold, grouping window, low-severity suppression, and maintenance mode.
-- **Team access:** admin, responder, and viewer roles are enforced at the API; admins can create expiring email-bound invite links.
+- **Team access:** admin, responder, and viewer roles are enforced at the API; admins can email expiring, email-bound invitation links with a copy-link fallback.
 - **Audit trail:** successful mutations and governed actions retain actor, target, detail, and timestamp.
 - **Grounded AI:** assistant context is redacted before provider calls and responses expose incident/event citations, evidence boundary, model mode, and confidence.
 - **Mitigation approval:** responders submit an exact action plus rollback plan; a separate administrator approves or rejects it. ReplayOps does not execute infrastructure commands.
@@ -62,6 +62,19 @@ Open `http://localhost:5173` and choose **Explore the synthetic workspace**. The
 6. Copy the project URL and keys into the environment variables shown in `.env.example`.
 
 For the backend, use a direct or pooled PostgreSQL connection string that supports pgvector. Set `ENABLE_DEMO_MODE=false` in public production environments.
+
+### Invitation email delivery
+
+ReplayOps uses Resend's HTTP API for transactional invitation email. The core invitation flow remains usable without an email provider: the administrator receives a secure copyable link and the interface explicitly labels it as link-only delivery.
+
+To enable outbound email on Render:
+
+- Create a Resend account and verify a sending domain.
+- Set `RESEND_API_KEY` to a send-enabled API key.
+- Set `INVITE_FROM_EMAIL` to a sender on the verified domain, such as `ReplayOps <invites@example.com>`.
+- Set `PUBLIC_WEB_URL` to the production Vercel URL so emailed links point to the correct application.
+
+Each provider request uses the invitation ID as an idempotency key. ReplayOps records whether the provider accepted the email, failed, or was not configured; failed delivery never destroys the valid manual invitation link.
 
 ## AI and semantic search
 

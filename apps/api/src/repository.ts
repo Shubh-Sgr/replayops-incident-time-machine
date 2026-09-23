@@ -21,8 +21,10 @@ export interface Repository {
   createEvent(userId: string, incidentId: string, input: EventInput): Promise<IncidentEvent | null>;
   updateEvent(userId: string, incidentId: string, eventId: string, input: Partial<EventInput>): Promise<IncidentEvent | null>;
   deleteEvent(userId: string, incidentId: string, eventId: string): Promise<boolean>;
+  moveEvent(userId: string, incidentId: string, eventId: string, targetIncidentId: string): Promise<IncidentEvent | null>;
   listDecisions(userId: string, incidentId: string): Promise<IncidentDecision[]>;
   createDecision(userId: string, incidentId: string, input: DecisionInput): Promise<IncidentDecision | null>;
+  listReplays(userId: string, incidentId: string): Promise<ReplayResult[]>;
   runReplay(userId: string, incidentId: string, config: ReplayConfig): Promise<ReplayResult | null>;
   search(userId: string, query: string, embedding?: number[]): Promise<SearchResult[]>;
   listIntegrations(userId: string): Promise<Integration[]>;
@@ -131,6 +133,11 @@ export class MemoryRepository implements Repository {
     incident.updatedAt = new Date().toISOString();
     return incident.events.length < before;
   }
+  async moveEvent(_userId: string, incidentId: string, eventId: string, targetIncidentId: string) {
+    const source = this.incidents.find((item) => item.id === incidentId); const target = this.incidents.find((item) => item.id === targetIncidentId); const event = source?.events.find((item) => item.id === eventId);
+    if (!source || !target || !event || source.id === target.id) return null;
+    source.events = source.events.filter((item) => item.id !== eventId); event.incidentId = target.id; target.events.push(event); target.events.sort((a,b)=>a.timestamp.localeCompare(b.timestamp)); const now = new Date().toISOString(); source.updatedAt=now; target.updatedAt=now; return clone(event);
+  }
   async listDecisions(_userId: string, incidentId: string) {
     return clone(this.decisions.filter((decision) => decision.incidentId === incidentId).sort((a, b) => b.timestamp.localeCompare(a.timestamp)));
   }
@@ -141,6 +148,9 @@ export class MemoryRepository implements Repository {
     this.decisions.unshift(decision);
     return clone(decision);
   }
+  async listReplays(_userId: string, incidentId: string) {
+    return clone(this.replayRuns.filter((run) => run.incidentId === incidentId && run.config && run.projection) as ReplayResult[]);
+  }
   async runReplay(_userId: string, incidentId: string, config: ReplayConfig) {
     const incident = this.incidents.find((item) => item.id === incidentId);
     if (!incident) return null;
@@ -150,7 +160,9 @@ export class MemoryRepository implements Repository {
       name: `Retry ${config.retryCeiling} · cap ${config.concurrencyCap} · ${config.timeoutMs}ms`,
       status: projection.state === "critical" ? "failed" : "passed",
       progress: 100,
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      evidenceVersion: incident.updatedAt,
+      eventCount: incident.events.length
     };
     this.replayRuns.unshift(run);
     return clone(run);
@@ -282,7 +294,11 @@ const mapDecision = (row: Row): IncidentDecision => {
 const mapReplayRun = (row: Row): ReplayRun => ({
   id: String(row.id), incidentId: String(row.incident_id), name: String(row.name),
   status: row.status as ReplayRun["status"], progress: Number(row.progress),
-  createdAt: new Date(String(row.created_at)).toISOString()
+  createdAt: new Date(String(row.created_at)).toISOString(),
+  ...(row.config ? { config: row.config as ReplayConfig } : {}),
+  ...(row.projection ? { projection: row.projection as ReplayProjection } : {}),
+  ...(row.evidence_version ? { evidenceVersion: new Date(String(row.evidence_version)).toISOString() } : {}),
+  ...(row.event_count !== undefined ? { eventCount: Number(row.event_count) } : {})
 });
 const mapDelivery = (row: Row): IntegrationDelivery => ({
   id: String(row.id), integrationId: String(row.integration_id), externalId: String(row.external_id),
@@ -356,6 +372,10 @@ class PostgresRepository implements Repository {
       alter table integrations enable row level security;
       alter table ingestion_deliveries enable row level security;
       alter table ingestion_signals enable row level security;
+      alter table replay_runs add column if not exists config jsonb;
+      alter table replay_runs add column if not exists projection jsonb;
+      alter table replay_runs add column if not exists evidence_version timestamptz;
+      alter table replay_runs add column if not exists event_count integer;
     `);
   }
   private async hydrated(userId: string, where = "", values: unknown[] = []) {
@@ -464,6 +484,7 @@ class PostgresRepository implements Repository {
   async createEvent(userId: string, incidentId: string, input: EventInput) {
     if (!await this.getIncident(userId, incidentId)) return null;
     const result = await this.pool.query(`insert into incident_events (incident_id,timestamp,service,kind,title,detail,impact_score,metadata) values ($1,$2,$3,$4,$5,$6,$7,$8) returning *`, [incidentId, input.timestamp, input.service, input.kind, input.title, input.detail, input.impactScore, input.metadata ?? {}]);
+    await this.pool.query("update incidents set updated_at=now() where id=$1", [incidentId]);
     const row = result.rows[0] as Row | undefined;
     return row ? mapEvent(row) : null;
   }
@@ -483,17 +504,32 @@ class PostgresRepository implements Repository {
       values
     );
     const row = result.rows[0] as Row | undefined;
+    if (row) await this.pool.query("update incidents set updated_at=now() where id=$1", [incidentId]);
     return row ? mapEvent(row) : null;
   }
   async deleteEvent(userId: string, incidentId: string, eventId: string) {
-    return (await this.pool.query(
+    const result = await this.pool.query(
       `delete from incident_events e where e.incident_id = $2 and e.id = $3
        and exists (
          select 1 from incidents i join organization_members m on m.organization_id = i.organization_id
          where i.id = e.incident_id and m.user_id = $1
        )`,
       [userId, incidentId, eventId]
-    )).rowCount === 1;
+    );
+    if (result.rowCount === 1) await this.pool.query("update incidents set updated_at=now() where id=$1", [incidentId]);
+    return result.rowCount === 1;
+  }
+  async moveEvent(userId: string, incidentId: string, eventId: string, targetIncidentId: string) {
+    const client = await this.pool.connect();
+    try { await client.query("begin"); const result = await client.query(
+      `update incident_events e set incident_id=$4 where e.id=$3 and e.incident_id=$2
+       and exists(select 1 from incidents s join organization_members m on m.organization_id=s.organization_id where s.id=$2 and m.user_id=$1)
+       and exists(select 1 from incidents t join organization_members m on m.organization_id=t.organization_id where t.id=$4 and m.user_id=$1 and t.organization_id=(select organization_id from incidents where id=$2)) returning e.*`,
+      [userId, incidentId, eventId, targetIncidentId]
+    ); const row=result.rows[0] as Row|undefined; if (!row) { await client.query("rollback"); return null; }
+      await client.query(`update ingestion_signals set incident_id=$2 where incident_id=$1 and external_id=$3`, [incidentId,targetIncidentId,(row.metadata as Record<string,unknown>|undefined)?.sourceExternalId ?? ""]);
+      await client.query(`update incidents set updated_at=now() where id=any($1::uuid[])`, [[incidentId,targetIncidentId]]); await client.query("commit"); return mapEvent(row);
+    } catch(error) { await client.query("rollback"); throw error; } finally { client.release(); }
   }
   async listDecisions(userId: string, incidentId: string) {
     const result = await this.pool.query(
@@ -521,6 +557,16 @@ class PostgresRepository implements Repository {
     const row = result.rows[0] as Row | undefined;
     return row ? mapDecision(row) : null;
   }
+  async listReplays(userId: string, incidentId: string) {
+    const result = await this.pool.query(
+      `select r.* from replay_runs r
+       where r.incident_id=$2 and r.config is not null and r.projection is not null
+       and exists (select 1 from organization_members m where m.organization_id=r.organization_id and m.user_id=$1)
+       order by r.created_at desc limit 30`,
+      [userId, incidentId]
+    );
+    return (result.rows as Row[]).map((row) => mapReplayRun(row) as ReplayResult);
+  }
   async runReplay(userId: string, incidentId: string, config: ReplayConfig) {
     const incident = await this.getIncident(userId, incidentId);
     if (!incident) return null;
@@ -528,16 +574,16 @@ class PostgresRepository implements Repository {
     const name = `Retry ${config.retryCeiling} · cap ${config.concurrencyCap} · ${config.timeoutMs}ms · ${new Date().toISOString().slice(11, 19)}`;
     const status = projection.state === "critical" ? "failed" : "passed";
     const result = await this.pool.query(
-      `insert into replay_runs (organization_id, incident_id, name, status, progress)
-       select i.organization_id, i.id, $3, $4, 100
+      `insert into replay_runs (organization_id, incident_id, name, status, progress, config, projection, evidence_version, event_count)
+       select i.organization_id, i.id, $3, $4, 100, $5, $6, i.updated_at, $7
        from incidents i join organization_members m on m.organization_id = i.organization_id
        where i.id = $2 and m.user_id = $1
        returning *`,
-      [userId, incidentId, name, status]
+      [userId, incidentId, name, status, config, projection, incident.events.length]
     );
     const row = result.rows[0] as Row | undefined;
     if (!row) return null;
-    return { ...mapReplayRun(row), config, projection } satisfies ReplayResult;
+    return { ...mapReplayRun(row), config, projection, evidenceVersion: incident.updatedAt, eventCount: incident.events.length } satisfies ReplayResult;
   }
   async search(userId: string, query: string, embedding?: number[]) {
     const result = embedding

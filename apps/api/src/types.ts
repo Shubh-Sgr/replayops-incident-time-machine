@@ -50,6 +50,10 @@ export interface ReplayRun {
   status: "queued" | "running" | "passed" | "failed";
   progress: number;
   createdAt: string;
+  config?: ReplayConfig;
+  projection?: ReplayProjection;
+  evidenceVersion?: string;
+  eventCount?: number;
 }
 
 export interface IncidentDecision {
@@ -83,6 +87,8 @@ export interface ReplayProjection {
 export interface ReplayResult extends ReplayRun {
   config: ReplayConfig;
   projection: ReplayProjection;
+  evidenceVersion: string;
+  eventCount: number;
 }
 
 export interface DiagnosisCandidate {
@@ -123,6 +129,9 @@ export interface IncidentDiagnosis {
   originService?: string;
   servicePath: string[];
   confidence: number;
+  evidenceCompleteness: number;
+  causalConfidence: number;
+  scoreExplanation: string[];
   changeCandidates: DiagnosisCandidate[];
   signalDeltas: SignalDelta[];
   hypotheses: DiagnosticHypothesis[];
@@ -243,6 +252,9 @@ export interface TeamInvitation {
   email: string;
   role: WorkspaceRole;
   status: "pending" | "accepted" | "revoked" | "expired";
+  emailDeliveryStatus: "sent" | "manual" | "failed";
+  emailedAt?: string | null;
+  emailLastError?: string | null;
   expiresAt: string;
   createdAt: string;
   inviteToken?: string;
@@ -278,7 +290,62 @@ export interface MitigationRequest {
   title: string;
   action: string;
   rollbackPlan: string;
+  replayRunId: string;
+  replayConfig: ReplayConfig;
+  replayProjection: ReplayProjection;
+  evidenceVersion: string;
+  stale: boolean;
   status: "pending" | "approved" | "rejected" | "executed";
   createdAt: string;
   reviewedAt?: string | null;
+}
+
+export type HypothesisTestStatus = "planned" | "running" | "supported" | "disproved" | "inconclusive";
+export interface HypothesisTest {
+  id: string;
+  incidentId: string;
+  hypothesisId: string;
+  title: string;
+  instruction: string;
+  assignee: string;
+  status: HypothesisTestStatus;
+  result: string;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string | null;
+}
+
+export interface RecoveryVerification {
+  id: string;
+  incidentId: string;
+  metric: string;
+  targetValue: number;
+  baselineValue: number;
+  observedValue?: number | null;
+  observationMinutes: number;
+  status: "pending" | "verified" | "failed";
+  reason: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface IncidentPostmortem {
+  incidentId: string;
+  summary: string;
+  rootCause: string;
+  impact: string;
+  recovery: string;
+  followUps: string;
+  status: "draft" | "published";
+  updatedAt: string;
+}
+
+export interface ActionNotification {
+  id: string;
+  kind: "approval" | "ingestion" | "hypothesis";
+  title: string;
+  detail: string;
+  incidentId?: string;
+  href: string;
+  createdAt: string;
 }

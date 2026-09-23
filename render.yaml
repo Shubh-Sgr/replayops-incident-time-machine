@@ -15,6 +15,12 @@ services:
         value: https://replayops-incident-time-machine.vercel.app
       - key: PUBLIC_API_URL
         value: https://replayops-incident-api.onrender.com
+      - key: PUBLIC_WEB_URL
+        value: https://replayops-incident-time-machine.vercel.app
+      - key: RESEND_API_KEY
+        sync: false
+      - key: INVITE_FROM_EMAIL
+        sync: false
       - key: INGESTION_SIGNING_SECRET
         generateValue: true
       - key: OPENAI_BASE_URL
@@ -23,3 +29,9 @@ services:
         value: gpt-4o-mini
       - key: OPENAI_EMBEDDING_MODEL
         value: text-embedding-3-small
+      - key: GOOGLE_AI_API_KEY
+        sync: false
+      - key: GOOGLE_AI_CHAT_MODEL
+        value: gemini-3.8-flash
+      - key: GOOGLE_AI_EMBEDDING_MODEL
+        value: gemini-embedding-2
