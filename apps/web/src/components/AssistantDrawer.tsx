@@ -83,10 +83,11 @@ export function AssistantDrawer({ open, incidentId, onClose }: { open: boolean; 
                   {message.result && (
                     <div className="mt-4 border-t border-line pt-3">
                       <div className="flex items-center justify-between text-xs text-muted">
-                        <span>{message.result.mode === "deterministic" ? "Deterministic fallback" : "Provider-assisted analysis"}</span>
+                        <span>{message.result.mode === "deterministic" ? "Deterministic fallback" : `Provider-assisted analysis${message.result.providerModel ? ` · ${message.result.providerModel}` : ""}`}</span>
                         <span className="measurement-number">Confidence {Math.round(message.result.confidence * 100)}%</span>
                       </div>
                       <p className="mt-2 text-xs leading-5 text-muted">Evidence boundary: {message.result.evidenceBoundary}{message.result.redactions ? ` · ${message.result.redactions} sensitive value${message.result.redactions === 1 ? "" : "s"} redacted before analysis` : " · no sensitive values detected"}.</p>
+                      {message.result.providerError && <p className="mt-2 text-xs leading-5 text-warning">{message.result.providerError}</p>}
                       <div className="mt-3 flex flex-wrap gap-2">
                         {message.result.citations.map((citation) => (
                           <Link key={citation.incidentId} to={`/incidents/${citation.incidentId}`} onClick={onClose} title={citation.excerpt} className="inline-flex items-center gap-1.5 rounded-full bg-info/11 px-2.5 py-1 text-xs font-semibold text-info hover:bg-info/18">

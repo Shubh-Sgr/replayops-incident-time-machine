@@ -50,8 +50,7 @@ export async function answerQuestion(question: string, evidence: SearchResult[])
   const evidenceBoundary = evidence.length
     ? `${citations.length} incident record${citations.length === 1 ? "" : "s"} and ${citations.reduce((count, citation) => count + citation.eventIds.length, 0)} cited events`
     : "No matching incident evidence";
-  const providerKey = config.googleAiKey ?? config.openAiKey;
-  if (!providerKey) {
+  const deterministicAnswer = (providerError?: string) => {
     const lead = evidence[0]?.incident;
     if (lead && /adversarial|challenge|disconfirm|falsif/i.test(question)) {
       const events = [...lead.events].sort((left, right) => left.timestamp.localeCompare(right.timestamp));
@@ -62,31 +61,53 @@ export async function answerQuestion(question: string, evidence: SearchResult[])
         ? `Strongest challenge: ${precursor.title} occurs before ${symptom.title}, but ${hasContext ? "the available correlation context has not yet been inspected end to end" : "no trace or request ID proves the same requests crossed both events"}. Falsify it by comparing slow and healthy ${symptom.service} requests in the same window and finding their first divergent dependency span. I would downgrade this hypothesis if healthy requests show the same ${precursor.service} condition, or if affected requests begin failing before that condition; I would upgrade it only when correlated failing requests diverge there.`
         : "There is not enough ordered evidence to challenge this claim safely. Add a timestamped precursor, a customer-visible symptom, and a healthy control sample.");
       return {
-        answer: safeAnswer.text,
-        citations, confidence: symptom && precursor ? 0.71 : 0.22, mode: "deterministic" as const, redactions: redactions + safeAnswer.redactions, evidenceBoundary
+        answer: safeAnswer.text, citations, confidence: symptom && precursor ? 0.71 : 0.22, mode: "deterministic" as const,
+        redactions: redactions + safeAnswer.redactions, evidenceBoundary, ...(providerError ? { providerError } : {})
       };
     }
-    const safeAnswer = redactSensitiveText(lead ? `The strongest available match is ${lead.code}. Its evidence suggests pressure began in ${lead.events[0]?.service ?? lead.service} before propagating to ${lead.service}. Review the highlighted events before accepting this as root cause; the demo assistant is operating without an external model.` : "No matching incident evidence was found. Add more timeline detail before drawing a causal conclusion.");
+    const safeAnswer = redactSensitiveText(lead ? `The strongest available match is ${lead.code}. Its evidence suggests pressure began in ${lead.events[0]?.service ?? lead.service} before propagating to ${lead.service}. Review the highlighted events before accepting this as root cause; the assistant is using deterministic analysis because an external model is unavailable.` : "No matching incident evidence was found. Add more timeline detail before drawing a causal conclusion.");
     return {
-      answer: safeAnswer.text,
-      citations, confidence: lead ? 0.63 : 0.18, mode: "deterministic" as const, redactions: redactions + safeAnswer.redactions, evidenceBoundary
+      answer: safeAnswer.text, citations, confidence: lead ? 0.63 : 0.18, mode: "deterministic" as const,
+      redactions: redactions + safeAnswer.redactions, evidenceBoundary, ...(providerError ? { providerError } : {})
     };
-  }
+  };
+  const providerKey = config.googleAiKey ?? config.openAiKey;
+  if (!providerKey) return deterministicAnswer();
   const providerBaseUrl = config.googleAiKey ? "https://generativelanguage.googleapis.com/v1beta/openai" : config.openAiBaseUrl;
-  const providerModel = config.googleAiKey ? config.googleChatModel : config.chatModel;
-  const response = await fetch(`${providerBaseUrl}/chat/completions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${providerKey}` },
-    body: JSON.stringify({
-      model: providerModel, temperature: 0.2,
-      messages: [
-        { role: "system", content: "You are ReplayOps. Use only supplied evidence, separate observation from hypothesis, cite incident codes, state uncertainty, and stay under 180 words." },
-        { role: "user", content: `Question: ${safeQuestion.text}\n\nEvidence:\n${evidenceText || "No matching evidence."}` }
-      ]
-    })
-  });
-  if (!response.ok) throw new Error("The configured AI provider did not return a successful response.");
-  const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
-  const safeAnswer = redactSensitiveText(data.choices?.[0]?.message?.content ?? "The assistant returned no text.");
-  return { answer: safeAnswer.text, citations, confidence: Math.min(0.88, 0.45 + evidence.length * 0.09), mode: "provider" as const, redactions: redactions + safeAnswer.redactions, evidenceBoundary };
+  const providerModels = config.googleAiKey
+    ? [...new Set([config.googleChatModel, "gemini-3.6-flash", "gemini-3-flash-preview"])]
+    : [config.chatModel];
+  const failures: string[] = [];
+  for (const providerModel of providerModels) {
+    try {
+      const response = await fetch(`${providerBaseUrl}/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${providerKey}` },
+        body: JSON.stringify({
+          model: providerModel, temperature: 0.2,
+          messages: [
+            { role: "system", content: "You are ReplayOps. Use only supplied evidence, separate observation from hypothesis, cite incident codes, state uncertainty, and stay under 180 words." },
+            { role: "user", content: `Question: ${safeQuestion.text}\n\nEvidence:\n${evidenceText || "No matching evidence."}` }
+          ]
+        })
+      });
+      if (!response.ok) {
+        const safeProviderError = redactSensitiveText((await response.text()).slice(0, 600)).text;
+        failures.push(`${providerModel}: HTTP ${response.status}`);
+        console.warn(`AI provider request failed for ${providerModel} with HTTP ${response.status}: ${safeProviderError}`);
+        if ([401, 403].includes(response.status)) break;
+        continue;
+      }
+      const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
+      const safeAnswer = redactSensitiveText(data.choices?.[0]?.message?.content ?? "The assistant returned no text.");
+      return {
+        answer: safeAnswer.text, citations, confidence: Math.min(0.88, 0.45 + evidence.length * 0.09), mode: "provider" as const,
+        providerModel, redactions: redactions + safeAnswer.redactions, evidenceBoundary
+      };
+    } catch (error) {
+      failures.push(`${providerModel}: network failure`);
+      console.warn(`AI provider request failed for ${providerModel}: ${error instanceof Error ? error.message : "unknown error"}`);
+    }
+  }
+  return deterministicAnswer(`Gemini was unavailable (${failures.join("; ")}). Deterministic evidence analysis was used instead.`);
 }

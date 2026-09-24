@@ -138,6 +138,8 @@ export interface AssistantResponse {
   citations: Array<{ code: string; title: string; incidentId: string; eventIds: string[]; excerpt: string }>;
   confidence: number;
   mode: "deterministic" | "provider";
+  providerModel?: string;
+  providerError?: string;
   redactions: number;
   evidenceBoundary: string;
 }
