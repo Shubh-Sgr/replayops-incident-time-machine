@@ -10,7 +10,7 @@ import { useTheme } from "../providers/ThemeProvider";
 import { AssistantDrawer } from "./AssistantDrawer";
 import { CommandSearch } from "./CommandSearch";
 
-const navigation = 
+const navigation = [
   { to: "/", label: "Operations", icon: Gauge, end: true },
   { to: "/incidents", label: "Incidents", icon: Activity, end: false },
   { to: "/integrations", label: "Connectors", icon: RadioTower, end: false },
