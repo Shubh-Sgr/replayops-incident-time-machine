@@ -2,6 +2,8 @@
 
 This guide explains what ReplayOps does, why each feature exists, where it lives in the codebase, how data moves through it, and what is deterministic versus AI-assisted.
 
+![ReplayOps feature map](./replayops-feature-map.svg)
+
 ![ReplayOps system flow](./replayops-system-flow.svg)
 
 ## 1. The product in one sentence
@@ -13,6 +15,48 @@ ReplayOps receives operational evidence from production tools, decides whether t
 The key design boundary is:
 
 > Deterministic rules decide whether an incident exists. AI helps search, explain, and challenge hypotheses, but it does not open, approve, or close incidents.
+
+## How to read this guide
+
+Each feature description answers four questions:
+
+1. **Why would a responder use it?** The production-debugging problem it removes.
+2. **What happens in the product?** The behavior visible to a user.
+3. **Where is it implemented?** The frontend, API, service, and database path.
+4. **What is its safety boundary?** What the feature deliberately cannot claim or do.
+
+The fastest code-reading path is the **Feature-to-code index** below. The later sections explain the algorithms, data model, and complete incident journey in detail.
+
+## Feature-to-code index
+
+| Product capability | User surface | Backend entry point | Persistence / core logic |
+|---|---|---|---|
+| Account creation, login, protected routes | `LoginPage.tsx`, `AuthProvider.tsx`, `App.tsx` | `requireAuth()` in `auth.ts` | Supabase Auth, `organizations`, `organization_members`, RLS |
+| Operations overview | `DashboardPage.tsx`, `EventVolumeChart.tsx` | `GET /api/dashboard` | `repository.dashboard()` |
+| Incident ledger and CRUD | `IncidentsPage.tsx`, `IncidentEditor.tsx` | `/api/incidents` | `incidents`, `repository.ts` |
+| Timeline and evidence editing | `IncidentWorkbenchPage.tsx`, `CausalTrace.tsx` | `/api/incidents/:id/events` | `incident_events` |
+| Live workbench refresh | `IncidentWorkbenchPage.tsx` | repeated incident/diagnosis queries | evidence version is `incident.updatedAt` |
+| GitHub, OTLP, Grafana, generic ingestion | `IntegrationsPage.tsx` | `/ingest/:integrationId` | `ingestion.ts`, `ingestion_signals` |
+| Durable queue and dead letters | `WorkspacePage.tsx` → `QueueHealth` | `/api/ingestion-queue` | `queue.ts`, `ingestion_queue` |
+| Impact scoring and automatic incidents | connector health + incident ledger | `repository.ingest()` | provider rules, intake policy, grouping window |
+| Service catalog and dependency graph | `WorkspacePage.tsx` → `ServiceMap` | `/api/services` | `workspace.ts`, `service_catalog` |
+| Intake threshold and suppression | `WorkspacePage.tsx` → `IntakePolicyPanel` | `/api/incident-policy` | `incident_policies` |
+| Deterministic diagnosis | `ResponseConsole.tsx` → `DiagnosisPanel` | `GET /api/incidents/:id/diagnosis` | `diagnosis.ts` |
+| Hypothesis test assignment/outcome | `HypothesisTestCard` | `/api/incidents/:id/hypothesis-tests` | `hypothesis_tests`, `workspace.ts` |
+| Semantic search | `CommandSearch.tsx` | `POST /api/search` | `embedText()`, pgvector/full-text fallback |
+| Grounded AI assistant | `AssistantDrawer.tsx` | `POST /api/assistant` | `answerQuestion()` in `ai.ts` |
+| Decision log | `ResponseConsole.tsx` → `DecisionLog` | `/api/incidents/:id/decisions` | encoded `incident_activities` entries |
+| Counterfactual replay and history | `ResponseConsole.tsx` → `ReplayLab` | `/api/incidents/:id/replays` | `simulateReplay()`, `replay_runs` |
+| Replay-bound mitigation approval | `ReplayLab` | `/api/incidents/:id/mitigations` | `mitigation_requests`, `workspace.ts` |
+| Recovery proof and resolution gate | `ResponseConsole.tsx` → `RecoveryPanel` | `/api/incidents/:id/recovery` | `recovery_verifications`, `assertRecoveryVerified()` |
+| Grouping correction and provenance | event controls in workbench | `POST /events/:eventId/move` | `moveEvent()`, audit log, retained metadata |
+| Evidence drill-down | event anchors and source links | incident read endpoints | `#event-{id}`, `metadata.sourceUrl` |
+| Action notifications | bell in `AppShell.tsx` | `GET /api/notifications` | derived from approvals, tests, dead letters |
+| Handoff brief | `HandoffBrief` | existing incident endpoints | generated Markdown from evidence, decisions, replay, tests, recovery |
+| Editable postmortem | `HandoffBrief` | `GET/PUT /api/incidents/:id/postmortem` | `incident_postmortems` |
+| Team invitations and roles | `WorkspacePage.tsx` → `TeamAccess` | `/api/team/*` | hashed tokens, email delivery status, memberships |
+| Audit trail | `WorkspacePage.tsx` → `AuditTrail` | `GET /api/audit` | `workspace_audit_log` |
+| Theme, mobile, accessibility | `AppShell.tsx`, `ThemeProvider.tsx`, `index.css` | — | semantic tokens, keyboard controls, responsive layout |
 
 ## 1.1 What changed in the production-debugging upgrade
 
@@ -446,6 +490,72 @@ UI: `DiagnosisPanel` in `apps/web/src/components/ResponseConsole.tsx`.
 
 The review asks the AI assistant to challenge the selected claim, identify disconfirming evidence, and propose a falsification test. AI cannot approve the hypothesis.
 
+### Separate evidence completeness from causal confidence
+
+ReplayOps deliberately exposes two scores instead of one vague “confidence” number:
+
+- `evidenceCompleteness` measures whether the record contains enough coverage: event count, service count, a change, correlation IDs, a healthy cohort, and a recovery observation.
+- `causalConfidence` measures how strongly the available evidence supports a cause: a recorded change, trace/request correlation, healthy-versus-failing comparison, recovery behavior, and ordered observations.
+
+```ts
+const evidenceCompleteness = clamp(
+  Math.min(30, events.length * 5) +
+  Math.min(15, servicePath.length * 5) +
+  (hasRecovery ? 15 : 0) + (hasChange ? 15 : 0) +
+  (correlated ? 15 : 0) + (hasHealthyCohort ? 10 : 0),
+  0, 100
+);
+
+const causalConfidence = clamp(
+  24 + (hasChange ? 14 : 0) + (correlated ? 22 : 0) +
+  (hasHealthyCohort ? 18 : 0) + (hasRecovery ? 10 : 0) +
+  Math.min(12, events.length * 2),
+  12, 94
+);
+```
+
+This distinction prevents “we collected many logs” from being mistaken for “we proved the cause.”
+
+## 18.1 Structured hypothesis tests
+
+### User value
+
+A diagnosis suggestion is not useful if it remains prose. ReplayOps turns a suggested falsification test into assigned work with a recorded outcome.
+
+### Workflow
+
+```text
+planned → running → supported | disproved | inconclusive
+```
+
+A test stores the hypothesis ID, title, exact instruction, assignee, status, result, and completion time. The assignee can run the test and record what was observed. The original hypothesis remains intact, so the team can distinguish the theory from the experiment.
+
+### Code path
+
+- UI: `HypothesisTestCard` and `DiagnosisPanel` in `apps/web/src/components/ResponseConsole.tsx`
+- API: `GET/POST /api/incidents/:id/hypothesis-tests`, `PATCH /api/hypothesis-tests/:id`
+- Service: `createHypothesisTest()` and `updateHypothesisTest()` in `apps/api/src/workspace.ts`
+- Table: `hypothesis_tests` in migration `005_investigation_proof_loop.sql`
+
+```ts
+export type HypothesisTestStatus =
+  "planned" | "running" | "supported" | "disproved" | "inconclusive";
+```
+
+### Safety boundary
+
+“Supported” means the recorded test increased confidence; it does not mean ReplayOps has mathematically proved root cause. The result text remains visible for human review.
+
+## 18.2 Live investigation updates and freshness
+
+The open workbench refreshes incident evidence and diagnosis every ten seconds. The page shows connection state and last-check time. When `incident.updatedAt` changes, the workbench can explain that new evidence arrived and dependent reasoning or replay freshness must be reviewed.
+
+- UI: query polling and freshness state in `IncidentWorkbenchPage.tsx`
+- Version source: `incidents.updated_at`
+- Downstream consumers: diagnosis, replay evidence version, stale mitigation detection, handoff
+
+This is polling—not a paid realtime service—so it remains compatible with the free deployment architecture. It also avoids presenting an old diagnosis as current while a connector is adding evidence.
+
 ## 19. Semantic search
 
 ### With an AI key
@@ -486,9 +596,20 @@ Search falls back to PostgreSQL full-text search in production or deterministic 
 5. Instruct the model to use only supplied evidence and state uncertainty.
 6. Return structured incident/event citations alongside the answer.
 
-### No-key fallback
+### Google AI provider and no-key fallback
 
-If `OPENAI_API_KEY` is absent, the assistant returns a clearly labeled deterministic answer using the strongest retrieved evidence. The UI exposes whether the answer came from `provider` or `deterministic` mode.
+The deployed configuration can use `GOOGLE_AI_API_KEY`. `ai.ts` selects Google's OpenAI-compatible endpoint and the configured Gemini model when that variable is present; otherwise it can use the generic OpenAI-compatible configuration.
+
+```ts
+const providerBaseUrl = config.googleAiKey
+  ? "https://generativelanguage.googleapis.com/v1beta/openai"
+  : config.openAiBaseUrl;
+const providerModel = config.googleAiKey
+  ? config.googleChatModel
+  : config.chatModel;
+```
+
+If neither Google nor another compatible key is present, the assistant returns a clearly labeled deterministic answer using the strongest retrieved evidence. The UI exposes whether the answer came from `provider` or `deterministic` mode.
 
 ## 21. AI redaction and trust boundary
 
@@ -541,6 +662,31 @@ const totalRelief = Math.max(
 
 It never executes commands against customer infrastructure.
 
+### Persistent replay history and comparison
+
+Every completed replay stores:
+
+- the exact retry, concurrency, and timeout configuration;
+- the complete projection returned to the UI;
+- the incident evidence version used for the calculation;
+- the number of evidence events used;
+- status and creation time.
+
+`GET /api/incidents/:id/replays` restores this history after refresh. `ReplayLab` lets the responder select prior candidates and compare them without rebuilding a result from browser memory.
+
+```ts
+const run: ReplayResult = {
+  id: randomUUID(), incidentId, config, projection,
+  evidenceVersion: incident.updatedAt,
+  eventCount: incident.events.length,
+  status: projection.state === "critical" ? "failed" : "passed",
+  progress: 100,
+  createdAt: new Date().toISOString()
+};
+```
+
+If evidence changes after a replay, the old result remains available as history but is no longer treated as current proof.
+
 ## 24. Governed mitigation approvals
 
 A responder can request approval for an exact action and rollback plan. A different administrator must approve or reject it; self-review is blocked.
@@ -552,17 +698,118 @@ A responder can request approval for an exact action and rollback plan. A differ
 
 Approval records do not execute production actions. They create an auditable human-control boundary.
 
+### Approval is bound to the exact replay
+
+The approval request copies the replay ID, configuration, projection, and `evidenceVersion`. A later slider change cannot silently change the meaning of an existing request. In PostgreSQL, the review query succeeds only when the incident still has the same evidence version:
+
+```sql
+update mitigation_requests m
+set status=$3, reviewed_by=$4, reviewed_at=now()
+from incidents i
+where m.id=$2
+  and m.status='pending'
+  and m.requested_by<>$4
+  and i.id=m.incident_id
+  and i.updated_at=m.evidence_version
+returning m.*;
+```
+
+This gives the approval a defensible meaning: “approve this action, based on this replay, against this evidence.” New evidence requires a new replay and review.
+
+## 24.1 Recovery verification and the resolution gate
+
+### User value
+
+Changing status to `resolved` is not proof that users recovered. ReplayOps requires a measured recovery observation before the API accepts closure.
+
+A recovery record contains:
+
+- metric being observed;
+- baseline value;
+- target value;
+- observed value;
+- observation window in minutes;
+- `pending`, `verified`, or `failed` status;
+- a responder-written reason.
+
+### Code path
+
+- UI: `RecoveryPanel` in `ResponseConsole.tsx`
+- API: `GET/POST /api/incidents/:id/recovery`
+- Service: `saveRecovery()` and `assertRecoveryVerified()` in `workspace.ts`
+- Table: `recovery_verifications`
+
+```ts
+if (parsed.data.status === "resolved") {
+  await workspaceService.assertRecoveryVerified(userId(req), req.params.id);
+}
+```
+
+The API—not only the form—enforces this condition. A client cannot bypass it by sending a direct status update.
+
+## 24.2 Correcting automatic incident grouping
+
+Automatic grouping is a hypothesis based on correlation keys, service relationships, and time. Responders can move an incorrectly grouped evidence event to another incident.
+
+- UI: grouping correction controls in `IncidentWorkbenchPage.tsx`
+- API: `POST /api/incidents/:incidentId/events/:eventId/move`
+- Persistence: `moveEvent()` in `repository.ts`
+- Governance: the action is written to `workspace_audit_log`
+
+The move changes only the incident association. Original timestamp, source external ID, trace ID, source URL, and provider metadata remain on the event. Both incident versions are updated so old replay approvals become stale where appropriate.
+
+The current primitive is a safe one-event move. Bulk merge and split are not yet separate commands; they can be built from the same provenance-preserving operation.
+
+## 24.3 Direct evidence drill-down
+
+Diagnosis candidates and AI citations point to exact timeline anchors such as `#event-{eventId}`. Automated events retain `metadata.sourceUrl`, allowing the responder to jump from ReplayOps to the original GitHub run, trace explorer, or alert when the connector provided a URL.
+
+This solves a crucial trust problem: an explanation is reviewable only when an engineer can inspect the underlying evidence rather than accepting a summary.
+
+Current filters focus on the incident and selected evidence. Dedicated service/event-kind/time-range controls for very large timelines remain a future scaling improvement.
+
+## 24.4 In-app action notifications
+
+The notification bell surfaces work that needs a human:
+
+- pending mitigation requests that the current actor did not create;
+- planned or running hypothesis tests assigned to the current actor;
+- ingestion jobs that exhausted retries and entered dead letter.
+
+`GET /api/notifications` derives these items from source-of-truth tables instead of maintaining a second notification database. Each item deep-links to the incident or connector area.
+
+```sql
+select pending approvals
+union all select assigned hypothesis tests
+union all select dead-letter ingestion jobs
+order by created_at desc;
+```
+
+This is intentionally in-app and free. Slack/Teams delivery is not included in the current scope.
+
 ## 25. Handoff brief
 
 The workbench generates a Markdown handoff that includes:
 
 - Incident identity and status.
-- Current evidence timeline.
+- Complete indexed evidence timeline.
 - Recorded decisions.
 - Latest replay outcome.
+- Assigned hypothesis tests and their outcomes.
+- Latest recovery verification.
 - Explicit next-owner context.
 
 `HandoffBrief` in `apps/web/src/components/ResponseConsole.tsx` supports copy and download. This reduces context loss during shift changes.
+
+### Editable postmortem and learning record
+
+The same handoff area exposes a persistent postmortem with summary, root cause, impact, recovery, follow-ups, and `draft` or `published` state.
+
+- UI: `HandoffBrief` in `ResponseConsole.tsx`
+- API: `GET/PUT /api/incidents/:id/postmortem`
+- Storage: `incident_postmortems`
+
+The postmortem is intentionally separate from the generated handoff. The handoff is a current-state snapshot; the postmortem is a reviewed organizational learning record that survives refresh and can evolve after the incident.
 
 ## 26. Team roles
 
@@ -627,7 +874,7 @@ ReplayOps deliberately keeps its core workflow functional when optional services
 
 | Missing dependency | Fallback |
 |---|---|
-| OpenAI-compatible key | Full-text search and deterministic evidence answers |
+| Google AI or other OpenAI-compatible key | Full-text search and deterministic evidence answers |
 | PostgreSQL | In-memory synthetic workspace for local/demo use |
 | Email provider | Secure invitation link copied manually |
 | Paid queue | PostgreSQL-backed retry queue |
@@ -651,7 +898,10 @@ ReplayOps deliberately keeps its core workflow functional when optional services
 | `incident_policies` | Threshold and suppression rules |
 | `organization_invitations` | Hashed invite tokens and email delivery status |
 | `workspace_audit_log` | Governed change history |
-| `mitigation_requests` | Independent approval workflow |
+| `mitigation_requests` | Replay-bound independent approval workflow |
+| `hypothesis_tests` | Assigned falsification tests and recorded outcomes |
+| `recovery_verifications` | Metric targets, observations, windows, and closure proof |
+| `incident_postmortems` | Persistent draft/published learning record |
 | `service_health_samples` | Dashboard service indicators |
 | `event_volume_samples` | Dashboard request/error series |
 
@@ -665,9 +915,10 @@ ReplayOps deliberately keeps its core workflow functional when optional services
 | `GET/PATCH/DELETE` | `/api/incidents/:id` | Read, update, or delete an incident |
 | `POST` | `/api/incidents/:id/events` | Add evidence |
 | `PATCH/DELETE` | `/api/incidents/:incidentId/events/:eventId` | Edit or remove evidence |
+| `POST` | `/api/incidents/:incidentId/events/:eventId/move` | Move mis-grouped evidence to another incident |
 | `GET` | `/api/incidents/:id/diagnosis` | Deterministic diagnosis |
 | `GET/POST` | `/api/incidents/:id/decisions` | Decision log |
-| `POST` | `/api/incidents/:id/replays` | Counterfactual replay |
+| `GET/POST` | `/api/incidents/:id/replays` | Replay history or a new counterfactual replay |
 | `POST` | `/api/search` | Semantic or full-text search |
 | `POST` | `/api/assistant` | Grounded evidence assistant |
 | `GET/POST` | `/api/integrations` | Connector management |
@@ -680,10 +931,15 @@ ReplayOps deliberately keeps its core workflow functional when optional services
 | `GET/POST` | `/api/team/invitations` | Invitation creation and listing |
 | `POST` | `/api/team/invitations/accept` | Email-bound invite acceptance |
 | `GET` | `/api/audit` | Workspace audit trail |
+| `GET` | `/api/notifications` | Pending approvals, assignments, and failed ingestion |
 | `GET` | `/api/ingestion-queue` | Queue health |
 | `POST` | `/api/ingestion-queue/:id/retry` | Retry failed delivery |
 | `GET/POST` | `/api/incidents/:id/mitigations` | Mitigation requests |
 | `PATCH` | `/api/mitigations/:id` | Independent approval review |
+| `GET/POST` | `/api/incidents/:id/hypothesis-tests` | List or assign falsification tests |
+| `PATCH` | `/api/hypothesis-tests/:id` | Record test progress and outcome |
+| `GET/POST` | `/api/incidents/:id/recovery` | Read or record recovery proof |
+| `GET/PUT` | `/api/incidents/:id/postmortem` | Read or save the learning record |
 
 ## 33. Practical walkthrough: failed GitHub workflow
 
@@ -696,7 +952,12 @@ ReplayOps deliberately keeps its core workflow functional when optional services
 7. If none exists and the threshold is `65`, ReplayOps creates an `AUTO-*` incident.
 8. Related deployment/push evidence from the prior 30 minutes is attached.
 9. The workbench computes candidates, deltas, hypotheses, tests, and evidence gaps.
-10. The responder may ask AI to challenge the leading hypothesis, run a replay, request mitigation approval, and generate a handoff.
+10. The responder assigns the suggested falsification test and records whether the result supports or disproves the hypothesis.
+11. The responder may ask Gemini to challenge the leading hypothesis using only retrieved, redacted incident evidence.
+12. A replay stores exact inputs and the incident evidence version.
+13. A mitigation request references that saved replay; a different admin reviews it, and new evidence makes it stale.
+14. Recovery is measured against a target and observation window before the incident can be marked resolved.
+15. The generated handoff and editable postmortem preserve the evidence, tests, action, and real outcome.
 
 ## 34. Practical walkthrough: successful GitHub workflow
 
@@ -717,6 +978,7 @@ This is why the live GitHub test showed an accepted signal but zero incidents: t
 - Challenging a hypothesis.
 - Suggesting a falsification test.
 - Highlighting missing or contradictory evidence.
+- Drafting a concise evidence-grounded explanation with exact incident/event citations.
 
 ### AI should not control
 
@@ -736,6 +998,11 @@ This separation keeps operational control deterministic, testable, and affordabl
 - Generic webhooks may supply their own bounded impact score.
 - Pattern-based redaction is not a complete DLP product.
 - Replay is a deterministic projection, not a production simulator.
+- “Supported” hypothesis outcomes remain human-recorded observations, not formal causal proof.
+- Group correction currently moves one event at a time; bulk merge/split workflows are not implemented.
+- Notifications are in-app only; Slack and Teams delivery are intentionally out of scope.
+- Large incident timelines do not yet have dedicated service, event-kind, and time-window filters.
+- Postmortems persist, but automatic similar-incident recommendations are currently provided through search rather than a dedicated learning feed.
 - Binary OTLP is not supported; the free receiver expects OTLP HTTP/JSON.
 - Render free services may sleep, delaying the first webhook after inactivity.
 - A verified sender domain and Resend key are required for real invitation email delivery.

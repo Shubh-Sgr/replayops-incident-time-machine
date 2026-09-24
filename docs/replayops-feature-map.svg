@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="960" viewBox="0 0 1440 960" role="img" aria-labelledby="title desc">
+  <title id="title">ReplayOps feature map</title>
+  <desc id="desc">A layered map of ReplayOps features from evidence collection through incident formation, the responder proof loop, and governance and learning.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#687d88"/></marker>
+    <filter id="lift" x="-20%" y="-20%" width="140%" height="150%"><feDropShadow dx="0" dy="8" stdDeviation="14" flood-color="#17324a" flood-opacity=".12"/></filter>
+    <style>
+      .bg{fill:#edf3f6}.panel{fill:#fafcfc;stroke:#c8d5da;stroke-width:1}.dark{fill:#243945}.cyan{fill:#d9edf1}.green{fill:#dff1e8}.orange{fill:#f8e2d5}.amber{fill:#f4ead2}.ink{fill:#263740}.muted{fill:#687d88}.white{fill:#f8fbfc}.title{font:600 32px Outfit,Arial,sans-serif}.section{font:600 14px 'IBM Plex Sans',Arial,sans-serif;letter-spacing:1.4px}.label{font:600 15px 'IBM Plex Sans',Arial,sans-serif}.sub{font:400 13px 'IBM Plex Sans',Arial,sans-serif}.mono{font:500 11px 'JetBrains Mono',monospace;letter-spacing:.03em}.line{stroke:#687d88;stroke-width:2;fill:none;marker-end:url(#arrow)}
+    </style>
+  </defs>
+  <rect class="bg" width="1440" height="960" rx="28"/>
+  <text x="64" y="66" class="title ink">ReplayOps feature map · evidence to verified learning</text>
+  <text x="64" y="96" class="sub muted">Every operational feature is anchored to stored evidence; AI assists retrieval and critique but never controls production.</text>
+
+  <text x="64" y="144" class="section muted">1 · COLLECT AND TRUST EVIDENCE</text>
+  <g transform="translate(64 166)">
+    <rect class="panel" width="236" height="82" rx="14"/><text x="20" y="34" class="label ink">GitHub</text><text x="20" y="58" class="sub muted">Signed pushes, deploys, workflows</text>
+    <rect class="panel" x="252" width="236" height="82" rx="14"/><text x="272" y="34" class="label ink">Grafana / Generic</text><text x="272" y="58" class="sub muted">Token-authenticated alerts</text>
+    <rect class="panel" x="504" width="236" height="82" rx="14"/><text x="524" y="34" class="label ink">OpenTelemetry</text><text x="524" y="58" class="sub muted">HTTP/JSON traces, logs, metrics</text>
+    <rect class="panel" x="756" width="236" height="82" rx="14"/><text x="776" y="34" class="label ink">Human evidence</text><text x="776" y="58" class="sub muted">Manual incidents and events</text>
+    <rect class="dark" x="1008" width="304" height="82" rx="14" filter="url(#lift)"/><text x="1028" y="34" class="label white">Durable ingestion</text><text x="1028" y="58" class="sub white">Verify · deduplicate · retry · dead letter</text>
+  </g>
+  <path class="line" d="M720 264V302"/>
+
+  <text x="64" y="326" class="section muted">2 · FORM THE INCIDENT</text>
+  <g transform="translate(64 348)">
+    <rect class="cyan" width="294" height="108" rx="16"/><text x="22" y="34" class="label ink">Normalize + measure impact</text><text x="22" y="60" class="sub ink">One signal contract · bounded 0–100 score</text><text x="22" y="85" class="mono muted">NO MODEL REQUIRED</text>
+    <rect class="amber" x="322" width="294" height="108" rx="16"/><text x="344" y="34" class="label ink">Apply workspace policy</text><text x="344" y="60" class="sub ink">Threshold · suppression · maintenance</text><text x="344" y="85" class="mono muted">DETERMINISTIC GATE</text>
+    <rect class="orange" x="644" width="294" height="108" rx="16"/><text x="666" y="34" class="label ink">Group related signals</text><text x="666" y="60" class="sub ink">Correlation · dependencies · time window</text><text x="666" y="85" class="mono muted">MOVE EVENT TO CORRECT</text>
+    <rect class="green" x="966" width="346" height="108" rx="16"/><text x="988" y="34" class="label ink">Create or update incident</text><text x="988" y="60" class="sub ink">Backfill precursors · version evidence</text><text x="988" y="85" class="mono muted">AUTO-* OR EXISTING RECORD</text>
+  </g>
+  <path class="line" d="M720 472V510"/>
+
+  <text x="64" y="534" class="section muted">3 · RESPONDER PROOF LOOP</text>
+  <g transform="translate(64 556)">
+    <rect class="panel" width="236" height="142" rx="16"/><text x="20" y="35" class="mono muted">DIAGNOSE</text><text x="20" y="65" class="label ink">Competing hypotheses</text><text x="20" y="91" class="sub muted">Completeness and causal confidence</text><text x="20" y="115" class="sub muted">Evidence gaps + exact event links</text>
+    <rect class="dark" x="252" width="236" height="142" rx="16" filter="url(#lift)"/><text x="272" y="35" class="mono white">FALSIFY</text><text x="272" y="65" class="label white">Assigned hypothesis tests</text><text x="272" y="91" class="sub white">Planned → running → outcome</text><text x="272" y="115" class="sub white">Supported, disproved, inconclusive</text>
+    <rect class="panel" x="504" width="236" height="142" rx="16"/><text x="524" y="35" class="mono muted">REPLAY</text><text x="524" y="65" class="label ink">Saved counterfactuals</text><text x="524" y="91" class="sub muted">Exact config + evidence version</text><text x="524" y="115" class="sub muted">History and candidate comparison</text>
+    <rect class="panel" x="756" width="236" height="142" rx="16"/><text x="776" y="35" class="mono muted">APPROVE</text><text x="776" y="65" class="label ink">Independent review</text><text x="776" y="91" class="sub muted">Replay-bound action + rollback</text><text x="776" y="115" class="sub muted">Stale evidence blocks approval</text>
+    <rect class="green" x="1008" width="304" height="142" rx="16"/><text x="1028" y="35" class="mono muted">VERIFY + LEARN</text><text x="1028" y="65" class="label ink">Measured recovery gate</text><text x="1028" y="91" class="sub ink">Target · observed value · time window</text><text x="1028" y="115" class="sub ink">Handoff + persistent postmortem</text>
+  </g>
+  <path class="line" d="M720 714V752"/>
+
+  <text x="64" y="776" class="section muted">4 · CROSS-CUTTING PRODUCT CAPABILITIES</text>
+  <g transform="translate(64 798)">
+    <rect class="panel" width="252" height="98" rx="14"/><text x="20" y="34" class="label ink">Grounded AI</text><text x="20" y="59" class="sub muted">Redaction · semantic search · citations</text><text x="20" y="80" class="mono muted">GOOGLE AI OPTIONAL</text>
+    <rect class="panel" x="268" width="252" height="98" rx="14"/><text x="288" y="34" class="label ink">Live investigation</text><text x="288" y="59" class="sub muted">10s refresh · freshness · change reason</text><text x="288" y="80" class="mono muted">NEW EVIDENCE VISIBLE</text>
+    <rect class="panel" x="536" width="252" height="98" rx="14"/><text x="556" y="34" class="label ink">Teams + ownership</text><text x="556" y="59" class="sub muted">Invites · roles · in-app actions</text><text x="556" y="80" class="mono muted">ADMIN / RESPONDER / VIEWER</text>
+    <rect class="panel" x="804" width="252" height="98" rx="14"/><text x="824" y="34" class="label ink">Governance</text><text x="824" y="59" class="sub muted">Audit trail · RLS · approval separation</text><text x="824" y="80" class="mono muted">TENANT SCOPED</text>
+    <rect class="dark" x="1072" width="240" height="98" rx="14"/><text x="1092" y="34" class="label white">Free-first runtime</text><text x="1092" y="59" class="sub white">Vercel · Render · Supabase</text><text x="1092" y="80" class="mono white">DEGRADES SAFELY</text>
+  </g>
+</svg>

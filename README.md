@@ -13,7 +13,7 @@ For an end-to-end explanation of the architecture, feature flows, engineering de
 ## Architecture
 
 - `apps/web`: React, Vite, TypeScript, Tailwind CSS, Framer Motion, TanStack Query, Supabase Auth.
-- `apps/api`: Express 5, TypeScript, PostgreSQL/pgvector, optional OpenAI-compatible embeddings and chat.
+- `apps/api`: Express 5, TypeScript, PostgreSQL/pgvector, optional Google Gemini or OpenAI-compatible embeddings and chat.
 - `apps/api/db`: Supabase-compatible schema, vector index, row-level security, and seed SQL.
 - `.github/workflows/deploy.yml`: verification plus optional Vercel and Render deployments.
 
@@ -38,7 +38,11 @@ Every authenticated delivery is now persisted to a Supabase-backed `ingestion_qu
 - **Team access:** admin, responder, and viewer roles are enforced at the API; admins can email expiring, email-bound invitation links with a copy-link fallback.
 - **Audit trail:** successful mutations and governed actions retain actor, target, detail, and timestamp.
 - **Grounded AI:** assistant context is redacted before provider calls and responses expose incident/event citations, evidence boundary, model mode, and confidence.
-- **Mitigation approval:** responders submit an exact action plus rollback plan; a separate administrator approves or rejects it. ReplayOps does not execute infrastructure commands.
+- **Hypothesis tests:** responders assign a falsification test, record the observation, and mark it supported, disproved, or inconclusive.
+- **Persistent replay:** exact configuration, projection, event count, and evidence version survive refresh and can be compared.
+- **Mitigation approval:** responders submit an exact replay-bound action plus rollback plan; a separate administrator approves or rejects it, and new evidence makes the request stale. ReplayOps does not execute infrastructure commands.
+- **Recovery gate:** the API requires a verified metric observation and window before an incident can be resolved.
+- **Learning loop:** generated handoffs and editable postmortems preserve evidence, tests, replay, recovery, and follow-up ownership.
 
 ## Run locally
 
@@ -78,7 +82,7 @@ Each provider request uses the invitation ID as an idempotency key. ReplayOps re
 
 ## AI and semantic search
 
-Set `OPENAI_API_KEY` to enable embeddings and provider-assisted answers. `OPENAI_BASE_URL`, model names, and embedding model are configurable, so an OpenAI-compatible provider can be substituted.
+Set `GOOGLE_AI_API_KEY` to enable Gemini embeddings and provider-assisted answers through Google AI Studio. The server defaults are `gemini-3.8-flash` for chat and `gemini-embedding-2` for embeddings. `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and compatible model settings remain available as an alternative provider path.
 
 Without an AI key:
 
