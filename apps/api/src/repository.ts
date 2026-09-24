@@ -586,7 +586,7 @@ class PostgresRepository implements Repository {
     return { ...mapReplayRun(row), config, projection, evidenceVersion: incident.updatedAt, eventCount: incident.events.length } satisfies ReplayResult;
   }
   async search(userId: string, query: string, embedding?: number[]) {
-    const result = embedding
+    let result = embedding
       ? await this.pool.query(
         `select i.*, 1 - (i.embedding <=> $2::vector) as score from incidents i
          where i.embedding is not null
@@ -594,16 +594,33 @@ class PostgresRepository implements Repository {
          order by i.embedding <=> $2::vector limit 6`,
         [userId, `[${embedding.join(",")}]`]
       )
-      : await this.pool.query(
-        `select i.*, ts_rank_cd(to_tsvector('english', i.title || ' ' || i.summary || ' ' || i.service), plainto_tsquery('english', $2)) as score
+      : { rows: [] as Row[] };
+    let matchReason = "Semantic similarity across incident evidence";
+    if (!result.rows.length) {
+      const ignored = new Set(["about", "after", "again", "against", "could", "evidence", "from", "incident", "most", "next", "only", "recorded", "responder", "should", "that", "this", "using", "what", "when", "where", "which", "with", "would"]);
+      const terms = [...new Set((query.toLowerCase().match(/[a-z0-9][a-z0-9_-]{2,}/g) ?? []).filter((term) => !ignored.has(term)))].slice(0, 12);
+      const patterns = (terms.length ? terms : [query.trim().toLowerCase()]).map((term) => `%${term}%`);
+      result = await this.pool.query(
+        `select i.*,
+           case when lower(concat_ws(' ',i.code,i.title,i.summary,i.service)) like any($2::text[]) then 0.68 else 0.52 end as score
          from incidents i
-         where exists (select 1 from organization_members m where m.organization_id = i.organization_id and m.user_id = $1)
-         and to_tsvector('english', i.title || ' ' || i.summary || ' ' || i.service) @@ plainto_tsquery('english', $2)
-         order by score desc limit 6`,
-        [userId, query]
+         where exists (select 1 from organization_members m where m.organization_id=i.organization_id and m.user_id=$1)
+         and (
+           lower(concat_ws(' ',i.code,i.title,i.summary,i.service)) like any($2::text[])
+           or exists (
+             select 1 from incident_events e where e.incident_id=i.id
+             and lower(concat_ws(' ',e.title,e.detail,e.service,e.kind)) like any($2::text[])
+           )
+         )
+         order by score desc,i.updated_at desc limit 6`,
+        [userId, patterns]
       );
+      matchReason = embedding
+        ? "Lexical evidence fallback because matching incidents do not yet have embeddings"
+        : "Full-text match across incident and timeline evidence";
+    }
     const hydrated = await Promise.all((result.rows as Row[]).map((row) => this.getIncident(userId, String(row.id))));
-    return hydrated.flatMap((incident, index) => incident ? [{ incident, score: Number((result.rows[index] as Row | undefined)?.score ?? 0), matchReason: embedding ? "Semantic similarity across incident evidence" : "Full-text match across incident evidence" }] : []);
+    return hydrated.flatMap((incident, index) => incident ? [{ incident, score: Number((result.rows[index] as Row | undefined)?.score ?? 0), matchReason }] : []);
   }
   async listIntegrations(userId: string) {
     const integrations = await this.pool.query(
