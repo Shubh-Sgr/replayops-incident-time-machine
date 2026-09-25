@@ -134,7 +134,48 @@ function TeamAccess() {
 
 function AuditTrail() { const audit = useQuery({ queryKey: ["audit"], queryFn: api.audit }); return <section className="surface-lined overflow-hidden"><div className="px-5 py-5 sm:px-6"><h2 className="section-title">Immutable operations trail</h2><p className="mt-1 text-sm text-muted">Successful mutations and governed actions are recorded with actor, target, and time.</p></div><div className="divide-y divide-line border-t border-line">{audit.data?.map((entry) => <article key={entry.id} className="grid gap-2 px-5 py-4 sm:grid-cols-[170px_minmax(0,1fr)_auto] sm:items-start sm:px-6"><span className="measurement-number text-xs text-muted">{new Date(entry.createdAt).toLocaleString()}</span><div><p className="text-sm font-semibold">{entry.action}</p><p className="mt-1 text-xs text-muted">{entry.actor} · {entry.targetType}{entry.targetId ? ` · ${entry.targetId.slice(0, 12)}` : ""}</p></div><ShieldCheck className="h-4 w-4 text-success" /></article>)}{audit.data && !audit.data.length && <div className="px-6 py-12 text-center"><Activity className="mx-auto h-6 w-6 text-faint" /><p className="mt-3 font-semibold">No governed changes yet</p></div>}</div></section>; }
 
-function QueueHealth() { const queryClient = useQueryClient(); const queue = useQuery({ queryKey: ["queue"], queryFn: api.queue, refetchInterval: 15_000 }); const retry = useMutation({ mutationFn: api.retryQueueJob, onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["queue"] }) }); const counts = queue.data?.reduce<Record<string, number>>((map, item) => ({ ...map, [item.status]: (map[item.status] ?? 0) + 1 }), {}) ?? {}; return <div className="space-y-5"><div className="surface-lined grid divide-y divide-line sm:grid-cols-4 sm:divide-x sm:divide-y-0">{[["Completed", counts.completed ?? 0],["Waiting", (counts.queued ?? 0)+(counts.retrying ?? 0)],["Processing", counts.processing ?? 0],["Dead letter", counts.dead_letter ?? 0]].map(([label,value]) => <div key={String(label)} className="p-5"><p className="text-xs text-muted">{label}</p><p className="measurement-number mt-2 text-2xl font-semibold">{value}</p></div>)}</div><section className="surface-lined overflow-hidden"><div className="px-5 py-5 sm:px-6"><h2 className="section-title">Durable delivery queue</h2><p className="mt-1 text-sm text-muted">Normalized deliveries persist before processing. Temporary failures back off; five failed attempts enter dead-letter review.</p></div><div className="divide-y divide-line border-t border-line">{queue.data?.map((job) => <div key={job.id} className="grid gap-3 px-5 py-4 sm:grid-cols-[minmax(0,1fr)_110px_80px_auto] sm:items-center sm:px-6"><div className="min-w-0"><p className="measurement-number truncate text-xs font-semibold">{job.externalId}</p><p className="mt-1 text-xs text-muted">{formatRelative(job.createdAt)}{job.lastError ? ` · ${job.lastError}` : ""}</p></div><span className={cn("w-fit rounded-full px-2.5 py-1 text-xs font-semibold capitalize", job.status === "completed" ? "bg-success/12 text-success" : job.status === "dead_letter" ? "bg-danger/10 text-danger" : "bg-warning/12 text-warning")}>{job.status.replace("_", " ")}</span><span className="measurement-number text-xs text-muted">{job.attempts} tries</span>{["retrying","dead_letter"].includes(job.status) ? <button className="control-secondary !min-h-9 inline-flex items-center gap-2" onClick={() => retry.mutate(job.id)}><RotateCcw className="h-4 w-4" />Retry</button> : <CheckCircle2 className="h-4 w-4 text-success" />}</div>)}</div></section></div>; }
+function shortDeliveryReference(value: string) {
+  return value.length > 16 ? `${value.slice(0, 8)}…${value.slice(-4)}` : value;
+}
+
+function QueueHealth() {
+  const queryClient = useQueryClient();
+  const queue = useQuery({ queryKey: ["ingestion-queue"], queryFn: api.queue, refetchInterval: 15_000 });
+  const retry = useMutation({
+    mutationFn: api.retryQueueJob,
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["ingestion-queue"] })
+  });
+  const counts = queue.data?.reduce<Record<string, number>>((map, item) => ({ ...map, [item.status]: (map[item.status] ?? 0) + 1 }), {}) ?? {};
+
+  return <div className="space-y-5">
+    <div className="surface-lined grid divide-y divide-line sm:grid-cols-4 sm:divide-x sm:divide-y-0">
+      {[["Completed", counts.completed ?? 0], ["Waiting", (counts.queued ?? 0) + (counts.retrying ?? 0)], ["Processing", counts.processing ?? 0], ["Dead letter", counts.dead_letter ?? 0]].map(([label, value]) => <div key={String(label)} className="p-5"><p className="text-xs text-muted">{label}</p><p className="measurement-number mt-2 text-2xl font-semibold">{value}</p></div>)}
+    </div>
+    <section className="surface-lined overflow-hidden">
+      <div className="px-5 py-5 sm:px-6">
+        <h2 className="section-title">Durable delivery queue</h2>
+        <p className="mt-1 max-w-3xl text-sm leading-6 text-muted">Every accepted source delivery is saved before correlation begins. Temporary failures retry with increasing delays; after five failed attempts, the event waits here for an operator.</p>
+      </div>
+      {retry.error && <p role="alert" className="border-t border-line bg-danger/10 px-5 py-3 text-sm text-danger sm:px-6">The event could not be queued again. {retry.error.message}</p>}
+      <div className="divide-y divide-line border-t border-line">
+        {queue.isLoading && <p className="px-5 py-8 text-sm text-muted sm:px-6">Loading delivery events…</p>}
+        {queue.error && <p role="alert" className="px-5 py-8 text-sm text-danger sm:px-6">Delivery events could not be loaded. {queue.error.message}</p>}
+        {queue.data?.map((job) => <div key={job.id} className="grid gap-3 px-5 py-4 sm:grid-cols-[minmax(0,1fr)_110px_80px_auto] sm:items-center sm:px-6">
+          <div className="min-w-0">
+            <p className="truncate text-sm font-semibold" title={job.eventName}>{job.eventName}</p>
+            <p className="mt-1 truncate text-xs text-muted">{job.sourceName} · {job.signalCount} signal{job.signalCount === 1 ? "" : "s"} · received {formatRelative(job.createdAt)}</p>
+            <p className="measurement-number mt-1 truncate text-xs text-faint" title={job.externalId}>Provider reference {shortDeliveryReference(job.externalId)}</p>
+            {job.lastError && <p className="mt-2 text-xs leading-5 text-danger">Last attempt failed: {job.lastError}</p>}
+          </div>
+          <span className={cn("w-fit rounded-full px-2.5 py-1 text-xs font-semibold capitalize", job.status === "completed" ? "bg-success/12 text-success" : job.status === "dead_letter" ? "bg-danger/10 text-danger" : "bg-warning/12 text-warning")}>{job.status.replace("_", " ")}</span>
+          <span className="measurement-number text-xs text-muted">{job.attempts} {job.attempts === 1 ? "try" : "tries"}</span>
+          {["retrying", "dead_letter"].includes(job.status) ? <button className="control-secondary inline-flex !min-h-9 items-center gap-2" disabled={retry.isPending} onClick={() => retry.mutate(job.id)}><RotateCcw className={cn("h-4 w-4", retry.isPending && "animate-spin")} />Queue again</button> : <CheckCircle2 className="h-4 w-4 text-success" aria-label="Processing completed" />}
+        </div>)}
+        {queue.data && queue.data.length === 0 && <div className="px-6 py-12 text-center"><DatabaseZap className="mx-auto h-6 w-6 text-faint" /><p className="mt-3 font-semibold">No delivery events yet</p><p className="mt-1 text-sm text-muted">Connect a source or run its labeled end-to-end test.</p></div>}
+      </div>
+    </section>
+  </div>;
+}
 
 export function WorkspacePage() {
   const [mode, setMode] = useState<Mode>("services");

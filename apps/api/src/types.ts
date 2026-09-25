@@ -300,6 +300,9 @@ export interface QueueJob {
   id: string;
   integrationId: string;
   externalId: string;
+  eventName: string;
+  sourceName: string;
+  signalCount: number;
   status: "queued" | "processing" | "completed" | "retrying" | "dead_letter";
   attempts: number;
   lastError?: string | null;

@@ -7,7 +7,7 @@ import {
 import { useMemo, useState } from "react";
 import { api } from "../lib/api";
 import { cn } from "../lib/utils";
-import type { Integration, IntegrationProvider } from "../types";
+import type { Integration, IntegrationProvider, QueueJob } from "../types";
 
 function connectorHealth(integration: Integration) {
   if (!integration.lastDeliveryAt) return { label: "Awaiting first real receipt", tone: "text-warning", dot: "bg-warning", detail: "No signed delivery received" };
@@ -29,6 +29,14 @@ const providers: Array<{
 ];
 
 const providerMeta = Object.fromEntries(providers.map((provider) => [provider.id, provider])) as Record<IntegrationProvider, typeof providers[number]>;
+
+function matchingQueueJob(delivery: Integration["deliveries"][number], jobs: QueueJob[] | undefined) {
+  return jobs?.find((job) => job.integrationId === delivery.integrationId && job.externalId === delivery.externalId);
+}
+
+function shortReference(value: string) {
+  return value.length > 16 ? `${value.slice(0, 8)}…${value.slice(-4)}` : value;
+}
 
 function CopyButton({ value, label = "Copy" }: { value: string; label?: string }) {
   const [copied, setCopied] = useState(false);
@@ -331,18 +339,18 @@ export function IntegrationsPage() {
               <div className="mt-4 overflow-x-auto">
                 <table className="w-full min-w-[640px] border-collapse text-left text-sm">
                   <thead className="text-xs text-muted">
-                    <tr className="border-b border-line"><th className="pb-2 font-medium">Received</th><th className="pb-2 font-medium">Delivery ID</th><th className="pb-2 font-medium">Signals</th><th className="pb-2 font-medium">Incidents</th><th className="pb-2 text-right font-medium">Result</th></tr>
+                    <tr className="border-b border-line"><th className="pb-2 font-medium">Received</th><th className="pb-2 font-medium">Event</th><th className="pb-2 font-medium">Signals</th><th className="pb-2 font-medium">Incidents</th><th className="pb-2 text-right font-medium">Result</th></tr>
                   </thead>
                   <tbody className="divide-y divide-line">
-                    {selected.deliveries.map((delivery) => (
+                    {selected.deliveries.map((delivery) => { const queued = matchingQueueJob(delivery, queueQuery.data); return (
                       <tr key={delivery.id}>
                         <td className="py-3 pr-4 text-xs text-muted">{new Date(delivery.receivedAt).toLocaleString()}</td>
-                        <td className="measurement-number max-w-52 truncate py-3 pr-4 text-xs">{delivery.externalId}</td>
+                        <td className="max-w-72 py-3 pr-4"><p className="truncate text-xs font-semibold" title={queued?.eventName}>{queued?.eventName ?? "Provider delivery"}</p><p className="measurement-number mt-1 truncate text-xs text-faint" title={delivery.externalId}>Reference {shortReference(delivery.externalId)}</p></td>
                         <td className="measurement-number py-3 pr-4">{delivery.signalCount}</td>
                         <td className="measurement-number py-3 pr-4">{delivery.incidentIds.length}</td>
                         <td className="py-3 text-right"><span className="inline-flex items-center gap-2 text-xs font-semibold text-success"><span className="status-dot bg-success" />{delivery.status}</span></td>
                       </tr>
-                    ))}
+                    );})}
                   </tbody>
                 </table>
               </div>

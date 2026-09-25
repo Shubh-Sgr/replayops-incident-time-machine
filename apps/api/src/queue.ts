@@ -7,10 +7,30 @@ import type { IngestionBatch, IngestionResult, IntegrationTarget, QueueJob } fro
 type Row = Record<string, unknown>;
 type StoredJob = QueueJob & { integration: IntegrationTarget; batch: IngestionBatch };
 
-const mapJob = (row: Row): QueueJob => ({
-  id: String(row.id), integrationId: String(row.integration_id), externalId: String(row.external_id), status: row.status as QueueJob["status"],
-  attempts: Number(row.attempts), lastError: row.last_error ? String(row.last_error) : null,
-  nextAttemptAt: new Date(String(row.next_attempt_at)).toISOString(), createdAt: new Date(String(row.created_at)).toISOString(), updatedAt: new Date(String(row.updated_at)).toISOString()
+export function summarizeIngestionBatch(batch: IngestionBatch | null | undefined, sourceName = "Evidence source") {
+  const signals = batch?.signals ?? [];
+  const firstTitle = signals.find((signal) => signal.title.trim())?.title.trim();
+  return {
+    eventName: firstTitle ? `${firstTitle}${signals.length > 1 ? ` + ${signals.length - 1} more` : ""}` : `${sourceName} delivery`,
+    signalCount: signals.length
+  };
+}
+
+const mapJob = (row: Row, integration?: IntegrationTarget): QueueJob => {
+  const sourceName = String(row.integration_name ?? integration?.name ?? "Evidence source");
+  const batch = row.batch as IngestionBatch | undefined;
+  return {
+    id: String(row.id), integrationId: String(row.integration_id), externalId: String(row.external_id),
+    ...summarizeIngestionBatch(batch, sourceName), sourceName, status: row.status as QueueJob["status"],
+    attempts: Number(row.attempts), lastError: row.last_error ? String(row.last_error) : null,
+    nextAttemptAt: new Date(String(row.next_attempt_at)).toISOString(), createdAt: new Date(String(row.created_at)).toISOString(), updatedAt: new Date(String(row.updated_at)).toISOString()
+  };
+};
+
+const publicJob = ({ integration, batch, ...job }: StoredJob): QueueJob => ({
+  ...job,
+  sourceName: integration.name,
+  ...summarizeIngestionBatch(batch, integration.name)
 });
 
 class DurableIngestionQueue {
@@ -38,16 +58,16 @@ class DurableIngestionQueue {
   async enqueue(integration: IntegrationTarget, batch: IngestionBatch): Promise<{ job: QueueJob; duplicate: boolean }> {
     if (!this.pool) {
       const existing = this.jobs.find((job) => job.integrationId === integration.id && job.externalId === batch.externalId);
-      if (existing) return { job: structuredClone(existing), duplicate: true };
+      if (existing) return { job: structuredClone(publicJob(existing)), duplicate: true };
       const now = new Date().toISOString();
-      const job: StoredJob = { id: randomUUID(), integrationId: integration.id, externalId: batch.externalId, status: "queued", attempts: 0, lastError: null, nextAttemptAt: now, createdAt: now, updatedAt: now, integration, batch };
+      const job: StoredJob = { id: randomUUID(), integrationId: integration.id, externalId: batch.externalId, ...summarizeIngestionBatch(batch, integration.name), sourceName: integration.name, status: "queued", attempts: 0, lastError: null, nextAttemptAt: now, createdAt: now, updatedAt: now, integration, batch };
       this.jobs.unshift(job);
-      return { job: structuredClone(job), duplicate: false };
+      return { job: structuredClone(publicJob(job)), duplicate: false };
     }
     const result = await this.pool.query(`insert into ingestion_queue(integration_id,external_id,batch) values($1,$2,$3) on conflict(integration_id,external_id) do nothing returning *`, [integration.id, batch.externalId, batch]);
-    if (result.rows[0]) return { job: mapJob(result.rows[0] as Row), duplicate: false };
+    if (result.rows[0]) return { job: mapJob(result.rows[0] as Row, integration), duplicate: false };
     const existing = await this.pool.query(`select * from ingestion_queue where integration_id=$1 and external_id=$2`, [integration.id, batch.externalId]);
-    return { job: mapJob(existing.rows[0] as Row), duplicate: true };
+    return { job: mapJob(existing.rows[0] as Row, integration), duplicate: true };
   }
 
   async process(jobId: string): Promise<IngestionResult> {
@@ -93,14 +113,14 @@ class DurableIngestionQueue {
   }
 
   async list(userId: string) {
-    if (!this.pool) return structuredClone(this.jobs.map(({ integration: _integration, batch: _batch, ...job }) => job).slice(0, 50));
-    const result = await this.pool.query(`select q.* from ingestion_queue q join integrations i on i.id=q.integration_id where exists(select 1 from organization_members m where m.organization_id=i.organization_id and m.user_id=$1) order by q.created_at desc limit 50`, [userId]);
-    return result.rows.map(mapJob);
+    if (!this.pool) return structuredClone(this.jobs.map(publicJob).slice(0, 50));
+    const result = await this.pool.query(`select q.*, i.name as integration_name from ingestion_queue q join integrations i on i.id=q.integration_id where exists(select 1 from organization_members m where m.organization_id=i.organization_id and m.user_id=$1) order by q.created_at desc limit 50`, [userId]);
+    return result.rows.map((row) => mapJob(row as Row));
   }
 
   async retry(userId: string, jobId: string) {
-    if (!this.pool) { const job = this.jobs.find((item) => item.id === jobId); if (!job) throw new Error("Queue job not found."); job.status = "retrying"; job.nextAttemptAt = new Date().toISOString(); job.updatedAt = new Date().toISOString(); const { integration: _integration, batch: _batch, ...view } = job; return structuredClone(view); }
-    const result = await this.pool.query(`update ingestion_queue q set status='retrying',next_attempt_at=now(),updated_at=now() from integrations i where q.id=$2 and i.id=q.integration_id and exists(select 1 from organization_members m where m.organization_id=i.organization_id and m.user_id=$1 and m.role in ('admin','responder')) returning q.*`, [userId, jobId]);
+    if (!this.pool) { const job = this.jobs.find((item) => item.id === jobId); if (!job) throw new Error("Queue job not found."); job.status = "retrying"; job.nextAttemptAt = new Date().toISOString(); job.updatedAt = new Date().toISOString(); return structuredClone(publicJob(job)); }
+    const result = await this.pool.query(`update ingestion_queue q set status='retrying',next_attempt_at=now(),updated_at=now() from integrations i where q.id=$2 and i.id=q.integration_id and exists(select 1 from organization_members m where m.organization_id=i.organization_id and m.user_id=$1 and m.role in ('admin','responder')) returning q.*, i.name as integration_name`, [userId, jobId]);
     if (!result.rows[0]) throw new Error("Queue job not found or your role cannot retry it.");
     return mapJob(result.rows[0] as Row);
   }
