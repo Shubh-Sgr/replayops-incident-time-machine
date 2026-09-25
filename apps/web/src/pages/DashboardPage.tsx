@@ -1,159 +1,54 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowRight, CheckCircle2, Clock3, Play, Plus, Radio, Server, TriangleAlert } from "lucide-react";
+import { ArrowRight, CheckCircle2, CircleDot, Clock3, DatabaseZap, Plus, RadioTower, TriangleAlert, UserRound } from "lucide-react";
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { CausalTrace } from "../components/CausalTrace";
-import { EventVolumeChart } from "../components/EventVolumeChart";
-import { DashboardSkeleton } from "../components/Skeleton";
 import { IncidentEditor, type IncidentDraft } from "../components/IncidentEditor";
+import { DashboardSkeleton } from "../components/Skeleton";
 import { SeverityMark, StatusMark } from "../components/StatusMark";
 import { api } from "../lib/api";
-import { cn, durationBetween, formatRelative } from "../lib/utils";
+import { cn, formatRelative } from "../lib/utils";
 import type { DashboardData, Incident } from "../types";
+import { useAuth } from "../providers/AuthProvider";
+
+function sourceState(provider: string, receivedAt?: string | null) {
+  if (!receivedAt) return { label:"Awaiting first real receipt", tone:"text-warning", action:"Send one event from the source" };
+  const age = Date.now() - Date.parse(receivedAt);
+  const expected = provider === "otel" ? 15 * 60_000 : provider === "github" ? 7 * 24 * 60 * 60_000 : 3 * 60 * 60_000;
+  return age <= expected ? { label:"Receiving as expected", tone:"text-success", action:"View delivery path" } : { label:"Outside expected cadence", tone:"text-danger", action:"Inspect last delivery" };
+}
 
 export function DashboardPage() {
   const [editorOpen, setEditorOpen] = useState(false);
   const queryClient = useQueryClient();
-  const dashboard = useQuery({ queryKey: ["dashboard"], queryFn: api.dashboard });
+  const { user } = useAuth();
+  const dashboard = useQuery({ queryKey:["dashboard"], queryFn:api.dashboard });
+  const sources = useQuery({ queryKey:["integrations"], queryFn:api.integrations });
+  const notifications = useQuery({ queryKey:["notifications"], queryFn:api.notifications });
+  const queue = useQuery({ queryKey:["ingestion-queue"], queryFn:api.queue });
   const createIncident = useMutation({
-    mutationFn: (draft: IncidentDraft) => api.createIncident(draft),
-    onMutate: async (draft) => {
-      await queryClient.cancelQueries({ queryKey: ["dashboard"] });
-      const previous = queryClient.getQueryData<DashboardData>(["dashboard"]);
-      const optimistic: Incident = {
-        ...draft,
-        id: `optimistic-${Date.now()}`,
-        code: "ROP-NEW",
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        events: []
-      };
-      queryClient.setQueryData<DashboardData>(["dashboard"], (current) => current ? { ...current, incidents: [optimistic, ...current.incidents] } : current);
-      return { previous };
+    mutationFn:async(draft:IncidentDraft) => {
+      const created=await api.createIncident(draft);
+      if(draft.intakeLink) await api.createEvent(created.id,{timestamp:draft.startedAt,service:draft.service,kind:"alert",title:"Imported alert or trace link",detail:`Investigation started from ${draft.intakeLink}. Verify the source and attach the observed symptom.`,impactScore:65,provenance:"manual",evidenceState:"active",metadata:{sourceUrl:draft.intakeLink,intake:true}});
+      return created;
     },
-    onError: (_error, _draft, context) => queryClient.setQueryData(["dashboard"], context?.previous),
-    onSuccess: () => setEditorOpen(false),
-    onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
-      void queryClient.invalidateQueries({ queryKey: ["incidents"] });
-    }
+    onMutate:async(draft) => { await queryClient.cancelQueries({ queryKey:["dashboard"] }); const previous=queryClient.getQueryData<DashboardData>(["dashboard"]); const optimistic:Incident={...draft,id:`optimistic-${Date.now()}`,code:"ROP-NEW",createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),evidenceRevision:new Date().toISOString(),events:[]}; queryClient.setQueryData<DashboardData>(["dashboard"],(current)=>current?{...current,incidents:[optimistic,...current.incidents]}:current); return {previous}; }, onError:(_error,_draft,context)=>queryClient.setQueryData(["dashboard"],context?.previous), onSuccess:()=>setEditorOpen(false), onSettled:()=>{void queryClient.invalidateQueries({queryKey:["dashboard"]});void queryClient.invalidateQueries({queryKey:["incidents"]});}
   });
-
   if (dashboard.isLoading) return <DashboardSkeleton />;
-  if (dashboard.error || !dashboard.data) {
-    return (
-      <div className="surface-lined mx-auto max-w-xl p-6 text-center">
-        <TriangleAlert className="mx-auto h-7 w-7 text-danger" />
-        <h1 className="mt-4 font-heading text-2xl font-semibold">Operations data is unavailable</h1>
-        <p className="mt-2 text-sm leading-6 text-muted">{dashboard.error instanceof Error ? dashboard.error.message : "The dashboard could not be loaded."}</p>
-        <button className="control-primary mt-5" onClick={() => void dashboard.refetch()}>Retry dashboard</button>
-      </div>
-    );
-  }
+  if (dashboard.error || !dashboard.data) return <div className="surface-lined mx-auto max-w-xl p-6 text-center"><TriangleAlert className="mx-auto h-7 w-7 text-danger" /><h1 className="mt-4 font-heading text-2xl font-semibold">Investigations are unavailable</h1><p className="mt-2 text-sm text-muted">{dashboard.error instanceof Error ? dashboard.error.message : "The workspace could not be loaded."}</p><button className="control-primary mt-5" onClick={() => void dashboard.refetch()}>Retry</button></div>;
+  const data=dashboard.data;
+  const active=data.incidents.filter((item)=>item.status!=="resolved");
+  const realReceipt=sources.data?.some((source)=>source.deliveries.some((delivery)=>!delivery.externalId.includes("self-test")));
+  const deadLetters=queue.data?.filter((job)=>job.status==="dead_letter" || job.status==="retrying") ?? [];
+  return <div className="space-y-6">
+    <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between"><div><p className="measurement-number text-xs uppercase tracking-[.14em] text-muted">Responder workspace</p><h1 className="mt-2 font-heading text-3xl font-semibold tracking-[-.03em] sm:text-4xl">Investigations</h1><p className="mt-2 max-w-2xl text-sm leading-6 text-muted">Find what needs attention, what evidence is fresh, and the next useful action—without rebuilding your observability stack.</p></div><div className="flex gap-2"><Link to="/integrations" className="control-secondary inline-flex items-center gap-2"><RadioTower className="h-4 w-4" />Connect source</Link><button className="control-primary inline-flex items-center gap-2" onClick={()=>setEditorOpen(true)}><Plus className="h-4 w-4" />Quick intake</button></div></header>
 
-  const data = dashboard.data;
-  const activeIncident = data.incidents.find((incident) => incident.status !== "resolved") ?? data.incidents[0];
-  const activeCount = data.incidents.filter((incident) => incident.status !== "resolved").length;
+    {!realReceipt && <section className="surface-lined grid gap-5 p-5 sm:p-6 lg:grid-cols-[1fr_auto] lg:items-center"><div><div className="flex items-center gap-2"><DatabaseZap className="h-5 w-5 text-info" /><h2 className="font-heading text-xl font-semibold">Get to the first real investigation</h2></div><p className="mt-2 max-w-3xl text-sm leading-6 text-muted">Choose GitHub, OpenTelemetry, or a generic webhook; send one real event; then open the investigation it creates. Connector self-tests stay labeled as synthetic and never count as source activation.</p></div><Link to="/integrations" className="control-primary inline-flex items-center gap-2">Set up a source <ArrowRight className="h-4 w-4" /></Link></section>}
 
-  return (
-    <div className="space-y-6">
-      <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <h1 className="font-heading text-3xl font-semibold tracking-[-0.03em] sm:text-4xl">Operations, reconstructed</h1>
-          <p className="mt-2 max-w-2xl text-sm leading-6 text-muted">Follow active pressure through the system, inspect the evidence, and compare a fix against the recorded sequence.</p>
-        </div>
-        <button className="control-primary inline-flex items-center justify-center gap-2" onClick={() => setEditorOpen(true)}><Plus className="h-4 w-4" /> Create incident</button>
-      </header>
+    <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4"><div className="surface-lined p-4"><p className="text-xs font-semibold uppercase tracking-[.12em] text-muted">Active</p><p className="measurement-number mt-2 text-2xl font-semibold">{active.length}</p><p className="mt-1 text-xs text-muted">investigations not resolved</p></div><div className="surface-lined p-4"><p className="text-xs font-semibold uppercase tracking-[.12em] text-muted">My ownership</p><p className="measurement-number mt-2 text-2xl font-semibold">{active.filter((item)=>item.owner===user?.email || item.owner===user?.name).length}</p><p className="mt-1 text-xs text-muted">assigned to you</p></div><div className="surface-lined p-4"><p className="text-xs font-semibold uppercase tracking-[.12em] text-muted">Actions waiting</p><p className="measurement-number mt-2 text-2xl font-semibold">{notifications.data?.length ?? "—"}</p><p className="mt-1 text-xs text-muted">tests, reviews, source failures</p></div><div className="surface-lined p-4"><p className="text-xs font-semibold uppercase tracking-[.12em] text-muted">Intake failures</p><p className={cn("measurement-number mt-2 text-2xl font-semibold",deadLetters.length?"text-danger":"text-success")}>{deadLetters.length}</p><p className="mt-1 text-xs text-muted">retrying or dead-lettered</p></div></div>
 
-      {activeIncident ? (
-        <section className="surface overflow-hidden" aria-labelledby="active-incident-title">
-          <div className="grid gap-0 xl:grid-cols-[minmax(0,1fr)_300px]">
-            <div className="min-w-0 p-4 sm:p-6">
-              <div className="mb-5 flex flex-wrap items-start justify-between gap-4">
-                <div className="min-w-0">
-                  <div className="flex flex-wrap items-center gap-2"><SeverityMark value={activeIncident.severity} /><StatusMark value={activeIncident.status} /><span className="measurement-number text-xs text-muted">{activeIncident.code}</span></div>
-                  <h2 id="active-incident-title" className="mt-3 max-w-3xl break-words font-heading text-2xl font-semibold tracking-[-0.025em] sm:text-3xl">{activeIncident.title}</h2>
-                  <p className="mt-2 max-w-3xl text-sm leading-6 text-muted">{activeIncident.summary}</p>
-                </div>
-                <Link to={`/incidents/${activeIncident.id}`} className="control-secondary inline-flex items-center gap-2">Open workbench <ArrowRight className="h-4 w-4" /></Link>
-              </div>
-              <CausalTrace incident={activeIncident} />
-            </div>
-            <aside className="border-t border-line bg-rail p-5 xl:border-l xl:border-t-0" aria-label="Active incident measurements">
-              <h3 className="section-title">Incident record</h3>
-              <dl className="mt-5 divide-y divide-line">
-                <div className="flex items-center justify-between py-3"><dt className="text-sm text-muted">Duration</dt><dd className="measurement-number text-sm font-semibold">{durationBetween(activeIncident.startedAt)}</dd></div>
-                <div className="flex items-center justify-between py-3"><dt className="text-sm text-muted">Primary service</dt><dd className="measurement-number text-xs">{activeIncident.service}</dd></div>
-                <div className="flex items-center justify-between py-3"><dt className="text-sm text-muted">Owner</dt><dd className="text-sm font-semibold">{activeIncident.owner}</dd></div>
-                <div className="flex items-center justify-between py-3"><dt className="text-sm text-muted">Evidence events</dt><dd className="measurement-number text-sm font-semibold">{activeIncident.events.length}</dd></div>
-              </dl>
-              <div className="mt-5 rounded-control bg-accent/12 p-4">
-                <div className="flex items-center gap-2 text-sm font-semibold text-accent"><Play className="h-4 w-4" /> Replay in progress</div>
-                <p className="mt-2 text-xs leading-5 text-muted">Testing retry ceiling against the recorded sequence.</p>
-                <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-line"><div className="h-full w-[68%] rounded-full bg-accent" /></div>
-                <p className="measurement-number mt-2 text-right text-[10px] text-muted">68% · SYNTHETIC</p>
-              </div>
-            </aside>
-          </div>
-        </section>
-      ) : null}
-
-      <div className="grid gap-6 xl:grid-cols-[minmax(0,1.45fr)_minmax(340px,0.55fr)]">
-        <section className="surface-lined p-5 sm:p-6" aria-labelledby="traffic-title">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div><h2 id="traffic-title" className="section-title">System pressure</h2><p className="mt-1 text-sm text-muted">Request volume and errors across the active replay window.</p></div>
-            <span className="measurement-number text-xs text-muted">WINDOW 00:30:00</span>
-          </div>
-          <div className="mt-5"><EventVolumeChart data={data.eventVolume} /></div>
-        </section>
-
-        <section className="surface-lined overflow-hidden" aria-labelledby="service-health-title">
-          <div className="flex items-center justify-between px-5 py-5 sm:px-6"><div><h2 id="service-health-title" className="section-title">Service pressure</h2><p className="mt-1 text-sm text-muted">Live operational indicators</p></div><Server className="h-5 w-5 text-muted" /></div>
-          <div className="divide-y divide-line border-t border-line">
-            {data.serviceHealth.map((service) => (
-              <div key={service.service} className="grid grid-cols-[1fr_auto] gap-4 px-5 py-3.5 sm:px-6">
-                <div className="min-w-0"><p className="measurement-number truncate text-xs font-semibold">{service.service}</p><p className="mt-1 text-xs text-muted">{service.latencyMs}ms · {service.errorRate}% errors</p></div>
-                <div className="flex items-center gap-2"><span className={cn("status-dot", service.state === "nominal" ? "bg-success" : service.state === "degraded" ? "bg-warning" : "bg-danger animate-trace-pulse")} /><span className="measurement-number text-xs">{service.availability}%</span></div>
-              </div>
-            ))}
-          </div>
-        </section>
-      </div>
-
-      <div className="grid gap-6 lg:grid-cols-2">
-        <section className="surface-lined overflow-hidden" aria-labelledby="incidents-title">
-          <div className="flex items-center justify-between px-5 py-5 sm:px-6"><div><h2 id="incidents-title" className="section-title">Incident ledger</h2><p className="mt-1 text-sm text-muted">{activeCount} active across the workspace</p></div><Link to="/incidents" className="text-sm font-semibold text-ink underline decoration-line underline-offset-4">View all</Link></div>
-          <div className="divide-y divide-line border-t border-line">
-            {data.incidents.slice(0, 4).map((incident) => (
-              <Link key={incident.id} to={`/incidents/${incident.id}`} className="group grid gap-2 px-5 py-4 transition-colors hover:bg-elevated sm:grid-cols-[86px_1fr_auto] sm:items-center sm:px-6">
-                <span className="measurement-number text-xs text-muted">{incident.code}</span>
-                <span className="min-w-0"><span className="block truncate text-sm font-semibold">{incident.title}</span><span className="mt-1 block text-xs text-muted">{incident.service} · {formatRelative(incident.updatedAt)}</span></span>
-                <StatusMark value={incident.status} />
-              </Link>
-            ))}
-          </div>
-        </section>
-
-        <section className="surface-lined overflow-hidden" aria-labelledby="activity-title">
-          <div className="px-5 py-5 sm:px-6"><h2 id="activity-title" className="section-title">Operations ledger</h2><p className="mt-1 text-sm text-muted">Latest human and system actions</p></div>
-          <div className="divide-y divide-line border-t border-line">
-            {data.activities.map((activity) => (
-              <div key={activity.id} className="flex gap-3 px-5 py-4 sm:px-6">
-                <span className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-elevated">{activity.actor === "System" ? <Radio className="h-3.5 w-3.5 text-info" /> : activity.actor.includes("worker") ? <CheckCircle2 className="h-3.5 w-3.5 text-success" /> : <Clock3 className="h-3.5 w-3.5 text-accent" />}</span>
-                <div><p className="text-sm"><strong>{activity.actor}</strong> {activity.action}</p><p className="mt-1 text-xs leading-5 text-muted">{activity.detail} · {formatRelative(activity.timestamp)}</p></div>
-              </div>
-            ))}
-          </div>
-        </section>
-      </div>
-
-      <IncidentEditor
-        open={editorOpen}
-        saving={createIncident.isPending}
-        error={createIncident.error instanceof Error ? createIncident.error.message : undefined}
-        onClose={() => setEditorOpen(false)}
-        onSave={(draft) => createIncident.mutate(draft)}
-      />
+    <div className="grid gap-6 xl:grid-cols-[minmax(0,1.35fr)_minmax(340px,.65fr)]"><section className="surface-lined overflow-hidden" aria-labelledby="active-title"><div className="flex items-center justify-between px-5 py-5 sm:px-6"><div><h2 id="active-title" className="section-title">Active investigations</h2><p className="mt-1 text-sm text-muted">Impact, environment, owner, freshness, and next action</p></div><Link to="/incidents" className="text-sm font-semibold underline decoration-line underline-offset-4">All views</Link></div><div className="divide-y divide-line border-t border-line">{active.slice(0,8).map((item)=>{const latest=item.events.at(-1);const next=item.events.length<2?"Acquire another independent signal":item.status==="monitoring"?"Record a fresh recovery observation":"Test the leading explanation";return <Link key={item.id} to={`/incidents/${item.id}?area=investigate`} className="group block px-5 py-4 transition-colors hover:bg-elevated sm:px-6"><div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><span className="measurement-number text-xs text-muted">{item.code}</span><SeverityMark value={item.severity}/><StatusMark value={item.status}/><span className="rounded-full bg-elevated px-2 py-.5 text-xs font-semibold">{item.environment ?? "unknown env"}</span></div><p className="mt-2 truncate text-sm font-semibold">{item.title}</p><p className="mt-1 line-clamp-1 text-xs text-muted">{item.customerImpact || "Customer impact unknown"}</p></div><ArrowRight className="mt-2 h-4 w-4 text-faint transition-transform group-hover:translate-x-1" /></div><div className="mt-3 grid gap-2 text-xs text-muted sm:grid-cols-3"><span className="inline-flex items-center gap-1.5"><UserRound className="h-3.5 w-3.5" />{item.owner || "Unassigned"}</span><span className="inline-flex items-center gap-1.5"><Clock3 className="h-3.5 w-3.5" />{latest?`evidence ${formatRelative(latest.timestamp)}`:"no evidence"}</span><span className="font-semibold text-info">{next}</span></div></Link>;})}{!active.length&&<div className="px-6 py-14 text-center"><CheckCircle2 className="mx-auto h-7 w-7 text-success"/><p className="mt-3 font-semibold">No active investigations</p><p className="mt-1 text-sm text-muted">Source deliveries remain visible even when there is no incident.</p></div>}</div></section>
+      <div className="space-y-6"><section className="surface-lined overflow-hidden"><div className="px-5 py-5"><h2 className="section-title">Actions needing attention</h2><p className="mt-1 text-sm text-muted">Exact tasks, not generic activity</p></div><div className="divide-y divide-line border-t border-line">{notifications.data?.slice(0,6).map((item)=><Link key={item.id} to={item.href} className="block px-5 py-4 hover:bg-elevated"><div className="flex items-center justify-between gap-2"><p className="text-sm font-semibold">{item.title}</p><span className="measurement-number text-xs uppercase text-muted">{item.kind}</span></div><p className="mt-1 text-xs leading-5 text-muted">{item.detail}</p></Link>)}{notifications.data&&!notifications.data.length&&<p className="px-5 py-10 text-center text-sm text-muted">No assigned actions are waiting.</p>}</div></section><section className="surface-lined overflow-hidden"><div className="flex items-center justify-between px-5 py-5"><div><h2 className="section-title">Source freshness</h2><p className="mt-1 text-sm text-muted">Cadence-aware receipt health</p></div><Link to="/integrations" className="text-xs font-semibold text-info">Open Sources</Link></div><div className="divide-y divide-line border-t border-line">{sources.data?.map((source)=>{const state=sourceState(source.provider,source.lastDeliveryAt);return <Link key={source.id} to={`/integrations?source=${source.id}`} className="block px-5 py-4 hover:bg-elevated"><div className="flex items-center gap-2"><CircleDot className={cn("h-4 w-4",state.tone)}/><p className="text-sm font-semibold">{source.name}</p><span className="measurement-number ml-auto text-xs uppercase text-muted">{source.provider}</span></div><p className={cn("mt-1 text-xs font-semibold",state.tone)}>{state.label}</p><p className="mt-1 text-xs text-muted">{state.action}</p></Link>;})}{sources.data&&!sources.data.length&&<p className="px-5 py-10 text-center text-sm text-muted">No real source configured.</p>}</div></section></div>
     </div>
-  );
+    <IncidentEditor open={editorOpen} saving={createIncident.isPending} error={createIncident.error instanceof Error?createIncident.error.message:undefined} onClose={()=>setEditorOpen(false)} onSave={(draft)=>createIncident.mutate(draft)} />
+  </div>;
 }

@@ -176,16 +176,17 @@ function normalizeOtelTraces(payload: JsonRecord, deliveryId: string): Normalize
         const durationMs = Number((end - start) / 1_000_000n);
         const failed = statusCode === 2 || httpStatus >= 500;
         const slow = durationMs >= 2_000;
-        if (!failed && !slow) continue;
         const traceId = textValue(span.traceId);
         const spanId = textValue(span.spanId, `${signals.length}`);
+        const healthySample = !failed && !slow && Number.parseInt(createHash("sha256").update(traceId || spanId).digest("hex").slice(0, 4), 16) % 20 === 0;
+        if (!failed && !slow && !healthySample) continue;
         const impact = failed ? Math.min(96, 76 + Math.round(Math.min(20, durationMs / 500))) : Math.min(72, 48 + Math.round(durationMs / 500));
         signals.push(normalized({
           externalId: `${deliveryId}:span:${spanId}`, timestamp: nanoTime(span.startTimeUnixNano), service,
-          kind: failed ? "alert" : "metric", title: `${failed ? "Failed" : "Slow"} span: ${textValue(span.name, "unnamed operation")}`,
+          kind: failed ? "alert" : "metric", title: `${failed ? "Failed" : slow ? "Slow" : "Healthy sampled"} span: ${textValue(span.name, "unnamed operation")}`,
           detail: `${durationMs}ms span${httpStatus ? ` returned HTTP ${httpStatus}` : ""}${object(span.status).message ? ` — ${String(object(span.status).message)}` : ""}.`,
-          impactScore: impact, traceId, correlationKey: traceId || `${service}:${spanId}`, environment,
-          metadata: { provider: "opentelemetry", signal: "trace", spanId, durationMs, httpStatus, attributes: spanAttributes }
+          impactScore: healthySample ? 8 : impact, severity: healthySample ? "low" : undefined, traceId, correlationKey: traceId || `${service}:${spanId}`, environment,
+          metadata: { provider: "opentelemetry", signal: "trace", spanId, durationMs, httpStatus, route: spanAttributes["http.route"] ?? spanAttributes["url.path"] ?? span.name, release: resourceAttributes["service.version"], region: resourceAttributes["cloud.region"], cohortRole: healthySample ? "healthy" : failed ? "failing" : "slow", sampleRate: healthySample ? 0.05 : 1, attributes: spanAttributes }
         }));
       }
     }

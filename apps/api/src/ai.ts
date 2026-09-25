@@ -19,22 +19,24 @@ export function redactSensitiveText(input: string) {
   return { text, redactions };
 }
 
-export async function embedText(text: string): Promise<number[] | undefined> {
+export async function embedText(text: string, externalAllowed = true): Promise<number[] | undefined> {
+  if (!externalAllowed) return undefined;
   const key = config.googleAiKey ?? config.openAiKey;
   if (!key) return undefined;
+  const safeText = redactSensitiveText(text).text;
   const baseUrl = config.googleAiKey ? "https://generativelanguage.googleapis.com/v1beta/openai" : config.openAiBaseUrl;
   const model = config.googleAiKey ? config.googleEmbeddingModel : config.embeddingModel;
   const response = await fetch(`${baseUrl}/embeddings`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-    body: JSON.stringify({ model, input: text.slice(0, 8000), dimensions: 1536 })
+    body: JSON.stringify({ model, input: safeText.slice(0, 8000), dimensions: 1536 })
   });
   if (!response.ok) return undefined;
   const data = await response.json() as { data?: Array<{ embedding: number[] }> };
   return data.data?.[0]?.embedding;
 }
 
-export async function answerQuestion(question: string, evidence: SearchResult[]) {
+export async function answerQuestion(question: string, evidence: SearchResult[], externalAllowed = true) {
   const citations = evidence.slice(0, 4).map(({ incident }) => ({
     code: incident.code,
     title: redactSensitiveText(incident.title).text,
@@ -71,7 +73,7 @@ export async function answerQuestion(question: string, evidence: SearchResult[])
       redactions: redactions + safeAnswer.redactions, evidenceBoundary, ...(providerError ? { providerError } : {})
     };
   };
-  const providerKey = config.googleAiKey ?? config.openAiKey;
+  const providerKey = externalAllowed ? config.googleAiKey ?? config.openAiKey : undefined;
   if (!providerKey) return deterministicAnswer();
   const providerBaseUrl = config.googleAiKey ? "https://generativelanguage.googleapis.com/v1beta/openai" : config.openAiBaseUrl;
   const providerModels = config.googleAiKey

@@ -1,14 +1,14 @@
 # ReplayOps
 
-ReplayOps is a production-incident time machine. It reconstructs operational evidence into a causal timeline, ranks competing root-cause hypotheses, exposes what evidence is missing, proposes the next safe falsification test, and replays a candidate mitigation against the recorded sequence...
+ReplayOps is a production-incident time machine. It turns operational evidence into a reviewable investigation: measure impact, inspect provenance, compare healthy and failing requests, falsify competing explanations, validate a bounded candidate fix, verify actual recovery, and preserve the failure as a CI regression.
 
 It can populate that workbench automatically: signed GitHub webhooks, OTLP HTTP/JSON traces, logs and metrics, Grafana alerts, and normalized generic webhooks are verified, deduplicated, buffered, correlated, and attached to incidents without manual copying.
 
-Its differentiated workflow is the diagnostic proof loop: precursor → symptom → propagation → falsification test → mitigation replay. AI is used to challenge a hypothesis with disconfirming evidence, never to silently declare root cause.
+Its differentiated workflow is: symptom → evidence → explanation → falsification test → bounded validation → measured recovery → regression test. AI is contextual, redacted, cited, and never allowed to silently declare root cause or approve a change.
 
 The included workspace is production-configurable and also runs without cloud credentials using a synthetic in-memory organization.
 
-For an end-to-end explanation of the architecture, feature flows, engineering decisions, API routes, database model, and user guide, see [`CODE_WALKTHROUGH.md`](CODE_WALKTHROUGH.md). For a plain-language explanation of every current and planned product capability, see [`FEATURE_GUIDE.md`](FEATURE_GUIDE.md). For a feature-by-feature map tied directly to the implementation, including impact scoring and AI boundaries, see [`docs/REPLAYOPS_FEATURES_WITH_CODE.md`](docs/REPLAYOPS_FEATURES_WITH_CODE.md).
+For an end-to-end explanation of the architecture, feature flows, engineering decisions, API routes, database model, and user guide, see [`CODE_WALKTHROUGH.md`](CODE_WALKTHROUGH.md). The current operating model and implementation map are in [`docs/REPLAYOPS_OPERATING_GUIDE.md`](docs/REPLAYOPS_OPERATING_GUIDE.md); the bounded replay/CI contract is in [`docs/HTTP_REPLAY.md`](docs/HTTP_REPLAY.md); and the auditable 40-item delivery ledger is in [`docs/REPLAYOPS_IMPLEMENTATION_CHECKLIST.md`](docs/REPLAYOPS_IMPLEMENTATION_CHECKLIST.md).
 
 ## Architecture
 
@@ -37,11 +37,12 @@ Every authenticated delivery is now persisted to a Supabase-backed `ingestion_qu
 - **Intake policy:** configures incident threshold, grouping window, low-severity suppression, and maintenance mode.
 - **Team access:** admin, responder, and viewer roles are enforced at the API; admins can email expiring, email-bound invitation links with a copy-link fallback.
 - **Audit trail:** successful mutations and governed actions retain actor, target, detail, and timestamp.
-- **Grounded AI:** assistant context is redacted before provider calls and responses expose incident/event citations, evidence boundary, model mode, and confidence.
+- **Grounded AI:** chat and embedding input are redacted before provider calls; responses expose incident/event citations, evidence boundary, model mode, and unknowns.
 - **Hypothesis tests:** responders assign a falsification test, record the observation, and mark it supported, disproved, or inconclusive.
-- **Persistent replay:** exact configuration, projection, event count, and evidence version survive refresh and can be compared.
+- **Scenario estimates:** transparent arithmetic is saved against an evidence revision and never labeled as execution or predicted recovery.
+- **Bounded HTTP replay:** immutable request/version/assertions/fixtures execute only against a loopback candidate target, run twice for nondeterminism, and can be downloaded as a CI manifest.
 - **Mitigation approval:** responders submit an exact replay-bound action plus rollback plan; a separate administrator approves or rejects it, and new evidence makes the request stale. ReplayOps does not execute infrastructure commands.
-- **Recovery gate:** the API requires a verified metric observation and window before an incident can be resolved.
+- **Recovery gate:** the API derives recovery from metric direction, unit, source, query, interval, and freshness; the newest failure overrides an older pass.
 - **Learning loop:** generated handoffs and editable postmortems preserve evidence, tests, replay, recovery, and follow-up ownership.
 
 ## Run locally
@@ -134,4 +135,4 @@ Pushes to `main` verify, build, and deploy services for which secrets are presen
 
 ## Important limitation
 
-The included replay engine is a safe deterministic demonstration over stored incident events. It does not execute commands against production infrastructure. Connecting an external executor should require an isolated worker, signed replay manifests, scoped credentials, approval policies, and a complete audit trail.
+ReplayOps now separates scenario estimates from executable validation. The bounded HTTP replay records a request, application version, explicit assertions, declared dependency fixtures, evidence revision, output, and execution history. Execution is loopback-only and intended for an isolated local or CI environment without production credentials. See `docs/HTTP_REPLAY.md` for the safety boundary and CI command.

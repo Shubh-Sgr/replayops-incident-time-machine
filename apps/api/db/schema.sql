@@ -25,6 +25,8 @@ create table if not exists incidents (
   title text not null,
   summary text not null,
   service text not null,
+  environment text not null default 'unknown',
+  customer_impact text not null default 'Unknown until measured',
   severity text not null check (severity in ('critical', 'high', 'medium', 'low')),
   status text not null check (status in ('investigating', 'identified', 'monitoring', 'resolved')),
   owner text not null,
@@ -33,6 +35,7 @@ create table if not exists incidents (
   embedding vector(1536),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
+  evidence_revision timestamptz not null default now(),
   unique (organization_id, code)
 );
 
@@ -45,6 +48,10 @@ create table if not exists incident_events (
   title text not null,
   detail text not null,
   impact_score integer not null default 0 check (impact_score between 0 and 100),
+  evidence_state text not null default 'active' check (evidence_state in ('active','excluded')),
+  provenance text not null default 'manual',
+  correction_reason text,
+  corrected_from_id uuid,
   metadata jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now()
 );
@@ -107,6 +114,13 @@ create table if not exists integrations (
   last_delivery_at timestamptz,
   last_delivery_status text check (last_delivery_status in ('accepted', 'duplicate', 'rejected', 'failed')),
   signal_count integer not null default 0 check (signal_count >= 0),
+  expected_cadence_minutes integer not null default 180,
+  retention_days integer not null default 14,
+  daily_quota integer not null default 10000,
+  healthy_sample_rate numeric not null default 0.05,
+  accepted_today integer not null default 0,
+  dropped_today integer not null default 0,
+  counter_date date not null default current_date,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -202,6 +216,11 @@ create table if not exists mitigation_requests (
   title text not null,
   action text not null,
   rollback_plan text not null,
+  current_value text not null default 'Not recorded',
+  proposed_value text not null default 'Not recorded',
+  blast_radius text not null default 'Not recorded',
+  change_owner text not null default 'Unassigned',
+  observation_minutes integer not null default 15,
   replay_run_id uuid references replay_runs(id) on delete restrict,
   replay_config jsonb,
   replay_projection jsonb,
@@ -222,7 +241,10 @@ create table if not exists recovery_verifications (
   id uuid primary key default gen_random_uuid(), organization_id uuid not null references organizations(id) on delete cascade,
   incident_id uuid not null references incidents(id) on delete cascade, metric text not null, target_value numeric not null, baseline_value numeric not null,
   observed_value numeric, observation_minutes integer not null check(observation_minutes between 1 and 10080), status text not null default 'pending' check(status in ('pending','verified','failed')),
-  reason text not null default '', created_at timestamptz not null default now(), updated_at timestamptz not null default now()
+  reason text not null default '', unit text not null default 'value', comparison text not null default 'lte',
+  source text not null default 'Legacy observation', query text not null default 'Unavailable for legacy observation',
+  window_started_at timestamptz, window_ended_at timestamptz, observed_at timestamptz, freshness_minutes integer not null default 0,
+  created_at timestamptz not null default now(), updated_at timestamptz not null default now()
 );
 
 create table if not exists incident_postmortems (
@@ -245,6 +267,64 @@ create table if not exists ingestion_queue (
   unique(integration_id,external_id)
 );
 
+create table if not exists notification_states (
+  organization_id uuid not null references organizations(id) on delete cascade,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  notification_id text not null,
+  read_at timestamptz,
+  resolved_at timestamptz,
+  updated_at timestamptz not null default now(),
+  primary key(user_id, notification_id)
+);
+
+create table if not exists workspace_privacy_settings (
+  organization_id uuid primary key references organizations(id) on delete cascade,
+  external_ai_enabled boolean not null default true,
+  capture_request_bodies boolean not null default false,
+  product_analytics_enabled boolean not null default true,
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists incident_comments (
+  id uuid primary key default gen_random_uuid(),
+  organization_id uuid not null references organizations(id) on delete cascade,
+  incident_id uuid not null references incidents(id) on delete cascade,
+  actor text not null,
+  body text not null,
+  event_id uuid,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists http_replay_specs (
+  id uuid primary key default gen_random_uuid(),
+  organization_id uuid not null references organizations(id) on delete cascade,
+  incident_id uuid not null references incidents(id) on delete cascade,
+  name text not null,
+  evidence_revision timestamptz not null,
+  application_version text not null,
+  request jsonb not null,
+  assertions jsonb not null,
+  dependencies jsonb not null default '[]',
+  network_policy text not null default 'deny_except_loopback_target',
+  created_at timestamptz not null default now()
+);
+
+create table if not exists http_replay_executions (
+  id uuid primary key default gen_random_uuid(),
+  organization_id uuid not null references organizations(id) on delete cascade,
+  incident_id uuid not null references incidents(id) on delete cascade,
+  spec_id uuid not null references http_replay_specs(id) on delete cascade,
+  evidence_revision timestamptz not null,
+  status text not null check(status in ('passed','failed','unsupported')),
+  assertion_results jsonb not null default '[]',
+  response_status integer,
+  response_body text,
+  duration_ms integer,
+  nondeterministic boolean not null default false,
+  limitation text,
+  created_at timestamptz not null default now()
+);
+
 create index if not exists incidents_started_at_idx on incidents(organization_id, started_at desc);
 create index if not exists incidents_status_idx on incidents(organization_id, status);
 create index if not exists incident_events_incident_time_idx on incident_events(incident_id, timestamp);
@@ -261,6 +341,8 @@ create index if not exists service_catalog_org_idx on service_catalog(organizati
 create index if not exists workspace_audit_org_idx on workspace_audit_log(organization_id,created_at desc);
 create index if not exists mitigation_incident_idx on mitigation_requests(incident_id,created_at desc);
 create index if not exists ingestion_queue_ready_idx on ingestion_queue(status,next_attempt_at);
+create index if not exists incident_comments_incident_idx on incident_comments(incident_id,created_at);
+create index if not exists http_replay_incident_idx on http_replay_specs(incident_id,created_at desc);
 
 alter table organizations enable row level security;
 alter table organization_members enable row level security;
@@ -282,6 +364,11 @@ alter table hypothesis_tests enable row level security;
 alter table recovery_verifications enable row level security;
 alter table incident_postmortems enable row level security;
 alter table ingestion_queue enable row level security;
+alter table notification_states enable row level security;
+alter table workspace_privacy_settings enable row level security;
+alter table incident_comments enable row level security;
+alter table http_replay_specs enable row level security;
+alter table http_replay_executions enable row level security;
 
 create policy "members can read own memberships" on organization_members for select
 using (user_id = auth.uid());
@@ -394,6 +481,30 @@ using (exists (
   where x.id = ingestion_queue.integration_id and m.user_id = auth.uid()
 ));
 
+create policy "members can manage own notification state" on notification_states for all
+using (user_id = auth.uid())
+with check (user_id = auth.uid());
+
+create policy "members can read privacy settings" on workspace_privacy_settings for select
+using (exists (select 1 from organization_members m where m.organization_id = workspace_privacy_settings.organization_id and m.user_id = auth.uid()));
+create policy "admins can manage privacy settings" on workspace_privacy_settings for all
+using (exists (select 1 from organization_members m where m.organization_id = workspace_privacy_settings.organization_id and m.user_id = auth.uid() and m.role = 'admin'))
+with check (exists (select 1 from organization_members m where m.organization_id = workspace_privacy_settings.organization_id and m.user_id = auth.uid() and m.role = 'admin'));
+
+create policy "members can read incident comments" on incident_comments for select
+using (exists (select 1 from organization_members m where m.organization_id = incident_comments.organization_id and m.user_id = auth.uid()));
+create policy "responders can create incident comments" on incident_comments for insert
+with check (exists (select 1 from organization_members m where m.organization_id = incident_comments.organization_id and m.user_id = auth.uid() and m.role in ('admin','responder')));
+
+create policy "members can read replay specs" on http_replay_specs for select
+using (exists (select 1 from organization_members m where m.organization_id = http_replay_specs.organization_id and m.user_id = auth.uid()));
+create policy "responders can create replay specs" on http_replay_specs for insert
+with check (exists (select 1 from organization_members m where m.organization_id = http_replay_specs.organization_id and m.user_id = auth.uid() and m.role in ('admin','responder')));
+create policy "members can read replay executions" on http_replay_executions for select
+using (exists (select 1 from organization_members m where m.organization_id = http_replay_executions.organization_id and m.user_id = auth.uid()));
+create policy "responders can create replay executions" on http_replay_executions for insert
+with check (exists (select 1 from organization_members m where m.organization_id = http_replay_executions.organization_id and m.user_id = auth.uid() and m.role in ('admin','responder')));
+
 create or replace function public.seed_replayops_workspace(target_organization_id uuid)
 returns void
 language plpgsql
@@ -413,12 +524,12 @@ begin
   end if;
 
   insert into public.incidents (
-    id, organization_id, code, title, summary, service, severity, status, owner,
+    id, organization_id, code, title, summary, service, environment, customer_impact, severity, status, owner,
     started_at, resolved_at, created_at, updated_at
   ) values
-    (checkout_incident_id, target_organization_id, 'ROP-1842', 'Checkout retries amplified inventory latency', 'A delayed inventory replica triggered synchronized checkout retries and elevated payment authorization latency.', 'checkout-api', 'critical', 'identified', 'Maya Chen', '2026-09-20T05:41:12Z', null, '2026-09-20T05:44:00Z', '2026-09-20T06:06:00Z'),
-    (search_incident_id, target_organization_id, 'ROP-1838', 'Search indexing backlog after catalog import', 'A bulk catalog import exceeded the indexing consumer''s safe concurrency and delayed search freshness.', 'search-indexer', 'high', 'monitoring', 'Noah Williams', '2026-09-19T21:18:00Z', null, '2026-09-19T21:22:00Z', '2026-09-20T04:10:00Z'),
-    (identity_incident_id, target_organization_id, 'ROP-1829', 'Session cache eviction storm', 'A cache node replacement shifted hot keys to one shard and increased authentication misses.', 'identity-edge', 'medium', 'resolved', 'Ishan Rao', '2026-09-18T09:10:00Z', '2026-09-18T10:02:00Z', '2026-09-18T09:13:00Z', '2026-09-18T11:20:00Z');
+    (checkout_incident_id, target_organization_id, 'ROP-1842', 'Checkout retries amplified inventory latency', 'A delayed inventory replica triggered synchronized checkout retries and elevated payment authorization latency.', 'checkout-api', 'production', 'Unknown — add a measured rate and denominator.', 'critical', 'identified', 'Maya Chen', '2026-09-20T05:41:12Z', null, '2026-09-20T05:44:00Z', '2026-09-20T06:06:00Z'),
+    (search_incident_id, target_organization_id, 'ROP-1838', 'Search indexing backlog after catalog import', 'A bulk catalog import exceeded the indexing consumer''s safe concurrency and delayed search freshness.', 'search-indexer', 'production', 'Search freshness exceeded ten minutes; affected-query denominator unknown.', 'high', 'monitoring', 'Noah Williams', '2026-09-19T21:18:00Z', null, '2026-09-19T21:22:00Z', '2026-09-20T04:10:00Z'),
+    (identity_incident_id, target_organization_id, 'ROP-1829', 'Session cache eviction storm', 'A cache node replacement shifted hot keys to one shard and increased authentication misses.', 'identity-edge', 'production', 'Authentication miss rate increased; affected-session denominator unknown.', 'medium', 'resolved', 'Ishan Rao', '2026-09-18T09:10:00Z', '2026-09-18T10:02:00Z', '2026-09-18T09:13:00Z', '2026-09-18T11:20:00Z');
 
   insert into public.incident_events (incident_id, timestamp, service, kind, title, detail, impact_score, metadata)
   values
@@ -435,13 +546,8 @@ begin
   insert into public.incident_activities (organization_id, incident_id, actor, action, detail, timestamp)
   values
     (target_organization_id, checkout_incident_id, 'Maya Chen', 'isolated initiating dependency', 'Marked inventory replica lag as the likely trigger.', '2026-09-20T06:06:00Z'),
-    (target_organization_id, search_incident_id, 'Replay worker', 'completed candidate replay', 'Concurrency cap prevented connection saturation in 18 of 18 runs.', '2026-09-20T05:58:00Z'),
+    (target_organization_id, search_incident_id, 'ReplayOps', 'recorded scenario estimate', 'Concurrency cap was saved as an arithmetic candidate; it was not executed.', '2026-09-20T05:58:00Z'),
     (target_organization_id, null, 'System', 'ingested synthetic telemetry', '1,248 normalized events added to the demonstration workspace.', '2026-09-20T05:36:00Z');
-
-  insert into public.replay_runs (organization_id, incident_id, name, status, progress, created_at)
-  values
-    (target_organization_id, checkout_incident_id, 'Retry ceiling: 4 → 1', 'running', 68, '2026-09-20T06:03:00Z'),
-    (target_organization_id, search_incident_id, 'Indexer concurrency cap', 'passed', 100, '2026-09-20T05:35:00Z');
 
   insert into public.service_health_snapshots (organization_id, service, availability, latency_ms, error_rate, state, observed_at)
   values

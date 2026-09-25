@@ -15,6 +15,10 @@ export interface IncidentEvent {
   title: string;
   detail: string;
   impactScore: number;
+  evidenceState?: "active" | "excluded" | "corrected";
+  provenance?: "ingested" | "manual" | "derived";
+  correctionReason?: string | null;
+  correctedFromId?: string | null;
   metadata?: Record<string, unknown>;
 }
 
@@ -24,6 +28,8 @@ export interface Incident {
   title: string;
   summary: string;
   service: string;
+  environment?: string;
+  customerImpact?: string;
   severity: Severity;
   status: IncidentStatus;
   owner: string;
@@ -31,6 +37,7 @@ export interface Incident {
   resolvedAt?: string | null;
   createdAt: string;
   updatedAt: string;
+  evidenceRevision?: string;
   events: IncidentEvent[];
 }
 
@@ -82,6 +89,10 @@ export interface ReplayProjection {
   state: "contained" | "degraded" | "critical";
   summary: string;
   signals: string[];
+  kind?: "scenario_estimate";
+  target?: string;
+  assumptions?: string[];
+  unsupportedReasons?: string[];
 }
 
 export interface ReplayResult extends ReplayRun {
@@ -120,6 +131,9 @@ export interface DiagnosticHypothesis {
   conflictingEvidence: string[];
   nextTest: string;
   safeAction: string;
+  state: "untested" | "supported" | "disproved" | "inconclusive" | "contested";
+  outcomeSummary: string;
+  testCount: number;
 }
 
 export interface IncidentDiagnosis {
@@ -136,6 +150,9 @@ export interface IncidentDiagnosis {
   signalDeltas: SignalDelta[];
   hypotheses: DiagnosticHypothesis[];
   evidenceGaps: string[];
+  evidenceStatus: "insufficient" | "partial" | "substantial";
+  currentExplanation: string;
+  nextAction: { label: string; reason: string; href: string };
 }
 
 export interface DashboardData {
@@ -150,6 +167,7 @@ export interface SearchResult {
   incident: Incident;
   score: number;
   matchReason: string;
+  matchedEventId?: string;
 }
 
 export interface IntegrationDelivery {
@@ -172,6 +190,12 @@ export interface Integration {
   lastDeliveryAt?: string | null;
   lastDeliveryStatus?: IntegrationDelivery["status"] | null;
   signalCount: number;
+  expectedCadenceMinutes: number;
+  retentionDays: number;
+  dailyQuota: number;
+  healthySampleRate: number;
+  acceptedToday: number;
+  droppedToday: number;
   deliveries: IntegrationDelivery[];
 }
 
@@ -205,10 +229,11 @@ export interface IngestionBatch {
 }
 
 export interface IngestionResult {
-  status: "accepted" | "queued" | "duplicate";
+  status: "accepted" | "queued" | "duplicate" | "rejected";
   acceptedSignals: number;
   incidentIds: string[];
   queueId?: string;
+  reason?: string;
 }
 
 export type WorkspaceRole = "admin" | "responder" | "viewer";
@@ -218,6 +243,7 @@ export interface WorkspaceContext {
   organizationName: string;
   role: WorkspaceRole;
 }
+export interface PrivacySettings { externalAiEnabled: boolean; captureRequestBodies: boolean; productAnalyticsEnabled: boolean; updatedAt: string }
 
 export interface ServiceDefinition {
   id: string;
@@ -290,6 +316,11 @@ export interface MitigationRequest {
   title: string;
   action: string;
   rollbackPlan: string;
+  currentValue: string;
+  proposedValue: string;
+  blastRadius: string;
+  changeOwner: string;
+  observationMinutes: number;
   replayRunId: string;
   replayConfig: ReplayConfig;
   replayProjection: ReplayProjection;
@@ -299,6 +330,7 @@ export interface MitigationRequest {
   createdAt: string;
   reviewedAt?: string | null;
 }
+export interface MitigationPolicy { independentApprovalRequired: true; approverRole: "admin"; minimumObservationMinutes: number; requireRollback: true; updatedAt: string }
 
 export type HypothesisTestStatus = "planned" | "running" | "supported" | "disproved" | "inconclusive";
 export interface HypothesisTest {
@@ -322,11 +354,32 @@ export interface RecoveryVerification {
   targetValue: number;
   baselineValue: number;
   observedValue?: number | null;
+  unit?: string;
+  comparison?: "lte" | "gte";
+  source?: string;
+  query?: string;
+  windowStartedAt?: string;
+  windowEndedAt?: string;
+  observedAt?: string;
+  freshnessMinutes?: number;
   observationMinutes: number;
   status: "pending" | "verified" | "failed";
   reason: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface HttpReplaySpec {
+  id: string; incidentId: string; name: string; evidenceRevision: string; applicationVersion: string;
+  request: { method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"; path: string; headers: Record<string,string>; body?: string };
+  assertions: { status: number; bodyIncludes?: string };
+  dependencies: Array<{ name: string; mode: "mocked" | "disabled"; fixture: string }>;
+  networkPolicy: "deny_except_loopback_target"; createdAt: string;
+}
+export interface HttpReplayExecution {
+  id: string; specId: string; incidentId: string; evidenceRevision: string;
+  status: "passed" | "failed" | "unsupported"; assertionResults: Array<{ assertion: string; passed: boolean; observed: string }>;
+  responseStatus?: number; responseBody?: string; durationMs?: number; nondeterministic: boolean; limitation?: string; createdAt: string;
 }
 
 export interface IncidentPostmortem {
@@ -339,6 +392,7 @@ export interface IncidentPostmortem {
   status: "draft" | "published";
   updatedAt: string;
 }
+export interface IncidentComment { id:string; incidentId:string; actor:string; body:string; eventId?:string|null; createdAt:string }
 
 export interface ActionNotification {
   id: string;
@@ -348,4 +402,9 @@ export interface ActionNotification {
   incidentId?: string;
   href: string;
   createdAt: string;
+  read: boolean;
+  resolved: boolean;
+  urgency: "normal" | "urgent";
+  reason: string;
+  owner?: string;
 }

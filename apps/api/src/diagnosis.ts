@@ -1,4 +1,4 @@
-import type { DiagnosticHypothesis, Incident, IncidentDiagnosis, IncidentEvent, SignalDelta } from "./types.js";
+import type { DiagnosticHypothesis, HypothesisTest, Incident, IncidentDiagnosis, IncidentEvent, SignalDelta } from "./types.js";
 
 const clamp = (value: number, minimum: number, maximum: number) => Math.min(maximum, Math.max(minimum, Math.round(value)));
 
@@ -49,7 +49,36 @@ function testFor(event: IncidentEvent, symptom: IncidentEvent) {
   };
 }
 
-export function diagnoseIncident(incident: Incident): IncidentDiagnosis {
+function hypothesisOutcome(hypothesisId: string, tests: HypothesisTest[]) {
+  const relevant = tests
+    .filter((test) => test.hypothesisId === hypothesisId)
+    .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt));
+  const supported = relevant.some((test) => test.status === "supported");
+  const disproved = relevant.some((test) => test.status === "disproved");
+  const inconclusive = relevant.some((test) => test.status === "inconclusive");
+  const state: DiagnosticHypothesis["state"] = supported && disproved
+    ? "contested"
+    : disproved
+      ? "disproved"
+      : supported
+        ? "supported"
+        : inconclusive
+          ? "inconclusive"
+          : "untested";
+  const latest = relevant.at(-1);
+  const outcomeSummary = state === "contested"
+    ? "Tests disagree. Treat this explanation as contested until the conflicting cohorts or conditions are reconciled."
+    : state === "disproved"
+      ? `Observed evidence did not distinguish or support this explanation${latest?.result ? `: ${latest.result}` : "."}`
+      : state === "supported"
+        ? `A bounded test supports this explanation${latest?.result ? `: ${latest.result}` : "."} Support is limited to the tested conditions.`
+        : state === "inconclusive"
+          ? `The latest test was inconclusive${latest?.result ? `: ${latest.result}` : "."}`
+          : "No completed test has changed this explanation yet.";
+  return { state, outcomeSummary, testCount: relevant.length };
+}
+
+export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = []): IncidentDiagnosis {
   const events = [...incident.events].sort((left, right) => left.timestamp.localeCompare(right.timestamp));
   if (!events.length) {
     return {
@@ -63,7 +92,10 @@ export function diagnoseIncident(incident: Incident): IncidentDiagnosis {
       changeCandidates: [],
       signalDeltas: [],
       hypotheses: [],
-      evidenceGaps: ["No timestamped evidence is attached, so causal ordering cannot be evaluated."]
+      evidenceGaps: ["No timestamped evidence is attached, so causal ordering cannot be evaluated."],
+      evidenceStatus: "insufficient",
+      currentExplanation: "No explanation is defensible until timestamped evidence is attached.",
+      nextAction: { label: "Add the first evidence", reason: "A timestamped observation is required before ReplayOps can rank explanations.", href: "?area=evidence&action=add" }
     };
   }
 
@@ -119,12 +151,13 @@ export function diagnoseIncident(incident: Incident): IncidentDiagnosis {
     confidence: Math.min(confidence, clamp(changeCandidates[0]?.score ?? confidence, 20, 94)),
     supportingEvidence: [
       `${topCandidate.title} was recorded ${evidenceSpan ? `${Math.max(1, Math.round(evidenceSpan / 60))}m before` : "at"} the first high-impact symptom.`,
-      `Impact then reached ${peak.impactScore}/100 in ${peak.service}.`
+      `A high-severity downstream observation was then recorded in ${peak.service}.`
     ],
     conflictingEvidence: correlated
       ? ["Correlation IDs exist, but the relevant request path still needs to be inspected before assigning cause."]
       : ["No trace or request ID links this precursor to the affected requests; temporal order alone is not proof."],
-    ...primaryTest
+    ...primaryTest,
+    ...hypothesisOutcome(`origin-${topCandidate.id}`, tests)
   }];
 
   if (amplificationEvent && servicePath.length > 1) {
@@ -137,7 +170,8 @@ export function diagnoseIncident(incident: Incident): IncidentDiagnosis {
       supportingEvidence: [`The service path expanded ${servicePath.join(" → ")}.`, amplificationEvent.detail],
       conflictingEvidence: ["The current evidence does not include a healthy control cohort with the same upstream condition."],
       nextTest: "Compare request volume and retry count for affected versus successful requests, then verify whether amplification begins after the upstream latency shift.",
-      safeAction: "Apply a bounded retry or concurrency ceiling and watch whether downstream pressure falls without increasing failed requests."
+      safeAction: "Apply a bounded retry or concurrency ceiling and watch whether downstream pressure falls without increasing failed requests.",
+      ...hypothesisOutcome(`amplification-${amplificationEvent.id}`, tests)
     });
   }
 
@@ -151,7 +185,8 @@ export function diagnoseIncident(incident: Incident): IncidentDiagnosis {
       supportingEvidence: [`The observed path crosses ${servicePath.length} services.`, `The peak appeared in ${peak.service}, not necessarily where propagation began.`],
       conflictingEvidence: ["Service-level timestamps can be skewed, and missing telemetry may reorder the apparent path."],
       nextTest: `Inspect one slow exemplar trace from ${symptom.service} and one healthy trace, then compare their first divergent span.`,
-      safeAction: "Preserve exemplars and logs before changing the downstream service; avoid treating the loudest alert as root cause."
+      safeAction: "Preserve exemplars and logs before changing the downstream service; avoid treating the loudest alert as root cause.",
+      ...hypothesisOutcome(`downstream-${symptom.id}`, tests)
     });
   }
 
@@ -161,6 +196,22 @@ export function diagnoseIncident(incident: Incident): IncidentDiagnosis {
   if (!hasRecovery) evidenceGaps.push("No recovery event is recorded, so mitigation effectiveness cannot be measured against the same signals.");
   if (events.filter((event) => event.timestamp < symptom.timestamp).length < 2) evidenceGaps.push("The pre-symptom baseline is thin; add healthy-window measurements for comparison.");
   if (events.length < 5) evidenceGaps.push("Fewer than five evidence points are available; hypothesis confidence is intentionally capped.");
+
+  const stateOrder: Record<DiagnosticHypothesis["state"], number> = { supported: 0, untested: 1, inconclusive: 2, contested: 3, disproved: 4 };
+  const orderedHypotheses = hypotheses
+    .sort((left, right) => stateOrder[left.state] - stateOrder[right.state] || left.rank - right.rank)
+    .map((hypothesis, index) => ({ ...hypothesis, rank: index + 1 }));
+  const leading = orderedHypotheses.find((hypothesis) => hypothesis.state !== "disproved");
+  const contested = orderedHypotheses.find((hypothesis) => hypothesis.state === "contested");
+  const activeTest = tests.find((test) => ["planned", "running"].includes(test.status));
+  const evidenceStatus: IncidentDiagnosis["evidenceStatus"] = evidenceCompleteness < 35 ? "insufficient" : evidenceCompleteness < 75 ? "partial" : "substantial";
+  const nextAction = activeTest
+    ? { label: activeTest.status === "running" ? "Record the test outcome" : "Start the assigned test", reason: activeTest.title, href: `?area=investigate&test=${activeTest.id}` }
+    : contested
+      ? { label: "Resolve contradictory test results", reason: contested.outcomeSummary, href: `?area=investigate&hypothesis=${encodeURIComponent(contested.id)}` }
+    : leading
+      ? { label: leading.testCount ? "Run a different test" : "Run the next test", reason: leading.nextTest, href: `?area=investigate&hypothesis=${encodeURIComponent(leading.id)}` }
+      : { label: "Add missing evidence", reason: evidenceGaps[0] ?? "Every current explanation has been disproved.", href: "?area=evidence&gap=missing" };
 
   return {
     incidentId: incident.id,
@@ -174,7 +225,12 @@ export function diagnoseIncident(incident: Incident): IncidentDiagnosis {
     scoreExplanation,
     changeCandidates,
     signalDeltas: signalDeltas(events, symptom),
-    hypotheses,
-    evidenceGaps
+    hypotheses: orderedHypotheses,
+    evidenceGaps,
+    evidenceStatus,
+    currentExplanation: leading
+      ? `${leading.claim} ${leading.state === "supported" ? "A bounded test supports it under the recorded conditions." : leading.state === "contested" ? "The recorded tests conflict." : "It remains an explanation to test, not a proven root cause."}`
+      : "Every recorded explanation has been disproved. Gather new evidence before selecting another cause.",
+    nextAction
   };
 }

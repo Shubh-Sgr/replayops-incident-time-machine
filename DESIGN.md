@@ -104,7 +104,7 @@ The system is dense where evidence needs comparison and breathable around decisi
 
 **Key Characteristics:**
 
-- Evidence-first hierarchy with the causal trace as the focal instrument.
+- Evidence-first hierarchy with the investigation summary and event timeline as the focal instruments.
 - Cool hue-tinted neutrals in both light and dark themes.
 - Sparse incident orange reserved for high-intent controls and active time.
 - Human-readable operational copy paired with monospaced measurements.
@@ -165,7 +165,7 @@ The palette combines blue-tinted instrument neutrals with one warm control color
 
 The system follows a 4px base rhythm. Tight groups use 4–12px gaps, components use 16–24px, and major regions use 32px or more. Desktop uses a persistent 248px operations rail and a content frame capped at 1600px. Tablet collapses the rail into an overlay. Mobile becomes a single column with a bottom command dock and at least 24px of clearance above it.
 
-The first dashboard surface is intentionally asymmetric: the active causal trace owns the majority of the field while incident measurements form a narrow companion rail. Supporting analytics follow the focal instrument rather than preceding it.
+The first product surface is an investigation inbox, not an analytics dashboard. Inside an investigation, the symptom, one useful next action, owner, freshness, and explanation precede the event timeline. Supporting comparisons and validation follow the evidence rather than preceding it.
 
 ## Elevation & Depth
 
@@ -218,17 +218,17 @@ The coordinate grid is exclusive to the causal trace because it encodes real ser
 
 The desktop rail uses broad text labels and line icons with one inverted active row. Mobile moves three commands into a floating bottom dock; icon-only header actions retain accessible names.
 
-### Causal Trace
+### Event Timeline
 
-The signature component maps services to horizontal lanes and evidence to timestamped nodes. One orange playhead and node identify current time; arrow keys and explicit previous/next controls provide equivalent operation. Horizontal overflow on phones preserves the measurement scale instead of compressing evidence into illegibility.
+The signature component maps services to horizontal lanes and evidence to elapsed-time positions. Selection synchronizes an exact evidence inspector and URL anchor. Orange marks the selected observation; arrow keys and explicit previous/next controls provide equivalent operation. On phones, the timeline remains contained while the surrounding workbench becomes a single-column triage and handoff flow.
 
 ## Do's and Don'ts
 
 ### Do:
 
-- **Do** lead incident surfaces with evidence and time, then place summaries around them.
+- **Do** lead incident surfaces with customer symptom, unknowns, one next action, freshness, and exact evidence.
 - **Do** use semantic OKLCH tokens and keep neutrals inside the blue instrument family.
-- **Do** label synthetic values, AI uncertainty, and human-approval boundaries explicitly.
+- **Do** label observations, explanations, scenario estimates, executed replay, AI uncertainty, and human-approval boundaries explicitly.
 - **Do** retain 44px touch targets, visible focus, reduced-motion behavior, and text alternatives for charts.
 
 ### Don't:

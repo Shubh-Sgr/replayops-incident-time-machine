@@ -1,42 +1,35 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { Activity, Bell, Bot, CircleUserRound, Gauge, LogOut, Menu, Moon, RadioTower, Search, Settings2, Sun, X } from "lucide-react";
+import { Activity, Bell, CircleUserRound, LogOut, Menu, Moon, RadioTower, Search, Settings2, Sun, X } from "lucide-react";
 import { useEffect, useState } from "react";
-import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { Link, NavLink, Outlet } from "react-router-dom";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { cn } from "../lib/utils";
 import { api } from "../lib/api";
 import { useAuth } from "../providers/AuthProvider";
 import { useTheme } from "../providers/ThemeProvider";
-import { AssistantDrawer } from "./AssistantDrawer";
 import { CommandSearch } from "./CommandSearch";
 
 const navigation = [
-  { to: "/", label: "Operations", icon: Gauge, end: true },
-  { to: "/incidents", label: "Incidents", icon: Activity, end: false },
-  { to: "/integrations", label: "Connectors", icon: RadioTower, end: false },
-  { to: "/workspace", label: "Workspace", icon: Settings2, end: false }
+  { to: "/", label: "Investigations", icon: Activity, end: true },
+  { to: "/integrations", label: "Sources", icon: RadioTower, end: false },
+  { to: "/workspace", label: "Settings", icon: Settings2, end: false }
 ];
 
 export function AppShell() {
   const [mobileNav, setMobileNav] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
-  const [assistantOpen, setAssistantOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const { user, signOut } = useAuth();
   const { theme, toggleTheme } = useTheme();
-  const location = useLocation();
-  const incidentId = location.pathname.startsWith("/incidents/") ? location.pathname.split("/")[2] : undefined;
   const notifications = useQuery({ queryKey: ["notifications"], queryFn: api.notifications, refetchInterval: 20_000 });
+  const queryClient=useQueryClient();
+  const notificationState=useMutation({mutationFn:({id,input}:{id:string;input:{read?:boolean;resolved?:boolean}})=>api.updateNotification(id,input),onSuccess:()=>void queryClient.invalidateQueries({queryKey:["notifications"]})});
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
         setSearchOpen(true);
-      }
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "j") {
-        event.preventDefault();
-        setAssistantOpen(true);
       }
     };
     window.addEventListener("keydown", handler);
@@ -115,8 +108,7 @@ export function AppShell() {
           </button>
           <div className="ml-auto flex items-center gap-1">
             <button className="control-quiet !px-3" onClick={toggleTheme} aria-label={`Use ${theme === "dark" ? "light" : "dark"} theme`}>{theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}</button>
-            <div className="relative"><button className="control-quiet relative !px-3" aria-label="Action notifications" onClick={() => setNotificationsOpen((value) => !value)}><Bell className="h-4 w-4" />{notifications.data?.length ? <span className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-danger" /> : null}<span className="sr-only">{notifications.data?.length ?? 0} actions need attention</span></button>{notificationsOpen && <div className="absolute right-0 top-12 z-40 w-[min(360px,calc(100vw-2rem))] overflow-hidden rounded-panel border border-line bg-panel shadow-drawer"><div className="border-b border-line px-4 py-3"><p className="text-sm font-semibold">Actions needing attention</p><p className="mt-0.5 text-xs text-muted">Free in-app alerts for approvals, assigned tests, and failed ingestion.</p></div><div className="max-h-96 overflow-y-auto">{notifications.data?.map((item) => <Link key={item.id} to={item.href} onClick={() => setNotificationsOpen(false)} className="block border-b border-line px-4 py-3 last:border-b-0 hover:bg-elevated"><div className="flex items-center justify-between gap-3"><p className="text-sm font-semibold">{item.title}</p><span className="measurement-number text-xs uppercase text-muted">{item.kind}</span></div><p className="mt-1 line-clamp-2 text-xs leading-5 text-muted">{item.detail}</p></Link>)}{notifications.data && !notifications.data.length && <div className="px-4 py-10 text-center text-sm text-muted">No operational actions are waiting.</div>}</div></div>}</div>
-            <button className="control-primary !px-3 sm:!px-4" onClick={() => setAssistantOpen(true)} aria-label="Ask ReplayOps"><Bot className="h-4 w-4 sm:mr-2" /><span className="hidden sm:inline">Ask ReplayOps</span></button>
+            <div className="relative"><button className="control-quiet relative !px-3" aria-label="Action notifications" onClick={() => setNotificationsOpen((value) => !value)}><Bell className="h-4 w-4" />{notifications.data?.some((item)=>!item.read) ? <span className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-danger" /> : null}<span className="sr-only">{notifications.data?.length ?? 0} actions need attention</span></button>{notificationsOpen && <div className="absolute right-0 top-12 z-40 w-[min(380px,calc(100vw-2rem))] overflow-hidden rounded-panel border border-line bg-panel shadow-drawer"><div className="border-b border-line px-4 py-3"><p className="text-sm font-semibold">Actions needing attention</p><p className="mt-0.5 text-xs text-muted">Open the exact task or resolve the reminder when it is no longer actionable.</p></div><div className="max-h-96 overflow-y-auto">{notifications.data?.map((item) => <div key={item.id} className={cn("border-b border-line px-4 py-3 last:border-b-0",!item.read&&"bg-info/5")}><Link to={item.href} onClick={() => {notificationState.mutate({id:item.id,input:{read:true}});setNotificationsOpen(false);}} className="block hover:text-info"><div className="flex items-center justify-between gap-3"><p className="text-sm font-semibold">{item.title}</p><span className={cn("measurement-number text-xs uppercase",item.urgency==="urgent"?"text-danger":"text-muted")}>{item.urgency}</span></div><p className="mt-1 line-clamp-2 text-xs leading-5 text-muted">{item.detail}</p><p className="mt-1 text-xs text-faint">{item.reason}</p></Link><button className="mt-2 text-xs font-semibold text-muted underline hover:text-ink" onClick={()=>notificationState.mutate({id:item.id,input:{read:true,resolved:true}})}>Resolve reminder</button></div>)}{notifications.data && !notifications.data.length && <div className="px-4 py-10 text-center text-sm text-muted">No operational actions are waiting.</div>}</div></div>}</div>
           </div>
         </header>
 
@@ -126,14 +118,12 @@ export function AppShell() {
       </div>
 
       <nav className="fixed inset-x-3 bottom-3 z-30 flex items-center justify-around rounded-panel bg-ink p-1.5 text-panel shadow-drawer lg:hidden" aria-label="Mobile commands">
-        {navigation.filter((item) => item.to !== "/workspace").map((item) => (
+        {navigation.map((item) => (
           <NavLink key={item.to} to={item.to} end={item.end} className={({ isActive }) => cn("flex min-h-11 flex-1 items-center justify-center gap-2 rounded-control text-xs font-semibold", isActive ? "bg-panel text-ink" : "text-panel/70")}><item.icon className="h-4 w-4" />{item.label}</NavLink>
         ))}
-        <button className="flex min-h-11 flex-1 items-center justify-center gap-2 rounded-control text-xs font-semibold text-panel/70" onClick={() => setAssistantOpen(true)}><Bot className="h-4 w-4" />Assistant</button>
       </nav>
 
       <CommandSearch open={searchOpen} onClose={() => setSearchOpen(false)} />
-      <AssistantDrawer open={assistantOpen} incidentId={incidentId} onClose={() => setAssistantOpen(false)} />
     </div>
   );
 }

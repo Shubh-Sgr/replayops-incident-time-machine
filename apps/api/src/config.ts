@@ -20,5 +20,6 @@ export const config = {
   ingestionSigningSecret: process.env.INGESTION_SIGNING_SECRET,
   publicWebUrl: process.env.PUBLIC_WEB_URL?.replace(/\/$/, ""),
   resendApiKey: process.env.RESEND_API_KEY,
-  inviteFromEmail: process.env.INVITE_FROM_EMAIL
+  inviteFromEmail: process.env.INVITE_FROM_EMAIL,
+  replayTargetBaseUrl: process.env.REPLAY_TARGET_BASE_URL?.replace(/\/$/, "")
 };

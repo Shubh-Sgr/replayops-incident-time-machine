@@ -11,13 +11,14 @@ export function CommandSearch({ open, onClose }: { open: boolean; onClose(): voi
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
   const [loading, setLoading] = useState(false);
+  const [submitted, setSubmitted] = useState("");
   const [error, setError] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   const navigate = useNavigate();
 
   useEffect(() => {
     if (open) window.setTimeout(() => inputRef.current?.focus(), 40);
-    else { setQuery(""); setResults([]); setError(""); }
+    else { setQuery(""); setSubmitted(""); setResults([]); setError(""); }
   }, [open]);
 
   useEffect(() => {
@@ -31,6 +32,7 @@ export function CommandSearch({ open, onClose }: { open: boolean; onClose(): voi
   async function search() {
     if (query.trim().length < 2) return;
     setLoading(true);
+    setSubmitted(query.trim());
     setError("");
     try {
       setResults(await api.search(query.trim()));
@@ -65,18 +67,18 @@ export function CommandSearch({ open, onClose }: { open: boolean; onClose(): voi
             </form>
 
             <div className="max-h-[62vh] overflow-y-auto p-3 sm:p-4">
-              {!query && !results.length && (
+              {!submitted && !results.length && (
                 <div className="py-10 text-center">
                   <Command className="mx-auto h-7 w-7 text-faint" />
                   <p className="mt-3 text-sm font-semibold">Search the evidence, not just titles</p>
-                  <p className="mx-auto mt-1 max-w-md text-sm leading-6 text-muted">Try “retry storm after dependency latency” or “cache hot-key imbalance”. Semantic search uses vectors when an AI provider is configured.</p>
+                  <p className="mx-auto mt-1 max-w-md text-sm leading-6 text-muted">Search a symptom, service, incident code, trace ID, source event ID, or exact evidence ID. Semantic search uses vectors only when a provider is configured.</p>
                 </div>
               )}
               {error && <p role="alert" className="rounded-control bg-danger/10 p-3 text-sm text-danger">{error} Try again or use a shorter query.</p>}
-              {!loading && query && !error && results.length === 0 && (
+              {!loading && submitted && !error && results.length === 0 && (
                 <div className="py-10 text-center">
                   <p className="font-semibold">No matching evidence</p>
-                  <p className="mt-1 text-sm text-muted">Try a service name, symptom, or operational action.</p>
+                  <p className="mt-1 text-sm text-muted">Nothing matched “{submitted}”. Try a service, symptom, incident code, or exact trace ID.</p>
                 </div>
               )}
               <div className="divide-y divide-line">
@@ -84,7 +86,7 @@ export function CommandSearch({ open, onClose }: { open: boolean; onClose(): voi
                   <button
                     key={result.incident.id}
                     className="group flex w-full items-start gap-4 px-2 py-4 text-left transition-colors hover:bg-elevated"
-                    onClick={() => { navigate(`/incidents/${result.incident.id}`); onClose(); }}
+                    onClick={() => { navigate(`/incidents/${result.incident.id}?area=investigate${result.matchedEventId ? `&event=${result.matchedEventId}` : ""}${result.matchedEventId ? `#event-${result.matchedEventId}` : ""}`); onClose(); }}
                   >
                     <span className="measurement-number mt-0.5 text-xs text-muted">{result.incident.code}</span>
                     <span className="min-w-0 flex-1">

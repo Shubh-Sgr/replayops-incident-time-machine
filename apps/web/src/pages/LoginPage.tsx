@@ -71,13 +71,13 @@ export function LoginPage() {
       <section className="relative hidden overflow-hidden bg-rail p-8 lg:flex lg:flex-col xl:p-12">
         <div className="flex items-center gap-3">
           <div className="flex h-10 w-10 items-center justify-center rounded-control bg-ink text-panel"><Activity className="h-5 w-5" /></div>
-          <div><p className="font-heading text-xl font-semibold">ReplayOps</p><p className="measurement-number text-[10px] text-muted">INCIDENT TIME MACHINE</p></div>
+          <div><p className="font-heading text-xl font-semibold">ReplayOps</p><p className="measurement-number text-xs text-muted">INCIDENT TIME MACHINE</p></div>
         </div>
         <div className="my-auto max-w-4xl">
-          <motion.h1 className="max-w-3xl font-heading text-5xl font-semibold leading-[1.02] tracking-[-0.035em] xl:text-6xl" initial={{ opacity: 0.5, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5 }}>See the failure propagate. Then test the fix against time.</motion.h1>
-          <p className="mt-5 max-w-2xl text-base leading-7 text-muted">ReplayOps reconstructs disconnected operational evidence into a causal sequence engineers can inspect, challenge, and replay.</p>
+          <motion.h1 className="max-w-3xl font-heading text-5xl font-semibold leading-[1.02] tracking-[-0.035em] xl:text-6xl" initial={{ opacity: 0.5, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5 }}>Follow the evidence. Disprove the wrong story. Verify the fix.</motion.h1>
+          <p className="mt-5 max-w-2xl text-base leading-7 text-muted">ReplayOps turns disconnected telemetry into a reviewable investigation, a concrete next test, and a measured recovery record.</p>
           <div className="mt-9"><CausalTrace incident={previewIncident} compact /></div>
-          <p className="measurement-number mt-3 text-[10px] text-faint">SYNTHETIC INCIDENT PREVIEW · NO CUSTOMER DATA</p>
+          <p className="measurement-number mt-3 text-xs text-faint">SYNTHETIC INCIDENT PREVIEW · NO CUSTOMER DATA</p>
         </div>
         <div className="flex items-center gap-2 text-xs text-muted"><ShieldCheck className="h-4 w-4 text-success" /> Evidence-linked hypotheses. Human-approved action.</div>
       </section>
@@ -86,7 +86,7 @@ export function LoginPage() {
         <div className="w-full max-w-md">
           <div className="mb-10 flex items-center gap-3 lg:hidden">
             <div className="flex h-10 w-10 items-center justify-center rounded-control bg-ink text-panel"><Activity className="h-5 w-5" /></div>
-            <div><p className="font-heading text-xl font-semibold">ReplayOps</p><p className="measurement-number text-[10px] text-muted">INCIDENT TIME MACHINE</p></div>
+            <div><p className="font-heading text-xl font-semibold">ReplayOps</p><p className="measurement-number text-xs text-muted">INCIDENT TIME MACHINE</p></div>
           </div>
           <h2 className="font-heading text-3xl font-semibold tracking-[-0.03em]">{mode === "login" ? "Return to operations" : "Create your responder account"}</h2>
           <p className="mt-2 text-sm leading-6 text-muted">{mode === "login" ? "Open your incident workspace and continue from the latest evidence." : "Create an account and a private incident workspace is provisioned automatically."}</p>

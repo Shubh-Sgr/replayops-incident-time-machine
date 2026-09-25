@@ -91,6 +91,19 @@ describe("MemoryRepository", () => {
     expect(diagnosis.evidenceGaps[0]).toContain("No timestamped evidence");
   });
 
+  it("demotes a disproved leading explanation and marks contradictory outcomes as contested", () => {
+    const first=diagnoseIncident(seedIncidents[0]!);
+    const hypothesis=first.hypotheses[0]!;
+    const diagnosis=diagnoseIncident(seedIncidents[0]!,[
+      {id:"test-1",incidentId:seedIncidents[0]!.id,hypothesisId:hypothesis.id,title:"Trace comparison",instruction:hypothesis.nextTest,assignee:"operator",status:"supported",result:"Failing traces diverged at inventory.",createdAt:"2026-09-25T00:00:00Z",updatedAt:"2026-09-25T00:01:00Z"},
+      {id:"test-2",incidentId:seedIncidents[0]!.id,hypothesisId:hypothesis.id,title:"Healthy cohort",instruction:hypothesis.nextTest,assignee:"operator",status:"disproved",result:"Healthy traces showed the same inventory latency.",createdAt:"2026-09-25T00:02:00Z",updatedAt:"2026-09-25T00:03:00Z"}
+    ]);
+    const updated=diagnosis.hypotheses.find((item)=>item.id===hypothesis.id);
+    expect(updated?.state).toBe("contested");
+    expect(updated?.testCount).toBe(2);
+    expect(diagnosis.nextAction.label).toContain("Resolve contradictory");
+  });
+
   it("moves incorrectly grouped evidence without losing provenance", async () => {
     const repository = new MemoryRepository();
     const [source, target] = await repository.listIncidents(userId);

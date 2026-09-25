@@ -8,6 +8,7 @@
     "build": "npm run build --workspace @replayops/api && npm run build --workspace @replayops/web",
     "typecheck": "npm run typecheck --workspace @replayops/api && npm run typecheck --workspace @replayops/web",
     "test": "npm run test --workspace @replayops/api && npm run test --workspace @replayops/web",
+    "replay:http": "node scripts/replay-http.mjs",
     "start": "npm run start --workspace @replayops/api"
   },
   "devDependencies": { "concurrently": "^9.1.2" },

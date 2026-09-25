@@ -1,0 +1,25 @@
+{
+  "schemaVersion": "replayops.http-replay/v1",
+  "name": "Checkout accepts a valid reservation",
+  "applicationVersion": "candidate-build",
+  "request": {
+    "method": "POST",
+    "path": "/api/checkout",
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": "{\"reservationId\":\"fixture-123\"}"
+  },
+  "assertions": {
+    "status": 200,
+    "bodyIncludes": "order confirmed"
+  },
+  "dependencies": [
+    {
+      "name": "reservation-service",
+      "mode": "mock",
+      "fixture": "{\"fixture-123\":{\"state\":\"valid\"}}"
+    }
+  ],
+  "networkPolicy": "deny_except_loopback_target"
+}

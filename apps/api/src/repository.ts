@@ -9,6 +9,7 @@ export type IncidentInput = Omit<Incident, "id" | "code" | "createdAt" | "update
 export type EventInput = Omit<IncidentEvent, "id" | "incidentId">;
 export type DecisionInput = Pick<IncidentDecision, "kind" | "status" | "title" | "detail">;
 export type IntegrationInput = { name: string; provider: IntegrationProvider };
+export type IntegrationConfigInput = { expectedCadenceMinutes: number; retentionDays: number; dailyQuota: number; healthySampleRate: number };
 
 export interface Repository {
   initialize(): Promise<void>;
@@ -29,6 +30,7 @@ export interface Repository {
   search(userId: string, query: string, embedding?: number[]): Promise<SearchResult[]>;
   listIntegrations(userId: string): Promise<Integration[]>;
   createIntegration(userId: string, input: IntegrationInput): Promise<Integration>;
+  updateIntegrationConfig(userId: string, integrationId: string, input: IntegrationConfigInput): Promise<Integration | null>;
   deleteIntegration(userId: string, integrationId: string): Promise<boolean>;
   getIntegrationTarget(integrationId: string): Promise<IntegrationTarget | null>;
   ingest(integration: IntegrationTarget, batch: IngestionBatch): Promise<IngestionResult>;
@@ -37,6 +39,8 @@ export interface Repository {
 const clone = <T>(value: T): T => structuredClone(value);
 
 export function simulateReplay(incident: Incident, config: ReplayConfig): ReplayProjection {
+  const evidenceText = `${incident.title} ${incident.summary} ${incident.events.map((event) => `${event.title} ${event.detail}`).join(" ")}`;
+  const applicable = /retr|concurr|queue|timeout|latency|saturat/i.test(evidenceText);
   const baselinePeak = incident.events.reduce((peak, event) => Math.max(peak, event.impactScore), 0);
   const retryRelief = Math.max(0, 4 - config.retryCeiling) * 8;
   const concurrencyRelief = Math.max(-5, Math.min(9, (30 - config.concurrencyCap) * 0.45));
@@ -49,15 +53,16 @@ export function simulateReplay(incident: Incident, config: ReplayConfig): Replay
     incident.events.filter((event) => event.impactScore >= 65).length,
     Math.floor(improvement / 14)
   );
-  const recoveryGainMinutes = Math.round(improvement / 3.5);
-  const hasRecovery = incident.events.some((event) => event.kind === "recovery");
-  const confidence = Math.min(94, Math.round(46 + incident.events.length * 6 + (hasRecovery ? 8 : 0)));
+  const recoveryGainMinutes = 0;
+  const confidence = 0;
   const state: ReplayProjection["state"] = projectedPeak <= 60 ? "contained" : projectedPeak <= 78 ? "degraded" : "critical";
-  const summary = state === "contained"
-    ? "The candidate contains propagation below the high-impact threshold."
+  const summary = !applicable
+    ? "This incident does not contain evidence that makes retry, concurrency, or timeout controls applicable. No scenario conclusion is available."
+    : state === "contained"
+    ? "The arithmetic scenario places the recorded propagation below the configured severity boundary; this is not an executed replay."
     : state === "degraded"
-      ? "The candidate reduces pressure, but one degraded path remains."
-      : "The candidate does not sufficiently interrupt the recorded propagation path.";
+      ? "The arithmetic scenario lowers recorded pressure, but one degraded path remains. This is not an executed replay."
+      : "The arithmetic scenario does not interrupt the recorded propagation path. This is not an executed replay.";
 
   return {
     baselinePeak,
@@ -67,6 +72,14 @@ export function simulateReplay(incident: Incident, config: ReplayConfig): Replay
     confidence,
     state,
     summary,
+    kind: "scenario_estimate",
+    target: `${incident.service} in ${incident.environment ?? "unknown environment"}`,
+    assumptions: [
+      "Uses stored event severity as a relative signal, not as request-level telemetry.",
+      "Assumes the selected limits apply to the affected service and remain constant for the recorded window.",
+      "Does not execute application code, dependencies, or production traffic."
+    ],
+    unsupportedReasons: applicable ? [] : ["No retry, concurrency, queue, timeout, or latency evidence was found in this investigation."],
     signals: [
       `Retry amplification relief: ${Math.round(retryRelief)} points`,
       `Concurrency pressure relief: ${Math.round(concurrencyRelief)} points`,
@@ -92,7 +105,7 @@ export class MemoryRepository implements Repository {
   async getIncident(_userId: string, id: string) { return clone(this.incidents.find((incident) => incident.id === id) ?? null); }
   async createIncident(_userId: string, input: IncidentInput) {
     const now = new Date().toISOString();
-    const incident: Incident = { ...input, id: randomUUID(), code: `ROP-${Math.floor(2000 + Math.random() * 7000)}`, createdAt: now, updatedAt: now, events: [] };
+    const incident: Incident = { ...input, environment: input.environment ?? "unknown", customerImpact: input.customerImpact ?? "Unknown until measured", id: randomUUID(), code: `ROP-${Math.floor(2000 + Math.random() * 7000)}`, createdAt: now, updatedAt: now, evidenceRevision: now, events: [] };
     this.incidents.unshift(incident);
     return clone(incident);
   }
@@ -110,10 +123,10 @@ export class MemoryRepository implements Repository {
   async createEvent(_userId: string, incidentId: string, input: EventInput) {
     const incident = this.incidents.find((item) => item.id === incidentId);
     if (!incident) return null;
-    const event: IncidentEvent = { ...input, id: randomUUID(), incidentId };
+    const event: IncidentEvent = { ...input, evidenceState: input.evidenceState ?? "active", provenance: input.provenance ?? "manual", id: randomUUID(), incidentId };
     incident.events.push(event);
     incident.events.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-    incident.updatedAt = new Date().toISOString();
+    incident.updatedAt = new Date().toISOString(); incident.evidenceRevision = incident.updatedAt;
     return clone(event);
   }
   async updateEvent(_userId: string, incidentId: string, eventId: string, input: Partial<EventInput>) {
@@ -122,7 +135,7 @@ export class MemoryRepository implements Repository {
     if (!incident || !event) return null;
     Object.assign(event, input);
     incident.events.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-    incident.updatedAt = new Date().toISOString();
+    incident.updatedAt = new Date().toISOString(); incident.evidenceRevision = incident.updatedAt;
     return clone(event);
   }
   async deleteEvent(_userId: string, incidentId: string, eventId: string) {
@@ -130,13 +143,13 @@ export class MemoryRepository implements Repository {
     if (!incident) return false;
     const before = incident.events.length;
     incident.events = incident.events.filter((event) => event.id !== eventId);
-    incident.updatedAt = new Date().toISOString();
+    incident.updatedAt = new Date().toISOString(); incident.evidenceRevision = incident.updatedAt;
     return incident.events.length < before;
   }
   async moveEvent(_userId: string, incidentId: string, eventId: string, targetIncidentId: string) {
     const source = this.incidents.find((item) => item.id === incidentId); const target = this.incidents.find((item) => item.id === targetIncidentId); const event = source?.events.find((item) => item.id === eventId);
     if (!source || !target || !event || source.id === target.id) return null;
-    source.events = source.events.filter((item) => item.id !== eventId); event.incidentId = target.id; target.events.push(event); target.events.sort((a,b)=>a.timestamp.localeCompare(b.timestamp)); const now = new Date().toISOString(); source.updatedAt=now; target.updatedAt=now; return clone(event);
+    source.events = source.events.filter((item) => item.id !== eventId); event.incidentId = target.id; target.events.push(event); target.events.sort((a,b)=>a.timestamp.localeCompare(b.timestamp)); const now = new Date().toISOString(); source.updatedAt=now; target.updatedAt=now; source.evidenceRevision=now; target.evidenceRevision=now; return clone(event);
   }
   async listDecisions(_userId: string, incidentId: string) {
     return clone(this.decisions.filter((decision) => decision.incidentId === incidentId).sort((a, b) => b.timestamp.localeCompare(a.timestamp)));
@@ -161,13 +174,21 @@ export class MemoryRepository implements Repository {
       status: projection.state === "critical" ? "failed" : "passed",
       progress: 100,
       createdAt: new Date().toISOString(),
-      evidenceVersion: incident.updatedAt,
+      evidenceVersion: incident.evidenceRevision ?? incident.updatedAt,
       eventCount: incident.events.length
     };
     this.replayRuns.unshift(run);
     return clone(run);
   }
   async search(_userId: string, query: string) {
+    const exact = query.trim().toLowerCase();
+    const exactResults = this.incidents.flatMap((incident) => {
+      const event = incident.events.find((item) => item.id.toLowerCase() === exact || String(item.metadata?.traceId ?? "").toLowerCase() === exact || String(item.metadata?.sourceExternalId ?? "").toLowerCase() === exact);
+      return incident.id.toLowerCase() === exact || incident.code.toLowerCase() === exact || event
+        ? [{ incident: clone(incident), score: 1, matchReason: event ? "Exact trace, source, or evidence identifier" : "Exact incident identifier", ...(event ? { matchedEventId: event.id } : {}) }]
+        : [];
+    });
+    if (exactResults.length) return exactResults;
     const tokens = query.toLowerCase().split(/\W+/).filter(Boolean);
     return this.incidents.map((incident) => {
       const haystack = [incident.code, incident.title, incident.summary, incident.service, ...incident.events.flatMap((event) => [event.title, event.detail, event.service])].join(" ").toLowerCase();
@@ -181,10 +202,15 @@ export class MemoryRepository implements Repository {
   async createIntegration(_userId: string, input: IntegrationInput) {
     const integration: Integration = {
       id: randomUUID(), name: input.name, provider: input.provider, status: "active", createdAt: new Date().toISOString(),
-      lastDeliveryAt: null, lastDeliveryStatus: null, signalCount: 0, deliveries: []
+      lastDeliveryAt: null, lastDeliveryStatus: null, signalCount: 0,
+      expectedCadenceMinutes: input.provider === "otel" ? 15 : input.provider === "github" ? 10080 : 180,
+      retentionDays: 14, dailyQuota: 10000, healthySampleRate: .05, acceptedToday: 0, droppedToday: 0, deliveries: []
     };
     this.integrations.unshift(integration);
     return clone(integration);
+  }
+  async updateIntegrationConfig(_userId: string, integrationId: string, input: IntegrationConfigInput) {
+    const integration=this.integrations.find((item)=>item.id===integrationId);if(!integration)return null;Object.assign(integration,input);return clone(integration);
   }
   async deleteIntegration(_userId: string, integrationId: string) {
     const before = this.integrations.length;
@@ -201,6 +227,11 @@ export class MemoryRepository implements Repository {
     const deliveryKey = `${integration.id}:${batch.externalId}`;
     if (this.deliveries.has(deliveryKey)) return { status: "duplicate", acceptedSignals: 0, incidentIds: [] } satisfies IngestionResult;
     this.deliveries.add(deliveryKey);
+    const storedIntegration = this.integrations.find((item) => item.id === integration.id);
+    if (storedIntegration && storedIntegration.acceptedToday + batch.signals.length > storedIntegration.dailyQuota) {
+      const now=new Date().toISOString();storedIntegration.droppedToday+=batch.signals.length;storedIntegration.lastDeliveryAt=now;storedIntegration.lastDeliveryStatus="rejected";storedIntegration.deliveries.unshift({id:randomUUID(),integrationId:integration.id,externalId:batch.externalId,status:"rejected",signalCount:0,incidentIds:[],error:`Daily quota ${storedIntegration.dailyQuota} would be exceeded.`,receivedAt:now});
+      return {status:"rejected",acceptedSignals:0,incidentIds:[],reason:`Daily quota ${storedIntegration.dailyQuota} would be exceeded.`} satisfies IngestionResult;
+    }
     const incidentIds = new Set<string>();
     let acceptedSignals = 0;
     for (const signal of batch.signals) {
@@ -212,15 +243,15 @@ export class MemoryRepository implements Repository {
       let incident = signal.correlationKey
         ? this.incidents.find((item) => item.status !== "resolved" && item.events.some((event) => event.metadata?.correlationKey === signal.correlationKey))
         : undefined;
-      incident ??= this.incidents.find((item) => item.status !== "resolved" && relatedServices.includes(item.service) && Math.abs(new Date(item.startedAt).getTime() - new Date(signal.timestamp).getTime()) <= policy.groupingWindowMinutes * 60_000);
+      incident ??= this.incidents.find((item) => item.status !== "resolved" && relatedServices.includes(item.service) && (item.environment ?? "unknown") === (signal.environment ?? "unknown") && Math.abs(new Date(item.startedAt).getTime() - new Date(signal.timestamp).getTime()) <= policy.groupingWindowMinutes * 60_000);
       const suppressed = policy.maintenanceMode || (policy.suppressLowSeverity && signal.severity === "low");
       if (!incident && !suppressed && signal.impactScore >= policy.incidentThreshold) {
         const now = new Date().toISOString();
         incident = {
           id: randomUUID(), code: `AUTO-${String(Date.now()).slice(-6)}`, title: signal.title,
           summary: `Automatically opened from ${integration.name} after ${signal.service} crossed the incident threshold.`,
-          service: signal.service, severity: signal.severity, status: "investigating", owner: "Automation",
-          startedAt: signal.timestamp, resolvedAt: null, createdAt: now, updatedAt: now, events: []
+          service: signal.service, environment: signal.environment ?? "unknown", customerImpact: "Unknown until measured", severity: signal.severity, status: "investigating", owner: "Automation",
+          startedAt: signal.timestamp, resolvedAt: null, createdAt: now, updatedAt: now, evidenceRevision: now, events: []
         };
         this.incidents.unshift(incident);
         const triggerTime = new Date(signal.timestamp).getTime();
@@ -235,18 +266,18 @@ export class MemoryRepository implements Repository {
       }
       if (incident) {
         incident.events.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-        incident.updatedAt = new Date().toISOString();
+        incident.updatedAt = new Date().toISOString(); incident.evidenceRevision = incident.updatedAt;
         if (signal.kind === "recovery") incident.status = "monitoring";
         incidentIds.add(incident.id);
       }
     }
     const now = new Date().toISOString();
-    const storedIntegration = this.integrations.find((item) => item.id === integration.id);
     if (storedIntegration) {
       const delivery: IntegrationDelivery = { id: randomUUID(), integrationId: integration.id, externalId: batch.externalId, status: "accepted", signalCount: acceptedSignals, incidentIds: [...incidentIds], receivedAt: now };
       storedIntegration.lastDeliveryAt = now;
       storedIntegration.lastDeliveryStatus = "accepted";
       storedIntegration.signalCount += acceptedSignals;
+      storedIntegration.acceptedToday += acceptedSignals;
       storedIntegration.deliveries.unshift(delivery);
       storedIntegration.deliveries = storedIntegration.deliveries.slice(0, 8);
     }
@@ -256,7 +287,7 @@ export class MemoryRepository implements Repository {
 
 const signalToEvent = (incidentId: string, signal: NormalizedSignal): IncidentEvent => ({
   id: randomUUID(), incidentId, timestamp: signal.timestamp, service: signal.service, kind: signal.kind,
-  title: signal.title, detail: signal.detail, impactScore: signal.impactScore,
+  title: signal.title, detail: signal.detail, impactScore: signal.impactScore, evidenceState: "active", provenance: "ingested",
   metadata: {
     ...signal.metadata, sourceExternalId: signal.externalId, correlationKey: signal.correlationKey,
     traceId: signal.traceId, sourceUrl: signal.sourceUrl, environment: signal.environment, automated: true
@@ -267,13 +298,20 @@ type Row = Record<string, unknown>;
 const mapEvent = (row: Row): IncidentEvent => ({
   id: String(row.id), incidentId: String(row.incident_id), timestamp: new Date(String(row.timestamp)).toISOString(),
   service: String(row.service), kind: row.kind as IncidentEvent["kind"], title: String(row.title), detail: String(row.detail),
-  impactScore: Number(row.impact_score), metadata: (row.metadata ?? {}) as Record<string, unknown>
+  impactScore: Number(row.impact_score),
+  evidenceState: (row.evidence_state ?? "active") as IncidentEvent["evidenceState"],
+  provenance: (row.provenance ?? ((row.metadata as Record<string, unknown> | undefined)?.automated ? "ingested" : "manual")) as IncidentEvent["provenance"],
+  correctionReason: row.correction_reason ? String(row.correction_reason) : null,
+  correctedFromId: row.corrected_from_id ? String(row.corrected_from_id) : null,
+  metadata: (row.metadata ?? {}) as Record<string, unknown>
 });
 const mapIncident = (row: Row, events: IncidentEvent[] = []): Incident => ({
   id: String(row.id), code: String(row.code), title: String(row.title), summary: String(row.summary), service: String(row.service),
+  environment: String(row.environment ?? "unknown"), customerImpact: String(row.customer_impact ?? "Unknown until measured"),
   severity: row.severity as Incident["severity"], status: row.status as Incident["status"], owner: String(row.owner),
   startedAt: new Date(String(row.started_at)).toISOString(), resolvedAt: row.resolved_at ? new Date(String(row.resolved_at)).toISOString() : null,
-  createdAt: new Date(String(row.created_at)).toISOString(), updatedAt: new Date(String(row.updated_at)).toISOString(), events
+  createdAt: new Date(String(row.created_at)).toISOString(), updatedAt: new Date(String(row.updated_at)).toISOString(),
+  evidenceRevision: row.evidence_revision ? new Date(String(row.evidence_revision)).toISOString() : new Date(String(row.updated_at)).toISOString(), events
 });
 const mapActivity = (row: Row): Activity => ({
   id: String(row.id),
@@ -311,7 +349,9 @@ const mapIntegration = (row: Row, deliveries: IntegrationDelivery[] = []): Integ
   status: row.status as Integration["status"], createdAt: new Date(String(row.created_at)).toISOString(),
   lastDeliveryAt: row.last_delivery_at ? new Date(String(row.last_delivery_at)).toISOString() : null,
   lastDeliveryStatus: row.last_delivery_status ? row.last_delivery_status as IntegrationDelivery["status"] : null,
-  signalCount: Number(row.signal_count ?? 0), deliveries
+  signalCount: Number(row.signal_count ?? 0), expectedCadenceMinutes:Number(row.expected_cadence_minutes ?? (row.provider === "otel" ? 15 : row.provider === "github" ? 10080 : 180)),
+  retentionDays:Number(row.retention_days ?? 14), dailyQuota:Number(row.daily_quota ?? 10000), healthySampleRate:Number(row.healthy_sample_rate ?? .05),
+  acceptedToday:Number(row.accepted_today ?? 0), droppedToday:Number(row.dropped_today ?? 0), deliveries
 });
 
 class PostgresRepository implements Repository {
@@ -321,6 +361,13 @@ class PostgresRepository implements Repository {
   }
   async initialize() {
     await this.pool.query(`
+      alter table incidents add column if not exists environment text not null default 'unknown';
+      alter table incidents add column if not exists customer_impact text not null default 'Unknown until measured';
+      alter table incidents add column if not exists evidence_revision timestamptz not null default now();
+      alter table incident_events add column if not exists evidence_state text not null default 'active';
+      alter table incident_events add column if not exists provenance text not null default 'manual';
+      alter table incident_events add column if not exists correction_reason text;
+      alter table incident_events add column if not exists corrected_from_id uuid;
       create table if not exists integrations (
         id uuid primary key default gen_random_uuid(),
         organization_id uuid not null references organizations(id) on delete cascade,
@@ -334,6 +381,13 @@ class PostgresRepository implements Repository {
         created_at timestamptz not null default now(),
         updated_at timestamptz not null default now()
       );
+      alter table integrations add column if not exists expected_cadence_minutes integer not null default 180;
+      alter table integrations add column if not exists retention_days integer not null default 14;
+      alter table integrations add column if not exists daily_quota integer not null default 10000;
+      alter table integrations add column if not exists healthy_sample_rate numeric not null default 0.05;
+      alter table integrations add column if not exists accepted_today integer not null default 0;
+      alter table integrations add column if not exists dropped_today integer not null default 0;
+      alter table integrations add column if not exists counter_date date not null default current_date;
       create table if not exists ingestion_deliveries (
         id uuid primary key default gen_random_uuid(),
         integration_id uuid not null references integrations(id) on delete cascade,
@@ -447,11 +501,11 @@ class PostgresRepository implements Repository {
   async getIncident(userId: string, id: string) { return (await this.hydrated(userId, "and i.id = $2", [id]))[0] ?? null; }
   async createIncident(userId: string, input: IncidentInput, embedding?: number[]) {
     const result = await this.pool.query(
-      `insert into incidents (organization_id,code,title,summary,service,severity,status,owner,started_at,resolved_at,embedding)
-       select m.organization_id,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::vector
+      `insert into incidents (organization_id,code,title,summary,service,environment,customer_impact,severity,status,owner,started_at,resolved_at,embedding)
+       select m.organization_id,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::vector
        from organization_members m where m.user_id = $1
        order by m.created_at desc limit 1 returning *`,
-      [userId, `ROP-${Math.floor(2000 + Math.random() * 7000)}`, input.title, input.summary, input.service, input.severity, input.status, input.owner, input.startedAt, input.resolvedAt ?? null, embedding ? `[${embedding.join(",")}]` : null]
+      [userId, `ROP-${Math.floor(2000 + Math.random() * 7000)}`, input.title, input.summary, input.service, input.environment ?? "unknown", input.customerImpact ?? "Unknown until measured", input.severity, input.status, input.owner, input.startedAt, input.resolvedAt ?? null, embedding ? `[${embedding.join(",")}]` : null]
     );
     const row = result.rows[0] as Row | undefined;
     if (!row) throw new Error("No organization membership exists for this account. Complete workspace onboarding before creating incidents.");
@@ -459,7 +513,7 @@ class PostgresRepository implements Repository {
   }
   async updateIncident(userId: string, id: string, input: Partial<IncidentInput>, embedding?: number[]) {
     const fields: Array<[string, unknown, boolean?]> = [
-      ["title", input.title], ["summary", input.summary], ["service", input.service], ["severity", input.severity], ["status", input.status],
+      ["title", input.title], ["summary", input.summary], ["service", input.service], ["environment", input.environment], ["customer_impact", input.customerImpact], ["severity", input.severity], ["status", input.status],
       ["owner", input.owner], ["started_at", input.startedAt], ["resolved_at", input.resolvedAt], ["embedding", embedding ? `[${embedding.join(",")}]` : undefined, true]
     ].filter((entry) => entry[1] !== undefined) as Array<[string, unknown, boolean?]>;
     if (!fields.length) return this.getIncident(userId, id);
@@ -483,13 +537,13 @@ class PostgresRepository implements Repository {
   }
   async createEvent(userId: string, incidentId: string, input: EventInput) {
     if (!await this.getIncident(userId, incidentId)) return null;
-    const result = await this.pool.query(`insert into incident_events (incident_id,timestamp,service,kind,title,detail,impact_score,metadata) values ($1,$2,$3,$4,$5,$6,$7,$8) returning *`, [incidentId, input.timestamp, input.service, input.kind, input.title, input.detail, input.impactScore, input.metadata ?? {}]);
-    await this.pool.query("update incidents set updated_at=now() where id=$1", [incidentId]);
+    const result = await this.pool.query(`insert into incident_events (incident_id,timestamp,service,kind,title,detail,impact_score,evidence_state,provenance,correction_reason,corrected_from_id,metadata) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) returning *`, [incidentId, input.timestamp, input.service, input.kind, input.title, input.detail, input.impactScore, input.evidenceState ?? "active", input.provenance ?? "manual", input.correctionReason ?? null, input.correctedFromId ?? null, input.metadata ?? {}]);
+    await this.pool.query("update incidents set updated_at=now(),evidence_revision=now() where id=$1", [incidentId]);
     const row = result.rows[0] as Row | undefined;
     return row ? mapEvent(row) : null;
   }
   async updateEvent(userId: string, incidentId: string, eventId: string, input: Partial<EventInput>) {
-    const fields = [["timestamp", input.timestamp], ["service", input.service], ["kind", input.kind], ["title", input.title], ["detail", input.detail], ["impact_score", input.impactScore], ["metadata", input.metadata]].filter((entry) => entry[1] !== undefined) as Array<[string, unknown]>;
+    const fields = [["timestamp", input.timestamp], ["service", input.service], ["kind", input.kind], ["title", input.title], ["detail", input.detail], ["impact_score", input.impactScore], ["evidence_state", input.evidenceState], ["provenance", input.provenance], ["correction_reason", input.correctionReason], ["corrected_from_id", input.correctedFromId], ["metadata", input.metadata]].filter((entry) => entry[1] !== undefined) as Array<[string, unknown]>;
     if (!fields.length) return null;
     const values = [userId, ...fields.map((entry) => entry[1])];
     const sets = fields.map(([key], index) => `${key} = $${index + 2}`);
@@ -504,7 +558,7 @@ class PostgresRepository implements Repository {
       values
     );
     const row = result.rows[0] as Row | undefined;
-    if (row) await this.pool.query("update incidents set updated_at=now() where id=$1", [incidentId]);
+    if (row) await this.pool.query("update incidents set updated_at=now(),evidence_revision=now() where id=$1", [incidentId]);
     return row ? mapEvent(row) : null;
   }
   async deleteEvent(userId: string, incidentId: string, eventId: string) {
@@ -516,7 +570,7 @@ class PostgresRepository implements Repository {
        )`,
       [userId, incidentId, eventId]
     );
-    if (result.rowCount === 1) await this.pool.query("update incidents set updated_at=now() where id=$1", [incidentId]);
+    if (result.rowCount === 1) await this.pool.query("update incidents set updated_at=now(),evidence_revision=now() where id=$1", [incidentId]);
     return result.rowCount === 1;
   }
   async moveEvent(userId: string, incidentId: string, eventId: string, targetIncidentId: string) {
@@ -528,7 +582,7 @@ class PostgresRepository implements Repository {
       [userId, incidentId, eventId, targetIncidentId]
     ); const row=result.rows[0] as Row|undefined; if (!row) { await client.query("rollback"); return null; }
       await client.query(`update ingestion_signals set incident_id=$2 where incident_id=$1 and external_id=$3`, [incidentId,targetIncidentId,(row.metadata as Record<string,unknown>|undefined)?.sourceExternalId ?? ""]);
-      await client.query(`update incidents set updated_at=now() where id=any($1::uuid[])`, [[incidentId,targetIncidentId]]); await client.query("commit"); return mapEvent(row);
+      await client.query(`update incidents set updated_at=now(),evidence_revision=now() where id=any($1::uuid[])`, [[incidentId,targetIncidentId]]); await client.query("commit"); return mapEvent(row);
     } catch(error) { await client.query("rollback"); throw error; } finally { client.release(); }
   }
   async listDecisions(userId: string, incidentId: string) {
@@ -575,7 +629,7 @@ class PostgresRepository implements Repository {
     const status = projection.state === "critical" ? "failed" : "passed";
     const result = await this.pool.query(
       `insert into replay_runs (organization_id, incident_id, name, status, progress, config, projection, evidence_version, event_count)
-       select i.organization_id, i.id, $3, $4, 100, $5, $6, i.updated_at, $7
+       select i.organization_id, i.id, $3, $4, 100, $5, $6, i.evidence_revision, $7
        from incidents i join organization_members m on m.organization_id = i.organization_id
        where i.id = $2 and m.user_id = $1
        returning *`,
@@ -583,9 +637,25 @@ class PostgresRepository implements Repository {
     );
     const row = result.rows[0] as Row | undefined;
     if (!row) return null;
-    return { ...mapReplayRun(row), config, projection, evidenceVersion: incident.updatedAt, eventCount: incident.events.length } satisfies ReplayResult;
+    return { ...mapReplayRun(row), config, projection, evidenceVersion: incident.evidenceRevision ?? incident.updatedAt, eventCount: incident.events.length } satisfies ReplayResult;
   }
   async search(userId: string, query: string, embedding?: number[]) {
+    const exactResult = await this.pool.query(
+      `select distinct on (i.id) i.*, e.id as matched_event_id
+       from incidents i
+       join organization_members m on m.organization_id=i.organization_id and m.user_id=$1
+       left join incident_events e on e.incident_id=i.id and (
+         lower(e.id::text)=lower($2) or lower(coalesce(e.metadata->>'traceId',''))=lower($2)
+         or lower(coalesce(e.metadata->>'sourceExternalId',''))=lower($2)
+       )
+       where lower(i.id::text)=lower($2) or lower(i.code)=lower($2) or e.id is not null
+       order by i.id,i.updated_at desc limit 6`,
+      [userId, query.trim()]
+    );
+    if (exactResult.rows.length) {
+      const hydratedExact = await Promise.all((exactResult.rows as Row[]).map((row) => this.getIncident(userId, String(row.id))));
+      return hydratedExact.flatMap((incident, index) => incident ? [{ incident, score: 1, matchReason: (exactResult.rows[index] as Row).matched_event_id ? "Exact trace, source, or evidence identifier" : "Exact incident identifier", ...((exactResult.rows[index] as Row).matched_event_id ? { matchedEventId:String((exactResult.rows[index] as Row).matched_event_id) } : {}) }] : []);
+    }
     let result = embedding
       ? await this.pool.query(
         `select i.*, 1 - (i.embedding <=> $2::vector) as score from incidents i
@@ -624,7 +694,7 @@ class PostgresRepository implements Repository {
   }
   async listIntegrations(userId: string) {
     const integrations = await this.pool.query(
-      `select x.* from integrations x
+      `select x.*,case when x.counter_date=current_date then x.accepted_today else 0 end as accepted_today,case when x.counter_date=current_date then x.dropped_today else 0 end as dropped_today from integrations x
        where exists (select 1 from organization_members m where m.organization_id = x.organization_id and m.user_id = $1)
        order by x.created_at desc`,
       [userId]
@@ -647,8 +717,8 @@ class PostgresRepository implements Repository {
   }
   async createIntegration(userId: string, input: IntegrationInput) {
     const result = await this.pool.query(
-      `insert into integrations (organization_id, created_by, name, provider)
-       select m.organization_id, $1, $2, $3 from organization_members m
+      `insert into integrations (organization_id, created_by, name, provider, expected_cadence_minutes)
+       select m.organization_id, $1, $2, $3, case when $3='otel' then 15 when $3='github' then 10080 else 180 end from organization_members m
        where m.user_id = $1 and m.role in ('admin', 'responder')
        order by m.created_at desc limit 1 returning *`,
       [userId, input.name, input.provider]
@@ -657,6 +727,7 @@ class PostgresRepository implements Repository {
     if (!row) throw new Error("A responder workspace is required before a connector can be created.");
     return mapIntegration(row);
   }
+  async updateIntegrationConfig(userId:string,integrationId:string,input:IntegrationConfigInput){const result=await this.pool.query(`update integrations x set expected_cadence_minutes=$3,retention_days=$4,daily_quota=$5,healthy_sample_rate=$6,updated_at=now() where x.id=$2 and exists(select 1 from organization_members m where m.organization_id=x.organization_id and m.user_id=$1 and m.role in ('admin','responder')) returning *`,[userId,integrationId,input.expectedCadenceMinutes,input.retentionDays,input.dailyQuota,input.healthySampleRate]);return result.rows[0]?mapIntegration(result.rows[0] as Row):null;}
   async deleteIntegration(userId: string, integrationId: string) {
     return (await this.pool.query(
       `delete from integrations x where x.id = $2
@@ -691,6 +762,15 @@ class PostgresRepository implements Repository {
         return { status: "duplicate", acceptedSignals: 0, incidentIds: [] } satisfies IngestionResult;
       }
 
+      const sourceConfig=await client.query(`select daily_quota,retention_days,case when counter_date=current_date then accepted_today else 0 end as accepted_today from integrations where id=$1 for update`,[integration.id]);
+      const sourceRow=sourceConfig.rows[0] as Row|undefined;
+      if(sourceRow && Number(sourceRow.accepted_today)+batch.signals.length>Number(sourceRow.daily_quota)){
+        const reason=`Daily quota ${Number(sourceRow.daily_quota)} would be exceeded.`;
+        await client.query(`update ingestion_deliveries set status='rejected',error=$3 where integration_id=$1 and external_id=$2`,[integration.id,batch.externalId,reason]);
+        await client.query(`update integrations set counter_date=current_date,accepted_today=case when counter_date=current_date then accepted_today else 0 end,dropped_today=case when counter_date=current_date then dropped_today+$2 else $2 end,last_delivery_at=now(),last_delivery_status='rejected',updated_at=now() where id=$1`,[integration.id,batch.signals.length]);
+        await client.query("commit");return {status:"rejected",acceptedSignals:0,incidentIds:[],reason} satisfies IngestionResult;
+      }
+
       const incidentIds = new Set<string>();
       let acceptedSignals = 0;
       for (const signal of batch.signals) {
@@ -712,6 +792,7 @@ class PostgresRepository implements Repository {
         const match = await client.query(
           `select i.id from incidents i
            where i.organization_id = $1 and i.status <> 'resolved'
+           and coalesce(i.environment,'unknown')=coalesce($6::text,'unknown')
            and (
              ($2::text is not null and exists (
                select 1 from ingestion_signals prior where prior.incident_id = i.id and prior.correlation_key = $2
@@ -723,7 +804,7 @@ class PostgresRepository implements Repository {
                select 1 from ingestion_signals prior where prior.incident_id = i.id and prior.correlation_key = $2
              ) then 0 else 1 end,
              i.started_at desc limit 1`,
-          [integration.organizationId, signal.correlationKey ?? null, relatedServices, signal.timestamp, policy.groupingWindowMinutes]
+          [integration.organizationId, signal.correlationKey ?? null, relatedServices, signal.timestamp, policy.groupingWindowMinutes, signal.environment ?? "unknown"]
         );
         let incidentId = match.rows[0] ? String((match.rows[0] as Row).id) : undefined;
 
@@ -731,23 +812,24 @@ class PostgresRepository implements Repository {
         if (!incidentId && !suppressed && signal.impactScore >= policy.incidentThreshold) {
           const code = `AUTO-${new Date(signal.timestamp).toISOString().slice(5, 16).replace(/[-T:]/g, "")}-${randomUUID().slice(0, 4).toUpperCase()}`;
           const created = await client.query(
-            `insert into incidents (organization_id, code, title, summary, service, severity, status, owner, started_at)
-             values ($1,$2,$3,$4,$5,$6,'investigating','Automation',$7) returning id`,
+            `insert into incidents (organization_id, code, title, summary, service, environment, customer_impact, severity, status, owner, started_at)
+             values ($1,$2,$3,$4,$5,$6,'Unknown until measured',$7,'investigating','Automation',$8) returning id`,
             [integration.organizationId, code, signal.title,
               `Automatically opened from ${integration.name} after ${signal.service} crossed the incident threshold.`,
-              signal.service, signal.severity, signal.timestamp]
+              signal.service, signal.environment ?? "unknown", signal.severity, signal.timestamp]
           );
           incidentId = String((created.rows[0] as Row).id);
           await client.query(
             `update ingestion_signals s set incident_id = $1
              where s.incident_id is null and s.occurred_at between $2::timestamptz - interval '30 minutes' and $2::timestamptz + interval '5 minutes'
+             and coalesce(s.environment,'unknown')=coalesce($6::text,'unknown')
              and (s.service = any($3::text[]) or ($4::text is not null and s.correlation_key = $4))
              and exists (select 1 from integrations x where x.id = s.integration_id and x.organization_id = $5)`,
-            [incidentId, signal.timestamp, relatedServices, signal.correlationKey ?? null, integration.organizationId]
+            [incidentId, signal.timestamp, relatedServices, signal.correlationKey ?? null, integration.organizationId, signal.environment ?? "unknown"]
           );
           await client.query(
-            `insert into incident_events (incident_id, timestamp, service, kind, title, detail, impact_score, metadata)
-             select $1, s.occurred_at, s.service, s.kind, s.title, s.detail, s.impact_score,
+            `insert into incident_events (incident_id, timestamp, service, kind, title, detail, impact_score, provenance, metadata)
+             select $1, s.occurred_at, s.service, s.kind, s.title, s.detail, s.impact_score, 'ingested',
                s.metadata || jsonb_strip_nulls(jsonb_build_object(
                  'sourceExternalId', s.external_id, 'correlationKey', s.correlation_key, 'traceId', s.trace_id,
                  'sourceUrl', s.source_url, 'environment', s.environment, 'automated', true
@@ -761,8 +843,8 @@ class PostgresRepository implements Repository {
         } else if (incidentId) {
           await client.query("update ingestion_signals set incident_id = $1 where id = $2", [incidentId, signalId]);
           await client.query(
-            `insert into incident_events (incident_id, timestamp, service, kind, title, detail, impact_score, metadata)
-             values ($1,$2,$3,$4,$5,$6,$7,$8)`,
+            `insert into incident_events (incident_id, timestamp, service, kind, title, detail, impact_score, provenance, metadata)
+             values ($1,$2,$3,$4,$5,$6,$7,'ingested',$8)`,
             [incidentId, signal.timestamp, signal.service, signal.kind, signal.title, signal.detail, signal.impactScore, {
               ...signal.metadata, sourceExternalId: signal.externalId, correlationKey: signal.correlationKey,
               traceId: signal.traceId, sourceUrl: signal.sourceUrl, environment: signal.environment, automated: true
@@ -773,7 +855,7 @@ class PostgresRepository implements Repository {
         if (incidentId) {
           incidentIds.add(incidentId);
           await client.query(
-            `update incidents set updated_at = now(), status = case when $2 = 'recovery' then 'monitoring' else status end where id = $1`,
+            `update incidents set updated_at = now(), evidence_revision=now(), status = case when $2 = 'recovery' then 'monitoring' else status end where id = $1`,
             [incidentId, signal.kind]
           );
         }
@@ -786,9 +868,10 @@ class PostgresRepository implements Repository {
       );
       await client.query(
         `update integrations set last_delivery_at = now(), last_delivery_status = 'accepted',
-         signal_count = signal_count + $2, updated_at = now() where id = $1`,
+         signal_count = signal_count + $2,counter_date=current_date,accepted_today=case when counter_date=current_date then accepted_today+$2 else $2 end,dropped_today=case when counter_date=current_date then dropped_today else 0 end, updated_at = now() where id = $1`,
         [integration.id, acceptedSignals]
       );
+      await client.query(`delete from ingestion_signals where integration_id=$1 and created_at<now()-((select retention_days from integrations where id=$1)||' days')::interval`,[integration.id]);
       if (incidentIdList[0]) {
         await client.query(
           `insert into incident_activities (organization_id, incident_id, actor, action, detail, timestamp)

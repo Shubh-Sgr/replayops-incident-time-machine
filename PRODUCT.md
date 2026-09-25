@@ -18,36 +18,37 @@ React with Vite and TypeScript; Tailwind CSS, Lucide icons, and Framer Motion; E
 
 ## Product Purpose
 
-ReplayOps turns operational telemetry into a replayable incident narrative. It helps teams identify a likely initiating event, inspect propagation, search prior incidents semantically, and compare a proposed fix against the recorded sequence.
+ReplayOps turns operational telemetry into a reviewable investigation. It helps teams measure who is affected, compare healthy and failing requests, test competing explanations, validate a bounded candidate fix, prove actual recovery, and preserve the learning as a reusable regression.
 
-Success means moving from alert to defensible causal hypothesis and replay plan with less manual correlation while retaining evidence links and human control.
+Success means moving from alert to a defensible next test and measured recovery with less manual correlation while retaining provenance, explicit unknowns, and human control.
 
 ## Positioning
 
-ReplayOps is an incident time machine, not another monitoring dashboard or incident chat room. It transforms imported evidence into an ordered causal graph, ranks competing explanations, tells the responder what observation could disprove each one, and estimates whether a candidate mitigation would interrupt the recorded propagation.
+ReplayOps is an incident time machine, not another monitoring dashboard or incident chat room. It transforms imported evidence into a time-ordered investigation, ranks competing explanations, tells the responder what observation could disprove each one, and can execute a deliberately bounded HTTP regression against an isolated candidate build.
 
 ### Why a team uses ReplayOps alongside existing tools
 
 - Datadog, Grafana, Honeycomb, and similar observability products remain the systems of record for querying raw metrics, logs, and traces. ReplayOps consumes their evidence and turns it into a testable debugging argument.
 - Rootly, incident.io, FireHydrant, and similar response products remain the systems of engagement for paging, roles, chat, runbooks, and status communication. ReplayOps focuses on the unresolved technical question: what should the engineer test next, and what evidence would change the diagnosis?
-- ReplayOps wins when responders need a reviewable chain from precursor → symptom → propagation → falsification test → mitigation replay. It does not compete by duplicating alert routing, chat capture, status pages, or generic dashboards.
+- ReplayOps wins when responders need a reviewable chain from symptom → evidence → explanation → falsification test → bounded validation → measured recovery → regression test. It does not compete by duplicating alert routing, chat capture, status pages, or generic dashboards.
 
 ### Differentiated proof loop
 
-1. Rank precursor and change candidates by causal order and propagation, not alert loudness.
-2. Compare the pre-symptom and failure windows to expose overrepresented services and signal types.
-3. Maintain multiple hypotheses with supporting and conflicting evidence.
-4. Produce a concrete, reversible falsification test for the selected hypothesis.
-5. Use AI as an adversarial reviewer that challenges claims; it cannot approve them.
-6. Replay mitigation controls against the recorded sequence and retain a reproducible result.
-7. Expose missing trace context, healthy baselines, changes, and recovery signals that limit confidence.
+1. State the customer symptom, denominator, environment, owner, evidence freshness, and unknowns.
+2. Compare matched healthy and failing cohorts while disclosing sampling limits.
+3. Maintain multiple explanations with supporting, conflicting, and completed-test evidence.
+4. Assign a concrete falsification test; its outcome changes diagnosis and the next action.
+5. Use contextual, redacted AI as an evidence reviewer that cites sources and cannot approve actions.
+6. Keep arithmetic scenario estimates separate from isolated HTTP replay execution.
+7. Require fresh, sourced, server-derived recovery measurements before resolution.
+8. Export the proven failure/fix pair as a versioned CI regression manifest.
 
 ## Operating Context
 
 - Continuous incident intake through signed GitHub, OpenTelemetry HTTP/JSON, Grafana, and generic webhook connectors, with manual evidence reserved for human observations.
-- Protected dashboard for service health, active incidents, activity, and replay state.
-- Workbench with timeline events, causal relationships, evidence, notes, and hypotheses.
-- Semantic search and an assistant grounded in selected and historical incident evidence.
+- Investigation inbox for active work, ownership, next actions, source freshness, and intake failures.
+- Workbench with synchronized event timeline/evidence inspector, cohorts, changes, explanations, tests, validation, recovery, and handoff.
+- Exact-ID and semantic search plus contextual assistance grounded in selected and historical evidence.
 - Acknowledge, assign, transition, replay, and resolve workflows.
 
 ## Capabilities and Constraints
@@ -61,17 +62,19 @@ ReplayOps is an incident time machine, not another monitoring dashboard or incid
 - Signed, provider-specific ingestion with delivery deduplication, normalized evidence buffering, trace/release correlation, and threshold-based incident creation.
 - Automatic precursor backfill: ordinary deploys and metrics stay buffered, then attach when a related high-impact signal opens an incident.
 - Adversarial AI review for disconfirming evidence and falsification tests; model output remains subordinate to recorded evidence.
-- Counterfactual mitigation replay with repeatable inputs and clearly labeled synthetic projections.
-- Immutable replay history with exact configuration, evidence-version binding, stale-approval detection, and side-by-side candidate selection.
+- Transparent scenario estimates that never claim execution or predict recovery.
+- Immutable, bounded HTTP replay history with explicit assertions, application version, dependency fixtures, evidence revision, loopback-only execution, and nondeterminism detection.
 - Assignable hypothesis tests with explicit supported, disproved, and inconclusive outcomes.
-- Separate evidence-completeness and causal-confidence scores with visible score inputs.
+- Qualitative evidence completeness and explanation state; no uncalibrated causal-confidence percentage.
 - Live workbench refresh, exact-event drill-down, source telemetry links, and reversible grouping correction.
 - Measured recovery verification required before resolution, plus persistent handoff and postmortem records.
 - Free in-app action notifications for approvals, assigned tests, and dead-letter ingestion.
 - Supabase-backed durable intake jobs with retry backoff, dead-letter review, and operator replay.
 - Service ownership/dependency context plus configurable grouping, threshold, suppression, and maintenance policies.
 - Team roles, email-delivered expiring invitations with manual fallback, immutable workspace audit entries, and independent mitigation approval.
-- Evidence-level AI citations and secret/PII redaction before provider-assisted analysis.
+- Evidence-level AI citations, secret/PII redaction before chat and embeddings, and an explicit provider-disabled mode.
+- Healthy/failing cohort comparison, recent-change candidates, provider-specific next-test queries, historical comparison, measured impact, and redacted evidence bundles.
+- Privacy-aware product instrumentation for completed tests, grouping correction, replay execution, and verified recovery—not prompt volume.
 - Responsive light and dark modes.
 - Free-tier Vercel, Render, and Supabase deployment configuration.
 - Synthetic demonstrations are labeled.
@@ -103,6 +106,6 @@ Target WCAG 2.2 AA with keyboard operation, visible focus, reduced motion, seman
 
 - Initial tenant: one synthetic organization, schema ready for multiple tenants.
 - Initial telemetry: native GitHub and OTLP HTTP/JSON receivers plus a normalized generic/Grafana webhook; binary OTLP and vendor OAuth apps remain future extensions.
-- Replay: deterministic simulation over stored events, not execution against customer infrastructure.
+- Replay: a narrow HTTP workload executed only against a loopback candidate service in an isolated local/CI environment. Distributed-system replay and production execution are explicitly unsupported.
 - Integrations: receivers are intentionally push-based so they run on the existing free API service without polling workers or paid queues.
 - Surface mode: Operate.

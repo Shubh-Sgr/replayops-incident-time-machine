@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import { config } from "./config.js";
 import { sendInvitationEmail } from "./mailer.js";
-import type { ActionNotification, AuditEntry, HypothesisTest, HypothesisTestStatus, IncidentPolicy, IncidentPostmortem, MitigationRequest, RecoveryVerification, ReplayResult, ServiceDefinition, TeamInvitation, TeamMember, WorkspaceContext, WorkspaceRole } from "./types.js";
+import type { ActionNotification, AuditEntry, HypothesisTest, HypothesisTestStatus, IncidentComment, IncidentPolicy, IncidentPostmortem, MitigationRequest, PrivacySettings, RecoveryVerification, ReplayResult, ServiceDefinition, TeamInvitation, TeamMember, WorkspaceContext, WorkspaceRole } from "./types.js";
 
 type Row = Record<string, unknown>;
 type ServiceInput = Pick<ServiceDefinition, "name" | "ownerTeam" | "tier" | "repositoryUrl" | "runbookUrl" | "dependencies">;
@@ -34,8 +34,9 @@ const mapAudit = (row: Row): AuditEntry => ({
 const mapMitigation = (row: Row): MitigationRequest => ({
   id: String(row.id), incidentId: String(row.incident_id), requestedBy: String(row.requested_by), reviewedBy: row.reviewed_by ? String(row.reviewed_by) : null,
   title: String(row.title), action: String(row.action), rollbackPlan: String(row.rollback_plan), status: row.status as MitigationRequest["status"],
+  currentValue:String(row.current_value??"Not recorded"),proposedValue:String(row.proposed_value??"Not recorded"),blastRadius:String(row.blast_radius??"Not recorded"),changeOwner:String(row.change_owner??row.requested_by),observationMinutes:Number(row.observation_minutes??15),
   replayRunId: row.replay_run_id ? String(row.replay_run_id) : "", replayConfig: (row.replay_config ?? { retryCeiling: 0, concurrencyCap: 0, timeoutMs: 0 }) as MitigationRequest["replayConfig"], replayProjection: (row.replay_projection ?? { baselinePeak: 0, projectedPeak: 0, avoidedHighImpactEvents: 0, recoveryGainMinutes: 0, confidence: 0, state: "critical", summary: "Legacy approval created before replay binding was enabled.", signals: [] }) as MitigationRequest["replayProjection"],
-  evidenceVersion: new Date(String(row.evidence_version ?? row.created_at)).toISOString(), stale: !row.replay_run_id || (row.incident_updated_at ? new Date(String(row.incident_updated_at)).toISOString() !== new Date(String(row.evidence_version ?? row.created_at)).toISOString() : false),
+  evidenceVersion: new Date(String(row.evidence_version ?? row.created_at)).toISOString(), stale: !row.replay_run_id || (row.incident_evidence_revision ? new Date(String(row.incident_evidence_revision)).toISOString() !== new Date(String(row.evidence_version ?? row.created_at)).toISOString() : false),
   createdAt: new Date(String(row.created_at)).toISOString(), reviewedAt: row.reviewed_at ? new Date(String(row.reviewed_at)).toISOString() : null
 });
 const mapHypothesisTest = (row: Row): HypothesisTest => ({
@@ -43,10 +44,17 @@ const mapHypothesisTest = (row: Row): HypothesisTest => ({
 });
 const mapRecovery = (row: Row): RecoveryVerification => ({
   id: String(row.id), incidentId: String(row.incident_id), metric: String(row.metric), targetValue: Number(row.target_value), baselineValue: Number(row.baseline_value), observedValue: row.observed_value === null || row.observed_value === undefined ? null : Number(row.observed_value), observationMinutes: Number(row.observation_minutes), status: row.status as RecoveryVerification["status"], reason: String(row.reason ?? ""), createdAt: new Date(String(row.created_at)).toISOString(), updatedAt: new Date(String(row.updated_at)).toISOString()
+  , unit: String(row.unit ?? "value"), comparison: (row.comparison ?? "lte") as RecoveryVerification["comparison"],
+  source: String(row.source ?? "Legacy observation"), query: String(row.query ?? "Unavailable for legacy observation"),
+  windowStartedAt: row.window_started_at ? new Date(String(row.window_started_at)).toISOString() : new Date(String(row.created_at)).toISOString(),
+  windowEndedAt: row.window_ended_at ? new Date(String(row.window_ended_at)).toISOString() : new Date(String(row.created_at)).toISOString(),
+  observedAt: row.observed_at ? new Date(String(row.observed_at)).toISOString() : new Date(String(row.created_at)).toISOString(),
+  freshnessMinutes: Number(row.freshness_minutes ?? 0)
 });
 const mapPostmortem = (row: Row): IncidentPostmortem => ({
   incidentId: String(row.incident_id), summary: String(row.summary), rootCause: String(row.root_cause), impact: String(row.impact), recovery: String(row.recovery), followUps: String(row.follow_ups), status: row.status as IncidentPostmortem["status"], updatedAt: new Date(String(row.updated_at)).toISOString()
 });
+const mapPrivacy=(row:Row):PrivacySettings=>({externalAiEnabled:Boolean(row.external_ai_enabled),captureRequestBodies:Boolean(row.capture_request_bodies),productAnalyticsEnabled:Boolean(row.product_analytics_enabled),updatedAt:new Date(String(row.updated_at)).toISOString()});
 
 class WorkspaceService {
   private pool?: Pool;
@@ -62,6 +70,9 @@ class WorkspaceService {
   private memoryHypothesisTests: HypothesisTest[] = [];
   private memoryRecoveries: RecoveryVerification[] = [];
   private memoryPostmortems: IncidentPostmortem[] = [];
+  private memoryNotificationStates = new Map<string,{read:boolean;resolved:boolean}>();
+  private memoryPrivacy:PrivacySettings={externalAiEnabled:true,captureRequestBodies:false,productAnalyticsEnabled:true,updatedAt:new Date().toISOString()};
+  private memoryComments:IncidentComment[]=[];
 
   constructor() {
     if (config.databaseUrl) this.pool = new Pool({ connectionString: config.databaseUrl, ssl: config.databaseUrl.includes("localhost") ? false : { rejectUnauthorized: false }, max: 3 });
@@ -112,6 +123,11 @@ class WorkspaceService {
       alter table mitigation_requests add column if not exists replay_config jsonb;
       alter table mitigation_requests add column if not exists replay_projection jsonb;
       alter table mitigation_requests add column if not exists evidence_version timestamptz;
+      alter table mitigation_requests add column if not exists current_value text not null default 'Not recorded';
+      alter table mitigation_requests add column if not exists proposed_value text not null default 'Not recorded';
+      alter table mitigation_requests add column if not exists blast_radius text not null default 'Not recorded';
+      alter table mitigation_requests add column if not exists change_owner text not null default 'Unassigned';
+      alter table mitigation_requests add column if not exists observation_minutes integer not null default 15;
       create table if not exists hypothesis_tests (
         id uuid primary key default gen_random_uuid(), organization_id uuid not null references organizations(id) on delete cascade, incident_id uuid not null references incidents(id) on delete cascade,
         hypothesis_id text not null, title text not null, instruction text not null, assignee text not null, status text not null default 'planned' check(status in ('planned','running','supported','disproved','inconclusive')),
@@ -122,11 +138,28 @@ class WorkspaceService {
         metric text not null, target_value numeric not null, baseline_value numeric not null, observed_value numeric, observation_minutes integer not null check(observation_minutes between 1 and 10080),
         status text not null default 'pending' check(status in ('pending','verified','failed')), reason text not null default '', created_at timestamptz not null default now(), updated_at timestamptz not null default now()
       );
+      alter table recovery_verifications add column if not exists unit text not null default 'value';
+      alter table recovery_verifications add column if not exists comparison text not null default 'lte';
+      alter table recovery_verifications add column if not exists source text not null default 'Legacy observation';
+      alter table recovery_verifications add column if not exists query text not null default 'Unavailable for legacy observation';
+      alter table recovery_verifications add column if not exists window_started_at timestamptz;
+      alter table recovery_verifications add column if not exists window_ended_at timestamptz;
+      alter table recovery_verifications add column if not exists observed_at timestamptz;
+      alter table recovery_verifications add column if not exists freshness_minutes integer not null default 0;
       create table if not exists incident_postmortems (
         incident_id uuid primary key references incidents(id) on delete cascade, organization_id uuid not null references organizations(id) on delete cascade,
         summary text not null default '', root_cause text not null default '', impact text not null default '', recovery text not null default '', follow_ups text not null default '',
         status text not null default 'draft' check(status in ('draft','published')), updated_at timestamptz not null default now()
       );
+      create table if not exists notification_states (
+        organization_id uuid not null references organizations(id) on delete cascade,user_id uuid not null references auth.users(id) on delete cascade,
+        notification_id text not null,read_at timestamptz,resolved_at timestamptz,updated_at timestamptz not null default now(),primary key(user_id,notification_id)
+      );
+      create table if not exists workspace_privacy_settings (
+        organization_id uuid primary key references organizations(id) on delete cascade,external_ai_enabled boolean not null default true,
+        capture_request_bodies boolean not null default false,product_analytics_enabled boolean not null default true,updated_at timestamptz not null default now()
+      );
+      create table if not exists incident_comments(id uuid primary key default gen_random_uuid(),organization_id uuid not null references organizations(id) on delete cascade,incident_id uuid not null references incidents(id) on delete cascade,actor text not null,body text not null,event_id uuid,created_at timestamptz not null default now());
       create index if not exists service_catalog_org_idx on service_catalog(organization_id,name);
       create index if not exists workspace_audit_org_idx on workspace_audit_log(organization_id,created_at desc);
       create index if not exists mitigation_incident_idx on mitigation_requests(incident_id,created_at desc);
@@ -138,6 +171,9 @@ class WorkspaceService {
       alter table hypothesis_tests enable row level security;
       alter table recovery_verifications enable row level security;
       alter table incident_postmortems enable row level security;
+      alter table notification_states enable row level security;
+      alter table workspace_privacy_settings enable row level security;
+      alter table incident_comments enable row level security;
     `);
   }
 
@@ -154,6 +190,12 @@ class WorkspaceService {
     if (!roles.includes(context.role)) throw new Error("Your workspace role does not allow this action.");
     return context;
   }
+
+  async getPrivacy(userId:string){const context=await this.context(userId);if(!this.pool)return structuredClone(this.memoryPrivacy);const result=await this.pool.query(`insert into workspace_privacy_settings(organization_id) values($1) on conflict(organization_id) do update set organization_id=excluded.organization_id returning *`,[context.organizationId]);return mapPrivacy(result.rows[0] as Row);}
+  async updatePrivacy(userId:string,actor:string,input:Omit<PrivacySettings,"updatedAt">){const context=await this.assertRole(userId,["admin"]);if(!this.pool){this.memoryPrivacy={...input,updatedAt:new Date().toISOString()};await this.audit(userId,actor,"updated privacy settings","workspace",context.organizationId,input);return this.memoryPrivacy;}const result=await this.pool.query(`insert into workspace_privacy_settings(organization_id,external_ai_enabled,capture_request_bodies,product_analytics_enabled) values($1,$2,$3,$4) on conflict(organization_id) do update set external_ai_enabled=excluded.external_ai_enabled,capture_request_bodies=excluded.capture_request_bodies,product_analytics_enabled=excluded.product_analytics_enabled,updated_at=now() returning *`,[context.organizationId,input.externalAiEnabled,input.captureRequestBodies,input.productAnalyticsEnabled]);await this.audit(userId,actor,"updated privacy settings","workspace",context.organizationId,input);return mapPrivacy(result.rows[0] as Row);}
+
+  async recordProductOutcome(userId:string,actor:string,event:string,detail:Record<string,unknown>){const privacy=await this.getPrivacy(userId);if(!privacy.productAnalyticsEnabled)return{recorded:false};await this.audit(userId,actor,`[product-outcome] ${event}`,"product-outcome",undefined,detail);return{recorded:true};}
+  async listProductOutcomes(userId:string){return (await this.listAudit(userId)).filter((item)=>item.action.startsWith("[product-outcome]"));}
 
   async audit(userId: string, actor: string, action: string, targetType: string, targetId?: string, detail: Record<string, unknown> = {}) {
     const context = await this.context(userId);
@@ -299,17 +341,17 @@ class WorkspaceService {
   async listMitigations(userId: string, incidentId: string) {
     const context = await this.context(userId);
     if (!this.pool) return structuredClone(this.memoryMitigations.filter((item) => item.incidentId === incidentId));
-    return (await this.pool.query(`select m.*,i.updated_at as incident_updated_at from mitigation_requests m join incidents i on i.id=m.incident_id where m.organization_id=$1 and m.incident_id=$2 order by m.created_at desc`, [context.organizationId, incidentId])).rows.map(mapMitigation);
+    return (await this.pool.query(`select m.*,i.evidence_revision as incident_evidence_revision from mitigation_requests m join incidents i on i.id=m.incident_id where m.organization_id=$1 and m.incident_id=$2 order by m.created_at desc`, [context.organizationId, incidentId])).rows.map(mapMitigation);
   }
 
-  async requestMitigation(userId: string, actor: string, incidentId: string, input: Pick<MitigationRequest, "title" | "action" | "rollbackPlan"> & { replay: ReplayResult }) {
+  async requestMitigation(userId: string, actor: string, incidentId: string, input: Pick<MitigationRequest, "title" | "action" | "rollbackPlan"|"currentValue"|"proposedValue"|"blastRadius"|"changeOwner"|"observationMinutes"> & { replay: ReplayResult }) {
     const context = await this.assertRole(userId, ["admin", "responder"]);
     let request: MitigationRequest;
     if (!this.pool) {
-      request = { id: randomUUID(), incidentId, requestedBy: actor, title: input.title, action: input.action, rollbackPlan: input.rollbackPlan, replayRunId: input.replay.id, replayConfig: input.replay.config, replayProjection: input.replay.projection, evidenceVersion: input.replay.evidenceVersion, stale: false, status: "pending", createdAt: new Date().toISOString() };
+      request = { id: randomUUID(), incidentId, requestedBy: actor, title: input.title, action: input.action, rollbackPlan: input.rollbackPlan,currentValue:input.currentValue,proposedValue:input.proposedValue,blastRadius:input.blastRadius,changeOwner:input.changeOwner,observationMinutes:input.observationMinutes, replayRunId: input.replay.id, replayConfig: input.replay.config, replayProjection: input.replay.projection, evidenceVersion: input.replay.evidenceVersion, stale: false, status: "pending", createdAt: new Date().toISOString() };
       this.memoryMitigations.unshift(request);
     } else {
-      const result = await this.pool.query(`insert into mitigation_requests(organization_id,incident_id,requested_by,title,action,rollback_plan,replay_run_id,replay_config,replay_projection,evidence_version) select $1,i.id,$3,$4,$5,$6,$7,$8,$9,$10 from incidents i where i.id=$2 and i.organization_id=$1 returning *,null::timestamptz as incident_updated_at`, [context.organizationId, incidentId, actor, input.title, input.action, input.rollbackPlan, input.replay.id, input.replay.config, input.replay.projection, input.replay.evidenceVersion]);
+      const result = await this.pool.query(`insert into mitigation_requests(organization_id,incident_id,requested_by,title,action,rollback_plan,current_value,proposed_value,blast_radius,change_owner,observation_minutes,replay_run_id,replay_config,replay_projection,evidence_version) select $1,i.id,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15 from incidents i where i.id=$2 and i.organization_id=$1 returning *,null::timestamptz as incident_evidence_revision`, [context.organizationId, incidentId, actor, input.title, input.action, input.rollbackPlan,input.currentValue,input.proposedValue,input.blastRadius,input.changeOwner,input.observationMinutes, input.replay.id, input.replay.config, input.replay.projection, input.replay.evidenceVersion]);
       if (!result.rows[0]) throw new Error("Incident not found in this workspace.");
       request = mapMitigation(result.rows[0] as Row);
     }
@@ -325,7 +367,7 @@ class WorkspaceService {
       if (request?.requestedBy === actor) throw new Error("A mitigation requester cannot approve their own production action.");
       if (request) Object.assign(request, { status, reviewedBy: actor, reviewedAt: new Date().toISOString() });
     } else {
-      const result = await this.pool.query(`update mitigation_requests m set status=$3,reviewed_by=$4,reviewed_at=now() from incidents i where m.id=$2 and m.organization_id=$1 and m.status='pending' and m.requested_by<>$4 and i.id=m.incident_id and i.updated_at=m.evidence_version returning m.*,i.updated_at as incident_updated_at`, [context.organizationId, requestId, status, actor]);
+      const result = await this.pool.query(`update mitigation_requests m set status=$3,reviewed_by=$4,reviewed_at=now() from incidents i where m.id=$2 and m.organization_id=$1 and m.status='pending' and m.requested_by<>$4 and i.id=m.incident_id and i.evidence_revision=m.evidence_version returning m.*,i.evidence_revision as incident_evidence_revision`, [context.organizationId, requestId, status, actor]);
       request = result.rows[0] ? mapMitigation(result.rows[0] as Row) : undefined;
     }
     if (!request) throw new Error("This request is unavailable, already reviewed, or cannot be self-approved.");
@@ -341,6 +383,8 @@ class WorkspaceService {
 
   async createHypothesisTest(userId: string, actor: string, incidentId: string, input: Pick<HypothesisTest, "hypothesisId" | "title" | "instruction" | "assignee">) {
     const context = await this.assertRole(userId, ["admin", "responder"]);
+    const existing = (await this.listHypothesisTests(userId, incidentId)).find((item) => item.hypothesisId === input.hypothesisId && ["planned", "running"].includes(item.status));
+    if (existing) throw new Error("This explanation already has an active test. Open that test instead of creating a duplicate.");
     let value: HypothesisTest;
     if (!this.pool) {
       const now = new Date().toISOString(); value = { id: randomUUID(), incidentId, ...input, status: "planned", result: "", createdAt: now, updatedAt: now }; this.memoryHypothesisTests.unshift(value);
@@ -359,30 +403,41 @@ class WorkspaceService {
   }
 
   async listRecoveries(userId: string, incidentId: string) { const context = await this.context(userId); if (!this.pool) return structuredClone(this.memoryRecoveries.filter((item) => item.incidentId === incidentId)); return (await this.pool.query(`select * from recovery_verifications where organization_id=$1 and incident_id=$2 order by created_at desc`, [context.organizationId, incidentId])).rows.map(mapRecovery); }
-  async saveRecovery(userId: string, actor: string, incidentId: string, input: Omit<RecoveryVerification, "id" | "incidentId" | "createdAt" | "updatedAt">) {
+  async saveRecovery(userId: string, actor: string, incidentId: string, input: Omit<RecoveryVerification, "id" | "incidentId" | "createdAt" | "updatedAt" | "status" | "freshnessMinutes">) {
     const context = await this.assertRole(userId, ["admin", "responder"]); let value: RecoveryVerification;
-    if (!this.pool) { const now = new Date().toISOString(); value = { id: randomUUID(), incidentId, ...input, createdAt: now, updatedAt: now }; this.memoryRecoveries.unshift(value); }
-    else { const result = await this.pool.query(`insert into recovery_verifications(organization_id,incident_id,metric,target_value,baseline_value,observed_value,observation_minutes,status,reason) select $1,i.id,$3,$4,$5,$6,$7,$8,$9 from incidents i where i.id=$2 and i.organization_id=$1 returning *`, [context.organizationId, incidentId, input.metric, input.targetValue, input.baselineValue, input.observedValue ?? null, input.observationMinutes, input.status, input.reason]); if (!result.rows[0]) throw new Error("Incident not found in this workspace."); value = mapRecovery(result.rows[0] as Row); }
-    await this.audit(userId, actor, "recorded recovery verification", "recovery", value.id, { incidentId, status: input.status }); return value;
+    const freshnessMinutes = Math.max(0, Math.floor((Date.now() - Date.parse(input.observedAt ?? "")) / 60_000));
+    const fresh = Number.isFinite(freshnessMinutes) && freshnessMinutes <= Math.max(5, input.observationMinutes);
+    const meetsTarget = input.comparison === "gte" ? Number(input.observedValue) >= input.targetValue : Number(input.observedValue) <= input.targetValue;
+    const status: RecoveryVerification["status"] = !fresh ? "pending" : meetsTarget ? "verified" : "failed";
+    const normalized = { ...input, status, freshnessMinutes };
+    if (!this.pool) { const now = new Date().toISOString(); value = { id: randomUUID(), incidentId, ...normalized, createdAt: now, updatedAt: now }; this.memoryRecoveries.unshift(value); }
+    else { const result = await this.pool.query(`insert into recovery_verifications(organization_id,incident_id,metric,target_value,baseline_value,observed_value,observation_minutes,status,reason,unit,comparison,source,query,window_started_at,window_ended_at,observed_at,freshness_minutes) select $1,i.id,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17 from incidents i where i.id=$2 and i.organization_id=$1 returning *`, [context.organizationId, incidentId, input.metric, input.targetValue, input.baselineValue, input.observedValue, input.observationMinutes, status, input.reason, input.unit, input.comparison, input.source, input.query, input.windowStartedAt, input.windowEndedAt, input.observedAt, freshnessMinutes]); if (!result.rows[0]) throw new Error("Incident not found in this workspace."); value = mapRecovery(result.rows[0] as Row); }
+    await this.audit(userId, actor, "recorded recovery verification", "recovery", value.id, { incidentId, status, source: input.source, observedAt: input.observedAt }); return value;
   }
-  async assertRecoveryVerified(userId: string, incidentId: string) { const values = await this.listRecoveries(userId, incidentId); if (!values.some((item) => item.status === "verified")) throw new Error("Record a verified recovery observation before resolving this incident."); }
+  async assertRecoveryVerified(userId: string, incidentId: string) { const values = await this.listRecoveries(userId, incidentId); const latest = values.sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0]; if (!latest || latest.status !== "verified") throw new Error(latest?.status === "failed" ? "The latest recovery observation regressed. Keep monitoring and record a newer passing window before resolving." : "Record a fresh, server-verified recovery observation before resolving this incident."); }
 
   async getPostmortem(userId: string, incidentId: string) { const context = await this.context(userId); if (!this.pool) return this.memoryPostmortems.find((item) => item.incidentId === incidentId) ?? null; const result = await this.pool.query(`select * from incident_postmortems where organization_id=$1 and incident_id=$2`, [context.organizationId, incidentId]); return result.rows[0] ? mapPostmortem(result.rows[0] as Row) : null; }
   async savePostmortem(userId: string, actor: string, incidentId: string, input: Omit<IncidentPostmortem, "incidentId" | "updatedAt">) { const context = await this.assertRole(userId, ["admin", "responder"]); let value: IncidentPostmortem; if (!this.pool) { value = { incidentId, ...input, updatedAt: new Date().toISOString() }; this.memoryPostmortems = [value, ...this.memoryPostmortems.filter((item) => item.incidentId !== incidentId)]; } else { const result = await this.pool.query(`insert into incident_postmortems(incident_id,organization_id,summary,root_cause,impact,recovery,follow_ups,status) select i.id,$1,$3,$4,$5,$6,$7,$8 from incidents i where i.id=$2 and i.organization_id=$1 on conflict(incident_id) do update set summary=excluded.summary,root_cause=excluded.root_cause,impact=excluded.impact,recovery=excluded.recovery,follow_ups=excluded.follow_ups,status=excluded.status,updated_at=now() returning *`, [context.organizationId, incidentId, input.summary, input.rootCause, input.impact, input.recovery, input.followUps, input.status]); if (!result.rows[0]) throw new Error("Incident not found in this workspace."); value = mapPostmortem(result.rows[0] as Row); } await this.audit(userId, actor, "saved postmortem", "postmortem", incidentId, { status: input.status }); return value; }
 
+  async listComments(userId:string,incidentId:string){const context=await this.context(userId);if(!this.pool)return structuredClone(this.memoryComments.filter((item)=>item.incidentId===incidentId));const result=await this.pool.query(`select * from incident_comments where organization_id=$1 and incident_id=$2 order by created_at`,[context.organizationId,incidentId]);return(result.rows as Row[]).map((row)=>({id:String(row.id),incidentId:String(row.incident_id),actor:String(row.actor),body:String(row.body),eventId:row.event_id?String(row.event_id):null,createdAt:new Date(String(row.created_at)).toISOString()} satisfies IncidentComment));}
+  async createComment(userId:string,actor:string,incidentId:string,input:{body:string;eventId?:string|null}){const context=await this.assertRole(userId,["admin","responder"]);let value:IncidentComment;if(!this.pool){value={id:randomUUID(),incidentId,actor,...input,createdAt:new Date().toISOString()};this.memoryComments.push(value);}else{const result=await this.pool.query(`insert into incident_comments(organization_id,incident_id,actor,body,event_id) select $1,i.id,$3,$4,$5 from incidents i where i.id=$2 and i.organization_id=$1 returning *`,[context.organizationId,incidentId,actor,input.body,input.eventId??null]);if(!result.rows[0])throw new Error("Incident not found in this workspace.");const row=result.rows[0] as Row;value={id:String(row.id),incidentId:String(row.incident_id),actor:String(row.actor),body:String(row.body),eventId:row.event_id?String(row.event_id):null,createdAt:new Date(String(row.created_at)).toISOString()};}await this.audit(userId,actor,"added evidence-linked comment","incident-comment",value.id,{incidentId,eventId:input.eventId??null});return value;}
+
   async listNotifications(userId: string, actor: string): Promise<ActionNotification[]> {
     const context = await this.context(userId);
     if (!this.pool) return [
-      ...this.memoryMitigations.filter((item) => item.status === "pending" && item.requestedBy !== actor).map((item) => ({ id: `approval-${item.id}`, kind: "approval" as const, title: "Mitigation approval required", detail: item.title, incidentId: item.incidentId, href: `/incidents/${item.incidentId}`, createdAt: item.createdAt })),
-      ...this.memoryHypothesisTests.filter((item) => item.assignee === actor && ["planned","running"].includes(item.status)).map((item) => ({ id: `test-${item.id}`, kind: "hypothesis" as const, title: "Hypothesis test assigned", detail: item.title, incidentId: item.incidentId, href: `/incidents/${item.incidentId}`, createdAt: item.createdAt }))
-    ];
+      ...this.memoryMitigations.filter((item) => item.status === "pending" && item.requestedBy !== actor).map((item) => ({ id: `approval-${item.id}`, kind: "approval" as const, title: "Mitigation review required", detail: item.title, incidentId: item.incidentId, href: `/incidents/${item.incidentId}?area=validate&approval=${item.id}#approval-${item.id}`, createdAt: item.createdAt,urgency:"urgent" as const,reason:"A bounded production change is waiting for independent review.",owner:actor })),
+      ...this.memoryHypothesisTests.filter((item) => item.assignee === actor && ["planned","running"].includes(item.status)).map((item) => ({ id: `test-${item.id}`, kind: "hypothesis" as const, title: "Investigation test assigned", detail: item.title, incidentId: item.incidentId, href: `/incidents/${item.incidentId}?area=investigate&test=${item.id}#test-${item.id}`, createdAt: item.createdAt,urgency:"normal" as const,reason:"A test assigned to you is still open.",owner:item.assignee }))
+    ].map((item)=>({...item,read:this.memoryNotificationStates.get(`${userId}:${item.id}`)?.read??false,resolved:this.memoryNotificationStates.get(`${userId}:${item.id}`)?.resolved??false})).filter((item)=>!item.resolved);
     const result = await this.pool.query(`
       select 'approval-'||m.id as id,'approval' as kind,'Mitigation approval required' as title,m.title as detail,m.incident_id,m.created_at from mitigation_requests m where m.organization_id=$1 and m.status='pending' and m.requested_by<>$2
       union all select 'test-'||h.id,'hypothesis','Hypothesis test assigned',h.title,h.incident_id,h.created_at from hypothesis_tests h where h.organization_id=$1 and lower(h.assignee)=lower($2) and h.status in ('planned','running')
       union all select 'queue-'||q.id,'ingestion','Ingestion delivery needs attention',coalesce(q.last_error,'Delivery exhausted its retries'),null,q.updated_at from ingestion_queue q join integrations i on i.id=q.integration_id where i.organization_id=$1 and q.status='dead_letter'
       order by created_at desc limit 30`, [context.organizationId, actor]);
-    return (result.rows as Row[]).map((row) => ({ id: String(row.id), kind: row.kind as ActionNotification["kind"], title: String(row.title), detail: String(row.detail), ...(row.incident_id ? { incidentId: String(row.incident_id) } : {}), href: row.incident_id ? `/incidents/${row.incident_id}` : "/integrations", createdAt: new Date(String(row.created_at)).toISOString() }));
+    const values=(result.rows as Row[]).map((row) => ({ id: String(row.id), kind: row.kind as ActionNotification["kind"], title: String(row.title), detail: String(row.detail), ...(row.incident_id ? { incidentId: String(row.incident_id) } : {}), href: row.incident_id ? `/incidents/${row.incident_id}?area=${row.kind==="approval"?"validate":"investigate"}&${row.kind==="approval"?"approval":"test"}=${String(row.id).replace(/^[^-]+-/,"")}#${String(row.id)}` : "/integrations", createdAt: new Date(String(row.created_at)).toISOString(),urgency:row.kind==="ingestion"||row.kind==="approval"?"urgent" as const:"normal" as const,reason:row.kind==="ingestion"?"A delivery exhausted retries and evidence may be missing.":row.kind==="approval"?"A bounded production change is waiting for independent review.":"A test assigned to you is still open.",owner:actor }));
+    if(!values.length)return[];const states=await this.pool.query(`select * from notification_states where user_id=$1 and notification_id=any($2::text[])`,[userId,values.map((item)=>item.id)]);const byId=new Map((states.rows as Row[]).map((row)=>[String(row.notification_id),row]));return values.map((item)=>{const state=byId.get(item.id);return{...item,read:Boolean(state?.read_at),resolved:Boolean(state?.resolved_at)};}).filter((item)=>!item.resolved);
   }
+
+  async updateNotificationState(userId:string,notificationId:string,input:{read?:boolean;resolved?:boolean}){const context=await this.context(userId);if(!this.pool){const key=`${userId}:${notificationId}`;const current=this.memoryNotificationStates.get(key)??{read:false,resolved:false};const value={read:input.read??current.read,resolved:input.resolved??current.resolved};this.memoryNotificationStates.set(key,value);return{notificationId,...value};}const result=await this.pool.query(`insert into notification_states(organization_id,user_id,notification_id,read_at,resolved_at) values($1,$2,$3,case when $4 then now() else null end,case when $5 then now() else null end) on conflict(user_id,notification_id) do update set read_at=case when $4 then coalesce(notification_states.read_at,now()) when $4=false then null else notification_states.read_at end,resolved_at=case when $5 then coalesce(notification_states.resolved_at,now()) when $5=false then null else notification_states.resolved_at end,updated_at=now() returning *`,[context.organizationId,userId,notificationId,input.read??null,input.resolved??null]);const row=result.rows[0] as Row;return{notificationId,read:Boolean(row.read_at),resolved:Boolean(row.resolved_at)};}
 }
 
 export const workspaceService = new WorkspaceService();

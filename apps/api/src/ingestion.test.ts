@@ -94,4 +94,13 @@ describe("automated ingestion", () => {
     const incident = await repository.getIncident("demo", checkout.incidentIds[0]!);
     expect(incident?.events.map((event) => event.service)).toEqual(["checkout-api", "inventory-api"]);
   });
+
+  it("never correlates production and staging signals into one incident",async()=>{
+    const repository=new MemoryRepository();
+    const integration=await repository.createIntegration("demo",{name:"Environment isolation",provider:"generic"});
+    const target=await repository.getIntegrationTarget(integration.id);
+    const production=await repository.ingest(target!,{externalId:"prod",signals:[{externalId:"prod-alert",timestamp:"2026-09-20T12:00:00Z",service:"checkout-api",environment:"production",kind:"alert",title:"Production checkout errors",detail:"Production failures crossed the threshold.",impactScore:82,severity:"high",metadata:{}}]});
+    const staging=await repository.ingest(target!,{externalId:"stage",signals:[{externalId:"stage-alert",timestamp:"2026-09-20T12:01:00Z",service:"checkout-api",environment:"staging",kind:"alert",title:"Staging checkout errors",detail:"Staging failures crossed the threshold.",impactScore:82,severity:"high",metadata:{}}]});
+    expect(staging.incidentIds[0]).not.toBe(production.incidentIds[0]);
+  });
 });
