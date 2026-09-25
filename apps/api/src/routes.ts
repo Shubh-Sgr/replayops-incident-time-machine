@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { Router, type Request } from "express";
+import { semanticAuditForRequest } from "./auditEvents.js";
 import { z } from "zod";
 import { answerQuestion, embedText } from "./ai.js";
 import type { AuthenticatedRequest } from "./auth.js";
@@ -116,8 +117,8 @@ apiRouter.use(async (req: AuthenticatedRequest, res, next) => {
   try {
     await workspaceService.assertRole(userId(req), ["admin", "responder"]);
     res.once("finish", () => {
-      const target = req.params.id ?? req.params.incidentId;
-      if (res.statusCode >= 200 && res.statusCode < 300) void workspaceService.audit(userId(req), actor(req), `${req.method} ${req.path}`, "api-route", target ? String(target) : undefined, {});
+      const event = semanticAuditForRequest(req.method, req.path, req.body);
+      if (event && res.statusCode >= 200 && res.statusCode < 300) void workspaceService.audit(userId(req), actor(req), event.action, event.targetType, event.targetId, event.detail);
     });
     next();
   } catch (error) {

@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { Activity, BookOpenCheck, Boxes, CheckCircle2, Copy, DatabaseZap, GitBranch, LoaderCircle, LockKeyhole, MailCheck, Plus, RotateCcw, Send, ShieldCheck, TriangleAlert, UserPlus, UsersRound, Wrench } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { api } from "../lib/api";
+import { presentAuditEntry } from "../lib/audit";
 import { cn, formatRelative } from "../lib/utils";
 import type { IncidentPolicy, PrivacySettings, ServiceDefinition, TeamInvitation, WorkspaceRole } from "../types";
 
@@ -132,7 +133,22 @@ function TeamAccess() {
   </div>;
 }
 
-function AuditTrail() { const audit = useQuery({ queryKey: ["audit"], queryFn: api.audit }); return <section className="surface-lined overflow-hidden"><div className="px-5 py-5 sm:px-6"><h2 className="section-title">Immutable operations trail</h2><p className="mt-1 text-sm text-muted">Successful mutations and governed actions are recorded with actor, target, and time.</p></div><div className="divide-y divide-line border-t border-line">{audit.data?.map((entry) => <article key={entry.id} className="grid gap-2 px-5 py-4 sm:grid-cols-[170px_minmax(0,1fr)_auto] sm:items-start sm:px-6"><span className="measurement-number text-xs text-muted">{new Date(entry.createdAt).toLocaleString()}</span><div><p className="text-sm font-semibold">{entry.action}</p><p className="mt-1 text-xs text-muted">{entry.actor} · {entry.targetType}{entry.targetId ? ` · ${entry.targetId.slice(0, 12)}` : ""}</p></div><ShieldCheck className="h-4 w-4 text-success" /></article>)}{audit.data && !audit.data.length && <div className="px-6 py-12 text-center"><Activity className="mx-auto h-6 w-6 text-faint" /><p className="mt-3 font-semibold">No governed changes yet</p></div>}</div></section>; }
+function AuditTrail() {
+  const audit = useQuery({ queryKey: ["audit"], queryFn: api.audit });
+  return <section className="surface-lined overflow-hidden">
+    <div className="px-5 py-5 sm:px-6"><h2 className="section-title">Workspace activity</h2><p className="mt-1 text-sm text-muted">A human-readable history of completed operational and governance events.</p></div>
+    <div className="divide-y divide-line border-t border-line">
+      {audit.isLoading && <p className="px-5 py-8 text-sm text-muted sm:px-6">Loading workspace activity…</p>}
+      {audit.error && <p role="alert" className="px-5 py-8 text-sm text-danger sm:px-6">Workspace activity could not be loaded. {audit.error.message}</p>}
+      {audit.data?.map((entry) => { const event = presentAuditEntry(entry); return <article key={entry.id} className="grid gap-3 px-5 py-4 sm:grid-cols-[170px_minmax(0,1fr)_auto] sm:items-start sm:px-6">
+        <time className="measurement-number text-xs text-muted" dateTime={entry.createdAt}>{new Date(entry.createdAt).toLocaleString()}</time>
+        <div><p className="text-sm font-semibold">{event.title}</p><p className="mt-1 text-xs leading-5 text-muted">{event.description}</p><p className="mt-1 text-xs text-faint">Performed by {entry.actor}</p></div>
+        <ShieldCheck className="h-4 w-4 text-success" aria-label="Recorded successfully" />
+      </article>; })}
+      {audit.data && !audit.data.length && <div className="px-6 py-12 text-center"><Activity className="mx-auto h-6 w-6 text-faint" /><p className="mt-3 font-semibold">No workspace activity yet</p><p className="mt-1 text-sm text-muted">Completed operational changes will appear here.</p></div>}
+    </div>
+  </section>;
+}
 
 function shortDeliveryReference(value: string) {
   return value.length > 16 ? `${value.slice(0, 8)}…${value.slice(-4)}` : value;

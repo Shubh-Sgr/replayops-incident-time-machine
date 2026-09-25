@@ -195,7 +195,7 @@ class WorkspaceService {
   async updatePrivacy(userId:string,actor:string,input:Omit<PrivacySettings,"updatedAt">){const context=await this.assertRole(userId,["admin"]);if(!this.pool){this.memoryPrivacy={...input,updatedAt:new Date().toISOString()};await this.audit(userId,actor,"updated privacy settings","workspace",context.organizationId,input);return this.memoryPrivacy;}const result=await this.pool.query(`insert into workspace_privacy_settings(organization_id,external_ai_enabled,capture_request_bodies,product_analytics_enabled) values($1,$2,$3,$4) on conflict(organization_id) do update set external_ai_enabled=excluded.external_ai_enabled,capture_request_bodies=excluded.capture_request_bodies,product_analytics_enabled=excluded.product_analytics_enabled,updated_at=now() returning *`,[context.organizationId,input.externalAiEnabled,input.captureRequestBodies,input.productAnalyticsEnabled]);await this.audit(userId,actor,"updated privacy settings","workspace",context.organizationId,input);return mapPrivacy(result.rows[0] as Row);}
 
   async recordProductOutcome(userId:string,actor:string,event:string,detail:Record<string,unknown>){const privacy=await this.getPrivacy(userId);if(!privacy.productAnalyticsEnabled)return{recorded:false};await this.audit(userId,actor,`[product-outcome] ${event}`,"product-outcome",undefined,detail);return{recorded:true};}
-  async listProductOutcomes(userId:string){return (await this.listAudit(userId)).filter((item)=>item.action.startsWith("[product-outcome]"));}
+  async listProductOutcomes(userId:string){return (await this.listAudit(userId, true)).filter((item)=>item.action.startsWith("[product-outcome]"));}
 
   async audit(userId: string, actor: string, action: string, targetType: string, targetId?: string, detail: Record<string, unknown> = {}) {
     const context = await this.context(userId);
@@ -332,10 +332,12 @@ class WorkspaceService {
     } catch (error) { await client.query("rollback"); throw error; } finally { client.release(); }
   }
 
-  async listAudit(userId: string) {
+  async listAudit(userId: string, includeProductOutcomes = false) {
     const context = await this.context(userId);
-    if (!this.pool) return structuredClone(this.memoryAudit.slice(0, 100));
-    return (await this.pool.query(`select * from workspace_audit_log where organization_id=$1 order by created_at desc limit 100`, [context.organizationId])).rows.map(mapAudit);
+    const values = !this.pool
+      ? structuredClone(this.memoryAudit.slice(0, 100))
+      : (await this.pool.query(`select * from workspace_audit_log where organization_id=$1 order by created_at desc limit 100`, [context.organizationId])).rows.map(mapAudit);
+    return includeProductOutcomes ? values : values.filter((item) => !item.action.startsWith("[product-outcome]"));
   }
 
   async listMitigations(userId: string, incidentId: string) {
