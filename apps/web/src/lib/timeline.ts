@@ -89,6 +89,12 @@ export function shiftTimelineWindow(window: TimelineWindow, extent: TimelineWind
   return clampTimelineWindow({ startMs: window.startMs + shift, endMs: window.endMs + shift }, extent);
 }
 
+export function centerTimelineWindowOn(window: TimelineWindow, extent: TimelineWindow, timestamp: string | number): TimelineWindow {
+  const value = typeof timestamp === "number" ? timestamp : Date.parse(timestamp);
+  const span = Math.max(window.endMs - window.startMs, SECOND);
+  return clampTimelineWindow({ startMs: value - span / 2, endMs: value + span / 2 }, extent);
+}
+
 export function timelineTicks(window: TimelineWindow, maximum = 7): number[] {
   const span = Math.max(window.endMs - window.startMs, SECOND);
   const step = TICK_STEPS.find((candidate) => span / candidate <= maximum - 1) ?? TICK_STEPS.at(-1)!;

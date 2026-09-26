@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { IncidentEvent } from "../types";
-import { clusterTimelineEvents, formatElapsed, shiftTimelineWindow, timelineExtent, timelinePosition, timelineTicks, zoomTimelineWindow } from "./timeline";
+import { centerTimelineWindowOn, clusterTimelineEvents, formatElapsed, shiftTimelineWindow, timelineExtent, timelinePosition, timelineTicks, zoomTimelineWindow } from "./timeline";
 
 function event(id: string, timestamp: string, service = "checkout"): IncidentEvent {
   return { id, incidentId: "inc-1", timestamp, service, kind: "metric", title: id, detail: id, impactScore: 0 };
@@ -42,5 +42,12 @@ describe("timeline model", () => {
     expect(timelinePosition(1_000, window, 5)).toBe(5);
     expect(timelinePosition(6_000, window, 5)).toBe(50);
     expect(timelinePosition(11_000, window, 5)).toBe(95);
+  });
+
+  it("centers an older event while preserving and clamping the current span", () => {
+    const extent = { startMs: 0, endMs: 100_000 };
+    const current = { startMs: 70_000, endMs: 90_000 };
+    expect(centerTimelineWindowOn(current, extent, 30_000)).toEqual({ startMs: 20_000, endMs: 40_000 });
+    expect(centerTimelineWindowOn(current, extent, 2_000)).toEqual({ startMs: 0, endMs: 20_000 });
   });
 });
