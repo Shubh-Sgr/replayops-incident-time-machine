@@ -220,7 +220,9 @@ The desktop rail uses broad text labels and line icons with one inverted active 
 
 ### Event Timeline
 
-The signature component maps services to horizontal lanes and evidence to elapsed-time positions. Selection synchronizes an exact evidence inspector and URL anchor. Orange marks the selected observation; arrow keys and explicit previous/next controls provide equivalent operation. On phones, the timeline remains contained while the surrounding workbench becomes a single-column triage and handoff flow.
+The signature component maps services to horizontal lanes and evidence to real elapsed-time positions. A whole-incident density overview preserves context while the orange viewport marks the active time range. Responders can fit, zoom, pan, jump to recent windows, or center the selected event without inflating the chart width. Adaptive time ticks remain legible from seconds through months; collisions become count-bearing clusters, and incidents with many services retain the busiest lanes while grouping the remainder explicitly.
+
+Selection synchronizes the URL, chart marker, and evidence inspector. The ledger follows the active window by default, but responders can switch to all evidence, search exact IDs or content, filter by service/type/state, sort, and paginate. A single persistent inspector carries detail and correction actions so repeated rows remain scan-first. Desktop uses a semantic data table; phones use touch-sized evidence rows and the same filtering model. Arrow keys move across events, bracket keys pan time, and every chart marker exposes a complete text label.
 
 ## Do's and Don'ts
 

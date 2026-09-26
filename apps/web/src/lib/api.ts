@@ -1,10 +1,19 @@
 import { supabase } from "./supabase";
+import { encodeDemoSessionToken } from "./demoSession";
 import type { ActionNotification, AssistantResponse, AuditEntry, DashboardData, EvidenceBundle, HttpReplayExecution, HttpReplaySpec, HypothesisTest, HypothesisTestStatus, Incident, IncidentComment, IncidentDecision, IncidentDiagnosis, IncidentEvent, IncidentPolicy, IncidentPostmortem, IngestionResult, Integration, IntegrationProvider, InvestigationIntelligence, MitigationRequest, PrivacySettings, QueueJob, RecoveryVerification, ReplayConfig, ReplayResult, SearchResult, ServiceDefinition, TeamInvitation, TeamMember, WorkspaceContext, WorkspaceRole } from "../types";
 
 const API_URL = (import.meta.env.VITE_API_URL ?? "http://localhost:8787/api").replace(/\/$/, "");
 
 async function accessToken() {
-  if (localStorage.getItem("replayops-demo-session")) return "demo-session";
+  if (localStorage.getItem("replayops-demo-session")) {
+    try {
+      const identity = JSON.parse(localStorage.getItem("replayops-local-session") ?? "null") as { id?: unknown; email?: unknown } | null;
+      if (identity && typeof identity.id === "string" && typeof identity.email === "string") return encodeDemoSessionToken({ id: identity.id, email: identity.email });
+    } catch {
+      // Older demo sessions did not preserve an identity. The API maps this fallback to the operator persona.
+    }
+    return "demo-session";
+  }
   return (await supabase?.auth.getSession())?.data.session?.access_token;
 }
 

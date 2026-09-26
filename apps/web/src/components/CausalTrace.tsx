@@ -1,8 +1,21 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { ChevronLeft, ChevronRight, Minus, Plus } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
-import type { Incident } from "../types";
+import { ChevronLeft, ChevronRight, Clock3, Focus, Minus, Plus, ScanLine } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { Incident, IncidentEvent } from "../types";
 import { cn } from "../lib/utils";
+import {
+  clampTimelineWindow,
+  clusterTimelineEvents,
+  formatElapsed,
+  shiftTimelineWindow,
+  timelineDensity,
+  timelineDurations,
+  timelineExtent,
+  timelineTicks,
+  windowContains,
+  zoomTimelineWindow,
+  type TimelineWindow
+} from "../lib/timeline";
 import { useTimeZone } from "../providers/TimeZoneProvider";
 
 interface CausalTraceProps {
@@ -10,84 +23,195 @@ interface CausalTraceProps {
   compact?: boolean;
   selectedEventId?: string | null;
   onSelectEvent?: (eventId: string) => void;
+  onWindowChange?: (window: TimelineWindow) => void;
 }
 
-export function CausalTrace({ incident, compact = false, selectedEventId, onSelectEvent }: CausalTraceProps) {
-  const { formatClock, formatDateTime, zoneLabel } = useTimeZone();
-  const [internalId, setInternalId] = useState(incident.events[0]?.id ?? "");
-  const [zoom, setZoom] = useState(1);
+const PRESETS = [
+  { label: "1h", duration: timelineDurations.hour },
+  { label: "6h", duration: 6 * timelineDurations.hour },
+  { label: "24h", duration: timelineDurations.day },
+  { label: "7d", duration: timelineDurations.week }
+];
+
+function markerTone(events: IncidentEvent[]) {
+  if (events.every((event) => event.evidenceState === "excluded")) return "border-muted bg-panel text-muted opacity-55";
+  if (events.some((event) => event.kind === "alert")) return "border-danger bg-danger/15 text-danger";
+  if (events.some((event) => event.kind === "recovery")) return "border-success bg-success/15 text-success";
+  if (events.some((event) => event.kind === "deploy")) return "border-accent bg-accent/15 text-ink";
+  return "border-info bg-panel text-info";
+}
+
+export function CausalTrace({ incident, compact = false, selectedEventId, onSelectEvent, onWindowChange }: CausalTraceProps) {
+  const { mode, formatClock, formatDateTime, zoneLabel } = useTimeZone();
+  const sortedEvents = useMemo(() => [...incident.events].sort((left, right) => Date.parse(left.timestamp) - Date.parse(right.timestamp)), [incident.events]);
+  const extent = useMemo(() => timelineExtent(sortedEvents, incident.startedAt, incident.resolvedAt), [incident.startedAt, incident.resolvedAt, sortedEvents]);
+  const previousExtent = useRef(extent);
+  const [window, setWindow] = useState<TimelineWindow>(extent);
+  const [internalId, setInternalId] = useState(sortedEvents[0]?.id ?? "");
   const activeId = selectedEventId ?? internalId;
-  const selected = Math.max(0, incident.events.findIndex((event) => event.id === activeId));
-  const event = incident.events[selected];
-  const services = useMemo(() => [...new Set(incident.events.map((item) => item.service))], [incident.events]);
-  const timestamps = incident.events.map((item) => Date.parse(item.timestamp));
-  const start = Math.min(...timestamps);
-  const end = Math.max(...timestamps);
-  const span = Math.max(end - start, 1);
+  const selectedIndex = Math.max(0, sortedEvents.findIndex((event) => event.id === activeId));
+  const selectedEvent = sortedEvents[selectedIndex];
+  const span = Math.max(window.endMs - window.startMs, 1);
+  const fullSpan = Math.max(extent.endMs - extent.startMs, 1);
+  const inWindow = useMemo(() => sortedEvents.filter((event) => windowContains(window, event.timestamp)), [sortedEvents, window]);
 
   useEffect(() => {
-    if (!incident.events.some((item) => item.id === activeId)) setInternalId(incident.events[0]?.id ?? "");
-  }, [activeId, incident.events]);
+    const previous = previousExtent.current;
+    const wasFitted = Math.abs(window.startMs - previous.startMs) < 2 && Math.abs(window.endMs - previous.endMs) < 2;
+    setWindow((current) => wasFitted ? extent : clampTimelineWindow(current, extent));
+    previousExtent.current = extent;
+  }, [extent.startMs, extent.endMs]);
+
+  useEffect(() => {
+    if (!sortedEvents.some((event) => event.id === activeId)) setInternalId(sortedEvents[0]?.id ?? "");
+  }, [activeId, sortedEvents]);
+
+  useEffect(() => onWindowChange?.(window), [window.startMs, window.endMs]);
+
+  const serviceCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const event of inWindow) counts.set(event.service, (counts.get(event.service) ?? 0) + 1);
+    return [...counts.entries()].sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]));
+  }, [inWindow]);
+  const laneLimit = compact ? 4 : 8;
+  const hasOverflowLane = serviceCounts.length > laneLimit;
+  const namedServices = serviceCounts.slice(0, hasOverflowLane ? laneLimit - 1 : laneLimit).map(([service]) => service);
+  const lanes = hasOverflowLane ? [...namedServices, "Other services"] : namedServices;
+  const laneFor = (event: IncidentEvent) => namedServices.includes(event.service) ? event.service : "Other services";
+  const clusters = useMemo(() => clusterTimelineEvents(inWindow, window, laneFor, compact ? 36 : 60), [inWindow, window, namedServices.join("|")]);
+  const ticks = useMemo(() => timelineTicks(window, compact ? 4 : 6), [window, compact]);
+  const density = useMemo(() => timelineDensity(sortedEvents, extent), [sortedEvents, extent]);
+  const maximumDensity = Math.max(...density, 1);
+  const selectedOutside = Boolean(selectedEvent && !windowContains(window, selectedEvent.timestamp));
+  const isFitted = Math.abs(window.startMs - extent.startMs) < 2 && Math.abs(window.endMs - extent.endMs) < 2;
+  const xFor = (timestamp: string | number) => {
+    const value = typeof timestamp === "number" ? timestamp : Date.parse(timestamp);
+    return Math.min(100, Math.max(0, ((value - window.startMs) / span) * 100));
+  };
+  const tickFormatter = useMemo(() => {
+    const timeZone = mode === "utc" ? "UTC" : undefined;
+    if (span >= 90 * timelineDurations.day) return new Intl.DateTimeFormat("en", { month: "short", year: "2-digit", timeZone });
+    if (span >= timelineDurations.day) return new Intl.DateTimeFormat("en", { month: "short", day: "numeric", hour: "2-digit", hour12: false, timeZone });
+    return new Intl.DateTimeFormat("en", { hour: "2-digit", minute: "2-digit", second: span <= 15 * timelineDurations.minute ? "2-digit" : undefined, hour12: false, timeZone });
+  }, [mode, span]);
+  const rangeLabel = useMemo(() => {
+    const timeZone = mode === "utc" ? "UTC" : undefined;
+    const date = new Intl.DateTimeFormat("en", { day: "numeric", month: "short", year: "numeric", timeZone });
+    const time = new Intl.DateTimeFormat("en", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false, timeZone });
+    const start = new Date(window.startMs);
+    const end = new Date(window.endMs);
+    const startDate = date.format(start);
+    const endDate = date.format(end);
+    return startDate === endDate ? `${startDate} · ${time.format(start)}–${time.format(end)}` : `${startDate} ${time.format(start)} → ${endDate} ${time.format(end)}`;
+  }, [mode, window.startMs, window.endMs]);
+  const availablePresets = PRESETS.filter((preset) => fullSpan > preset.duration);
 
   const choose = (eventId: string) => {
     setInternalId(eventId);
     onSelectEvent?.(eventId);
   };
-  const move = (amount: number) => {
-    const next = incident.events[Math.min(Math.max(selected + amount, 0), incident.events.length - 1)];
+  const moveEvent = (amount: number) => {
+    const next = sortedEvents[Math.min(Math.max(selectedIndex + amount, 0), sortedEvents.length - 1)];
     if (next) choose(next.id);
   };
-  const xFor = (timestamp: string) => 8 + ((Date.parse(timestamp) - start) / span) * 84;
+  const applyWindow = (next: TimelineWindow) => setWindow(clampTimelineWindow(next, extent));
+  const showLatest = (duration: number) => applyWindow({ startMs: extent.endMs - Math.min(duration, fullSpan), endMs: extent.endMs });
+  const centerSelected = () => {
+    if (!selectedEvent) return;
+    const timestamp = Date.parse(selectedEvent.timestamp);
+    applyWindow({ startMs: timestamp - span / 2, endMs: timestamp + span / 2 });
+  };
+  const moveOverview = (clientX: number, bounds: DOMRect) => {
+    const center = extent.startMs + ((clientX - bounds.left) / bounds.width) * fullSpan;
+    applyWindow({ startMs: center - span / 2, endMs: center + span / 2 });
+  };
 
-  if (!event) {
+  if (!selectedEvent) {
     return <div className="flex min-h-56 items-center justify-center rounded-panel bg-elevated text-sm text-muted">Add or ingest timestamped evidence to build the event timeline.</div>;
   }
 
+  const plotHeight = Math.max(compact ? 132 : 176, lanes.length * 48 + 52);
+  const viewportLeft = ((window.startMs - extent.startMs) / fullSpan) * 100;
+  const viewportWidth = Math.max(1.5, (span / fullSpan) * 100);
+
   return (
-    <div className={cn("instrument-grid overflow-hidden rounded-panel bg-elevated", compact ? "p-4" : "p-5 sm:p-6")} role="region" aria-label={`Event timeline for ${incident.code}`} tabIndex={0} onKeyDown={(keyboardEvent) => {
-      if (keyboardEvent.key === "ArrowLeft") { keyboardEvent.preventDefault(); move(-1); }
-      if (keyboardEvent.key === "ArrowRight") { keyboardEvent.preventDefault(); move(1); }
-    }}>
-      <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <p className="measurement-number text-xs text-muted">{incident.code} · EVENT TIMELINE · {zoneLabel}</p>
-          <p className="mt-1 max-w-2xl text-sm font-medium text-ink">{event?.title}</p>
-          <p className="mt-1 text-xs text-muted">Service lanes organize observations; proximity does not prove causation.</p>
+    <div
+      className={cn("overflow-hidden rounded-panel bg-elevated", compact ? "p-4" : "p-5 sm:p-6")}
+      role="region"
+      aria-label={`Event timeline for ${incident.code}`}
+      tabIndex={0}
+      onKeyDown={(keyboardEvent) => {
+        if (keyboardEvent.key === "ArrowLeft") { keyboardEvent.preventDefault(); moveEvent(-1); }
+        if (keyboardEvent.key === "ArrowRight") { keyboardEvent.preventDefault(); moveEvent(1); }
+        if (keyboardEvent.key === "[") { keyboardEvent.preventDefault(); applyWindow(shiftTimelineWindow(window, extent, -1)); }
+        if (keyboardEvent.key === "]") { keyboardEvent.preventDefault(); applyWindow(shiftTimelineWindow(window, extent, 1)); }
+      }}
+    >
+      <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+        <div className="min-w-0">
+          <p className="measurement-number text-xs text-muted">{incident.code} · {inWindow.length} OF {sortedEvents.length} EVENTS · {zoneLabel}</p>
+          <p className="measurement-number mt-1 text-sm font-semibold text-ink">{rangeLabel}</p>
+          <p className="mt-1 text-xs text-muted">Spacing reflects elapsed time. Clusters combine collisions; proximity still does not prove causation.</p>
         </div>
-        <div className="flex items-center gap-1 rounded-control bg-panel p-1" aria-label="Timeline controls">
-          <button className="control-quiet !min-h-9 !px-2.5" onClick={() => setZoom((value) => Math.max(1, value - 0.5))} disabled={zoom === 1} aria-label="Zoom out"><Minus className="h-4 w-4" /></button>
-          <span className="measurement-number min-w-12 text-center text-xs text-muted">{zoom}×</span>
-          <button className="control-quiet !min-h-9 !px-2.5" onClick={() => setZoom((value) => Math.min(3, value + 0.5))} disabled={zoom === 3} aria-label="Zoom in"><Plus className="h-4 w-4" /></button>
-          <span className="mx-1 h-5 w-px bg-line" />
-          <button className="control-quiet !min-h-9 !px-2.5" onClick={() => move(-1)} disabled={selected === 0} aria-label="Previous event"><ChevronLeft className="h-4 w-4" /></button>
-          <span className="measurement-number min-w-14 text-center text-xs text-muted">{selected + 1}/{incident.events.length}</span>
-          <button className="control-quiet !min-h-9 !px-2.5" onClick={() => move(1)} disabled={selected === incident.events.length - 1} aria-label="Next event"><ChevronRight className="h-4 w-4" /></button>
-        </div>
-      </div>
-
-      <div className="overflow-x-auto pb-3">
-        <div className={cn("relative min-w-[680px] transition-[width] duration-200", compact ? "h-32" : "h-48")} style={{ width: `${zoom * 100}%` }}>
-          {services.map((service, serviceIndex) => {
-            const y = 20 + serviceIndex * ((compact ? 96 : 152) / Math.max(services.length - 1, 1));
-            return <div key={service} className="absolute left-0 right-0" style={{ top: y }}><span className="measurement-number absolute -top-4 left-0 text-xs text-muted">{service}</span><div className="h-px bg-line" /></div>;
-          })}
-          {incident.events.map((item) => {
-            const y = 20 + services.indexOf(item.service) * ((compact ? 96 : 152) / Math.max(services.length - 1, 1));
-            const active = item.id === event?.id;
-            return <button key={item.id} className="group absolute -translate-x-1/2 -translate-y-1/2 rounded-full" style={{ left: `${xFor(item.timestamp)}%`, top: y }} onClick={() => choose(item.id)} aria-label={`${formatDateTime(item.timestamp)} ${item.title}`} aria-pressed={active}>
-              <motion.span className={cn("block rounded-full border-2", active ? "h-5 w-5 border-accent bg-accent/30" : item.evidenceState === "excluded" ? "h-3.5 w-3.5 border-muted bg-panel opacity-45" : "h-3.5 w-3.5 border-info bg-panel group-hover:bg-info/20")} animate={{ scale: active ? 1 : .9, boxShadow: active ? "0 0 0 7px oklch(var(--accent) / 0.12)" : "0 0 0 0 oklch(var(--accent) / 0)" }} transition={{ type: "spring", stiffness: 420, damping: 28 }} />
-              <span className="measurement-number absolute left-1/2 top-4 -translate-x-1/2 whitespace-nowrap text-xs text-faint">{formatClock(item.timestamp)}</span>
-            </button>;
-          })}
-          <motion.div className="pointer-events-none absolute bottom-0 top-0 w-px bg-accent" animate={{ left: `${xFor(event.timestamp)}%` }} transition={{ type: "spring", stiffness: 380, damping: 34 }} />
+        <div className="flex flex-wrap items-center gap-1 rounded-control bg-panel p-1" aria-label="Timeline range controls">
+          <button className="control-quiet !min-h-9 !px-2.5" onClick={() => applyWindow(shiftTimelineWindow(window, extent, -1))} disabled={window.startMs <= extent.startMs} aria-label="Earlier time window"><ChevronLeft className="h-4 w-4" /></button>
+          <button className="control-quiet !min-h-9 !px-2.5" onClick={() => applyWindow(zoomTimelineWindow(window, extent, 2, selectedOutside ? undefined : Date.parse(selectedEvent.timestamp)))} disabled={isFitted} aria-label="Zoom out"><Minus className="h-4 w-4" /></button>
+          <button className="control-quiet !min-h-9 !px-2.5" onClick={() => applyWindow(zoomTimelineWindow(window, extent, 0.5, selectedOutside ? undefined : Date.parse(selectedEvent.timestamp)))} disabled={span <= 1_000} aria-label="Zoom in"><Plus className="h-4 w-4" /></button>
+          <button className={cn("control-quiet !min-h-9 !px-3", isFitted && "bg-elevated text-ink")} onClick={() => setWindow(extent)} aria-pressed={isFitted}><ScanLine className="mr-1.5 inline h-4 w-4" />Fit</button>
+          <button className="control-quiet !min-h-9 !px-2.5" onClick={() => applyWindow(shiftTimelineWindow(window, extent, 1))} disabled={window.endMs >= extent.endMs} aria-label="Later time window"><ChevronRight className="h-4 w-4" /></button>
         </div>
       </div>
 
-      {!compact && <AnimatePresence mode="wait"><motion.div key={event.id} initial={{ opacity: .4, filter: "blur(3px)", y: 4 }} animate={{ opacity: 1, filter: "blur(0px)", y: 0 }} exit={{ opacity: 0, y: -4 }} transition={{ duration: .18 }} className="mt-3 grid gap-3 border-t border-line pt-4 sm:grid-cols-[190px_1fr_120px]">
-        <div><p className="text-xs text-muted">Observed</p><p className="measurement-number mt-1 text-sm">{formatDateTime(event.timestamp)}</p></div>
-        <div><p className="text-xs text-muted">Evidence</p><p className="mt-1 text-sm leading-6 text-ink">{event.detail}</p></div>
-        <div><p className="text-xs text-muted">Provenance</p><p className="mt-1 text-sm font-semibold capitalize">{event.provenance ?? (event.metadata?.synthetic ? "synthetic" : "recorded")}</p></div>
+      <div className="mt-4 flex flex-wrap items-center gap-2">
+        {availablePresets.length ? <><span className="text-xs font-semibold text-muted">Latest</span>{availablePresets.map((preset) => <button key={preset.label} className="min-h-9 rounded-control bg-panel px-3 text-xs font-semibold text-muted transition-colors hover:bg-line/40 hover:text-ink" onClick={() => showLatest(preset.duration)}>{preset.label}</button>)}</> : <span className="text-xs text-muted">Use + to isolate a dense moment; Fit restores the complete incident.</span>}
+        {selectedOutside && <button className="ml-auto inline-flex min-h-9 items-center gap-1.5 rounded-control bg-warning/10 px-3 text-xs font-semibold text-warning" onClick={centerSelected}><Focus className="h-3.5 w-3.5" />Center selected event</button>}
+      </div>
+
+      <div className="mt-4 grid grid-cols-[72px_minmax(0,1fr)] items-center gap-3 sm:grid-cols-[112px_minmax(0,1fr)]">
+        <span className="text-xs font-semibold text-muted">Full incident</span>
+        <button
+          className="relative flex h-10 items-end gap-px overflow-hidden rounded-control bg-panel px-1.5 pb-1 pt-1.5"
+          aria-label="Incident overview. Click to move the visible time window."
+          onClick={(event) => moveOverview(event.clientX, event.currentTarget.getBoundingClientRect())}
+        >
+          {density.map((count, index) => <span key={index} className="min-w-0 flex-1 rounded-[1px] bg-info/45" style={{ height: `${Math.max(8, (count / maximumDensity) * 100)}%` }} />)}
+          <span className="pointer-events-none absolute bottom-0 top-0 rounded-[7px] border border-accent bg-accent/10" style={{ left: `${viewportLeft}%`, width: `${viewportWidth}%` }} />
+        </button>
+      </div>
+
+      <div className="mt-4 overflow-x-auto pb-2">
+        <div className="min-w-[620px]">
+          {lanes.length ? <div className="grid grid-cols-[112px_minmax(0,1fr)] gap-3">
+            <div className="relative" style={{ height: plotHeight }}>
+              {lanes.map((lane, index) => <span key={lane} className="measurement-number absolute right-0 max-w-[106px] truncate pr-2 text-xs text-muted" style={{ top: 22 + index * 48 }}>{lane}</span>)}
+            </div>
+            <div className="instrument-grid relative overflow-hidden rounded-control bg-panel" style={{ height: plotHeight }}>
+              {ticks.map((tick, index) => <div key={tick} className="absolute bottom-0 top-0 border-l border-line/70" style={{ left: `${xFor(tick)}%` }}><span className={cn("measurement-number absolute bottom-2 whitespace-nowrap text-xs text-faint", index === 0 ? "left-1" : index === ticks.length - 1 ? "right-1" : "-translate-x-1/2")}>{tickFormatter.format(new Date(tick))}</span></div>)}
+              {lanes.map((lane, index) => <div key={lane} className="absolute left-0 right-0 h-px bg-line" style={{ top: 28 + index * 48 }} />)}
+              {clusters.map((cluster) => {
+                const laneIndex = lanes.indexOf(cluster.lane);
+                const containsSelected = cluster.events.some((item) => item.id === selectedEvent.id);
+                const representative = containsSelected ? selectedEvent : cluster.events[0];
+                if (!representative) return null;
+                return <button key={cluster.key} className="group absolute -translate-x-1/2 -translate-y-1/2" style={{ left: `${xFor(cluster.timestampMs)}%`, top: 28 + laneIndex * 48 }} onClick={() => choose(representative.id)} aria-label={`${cluster.events.length > 1 ? `${cluster.events.length} events near ` : ""}${formatDateTime(representative.timestamp)}. ${representative.title}`} aria-pressed={containsSelected}>
+                  <motion.span className={cn("measurement-number flex h-7 items-center justify-center border-2 text-xs font-semibold shadow-sm", cluster.events.length > 1 ? "min-w-8 rounded-full px-1.5" : "w-7 rounded-full", markerTone(cluster.events), containsSelected && "border-accent bg-accent text-accent-ink")} animate={{ scale: containsSelected ? 1.08 : 1 }} transition={{ type: "spring", stiffness: 420, damping: 28 }}>{cluster.events.length > 1 ? cluster.events.length : <span className="h-1.5 w-1.5 rounded-full bg-current" />}</motion.span>
+                </button>;
+              })}
+              {!inWindow.length && <div className="absolute inset-0 flex items-center justify-center"><p className="rounded-control bg-elevated px-4 py-3 text-sm text-muted">No evidence in this window. Pan, zoom out, or choose Fit.</p></div>}
+              {!selectedOutside && <motion.div className="pointer-events-none absolute bottom-7 top-0 w-px bg-accent" animate={{ left: `${xFor(selectedEvent.timestamp)}%` }} transition={{ type: "spring", stiffness: 380, damping: 34 }} />}
+            </div>
+          </div> : <div className="flex min-h-40 items-center justify-center rounded-control bg-panel text-sm text-muted">No events are visible in this time window.</div>}
+        </div>
+      </div>
+
+      {hasOverflowLane && <p className="mt-1 text-xs text-muted">Showing the {namedServices.length} busiest service lanes in this window; {serviceCounts.length - namedServices.length} lower-volume services are grouped without dropping their evidence.</p>}
+
+      {!compact && <AnimatePresence mode="wait"><motion.div key={selectedEvent.id} initial={{ opacity: .4, y: 3 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: .18 }} className="mt-4 grid gap-3 border-t border-line pt-4 sm:grid-cols-[180px_minmax(0,1fr)_auto]">
+        <div><p className="text-xs text-muted">Selected · {formatElapsed(incident.startedAt, selectedEvent.timestamp)}</p><p className="measurement-number mt-1 text-sm">{formatDateTime(selectedEvent.timestamp)}</p></div>
+        <div><p className="text-xs text-muted">{selectedEvent.service} · {selectedEvent.kind}</p><p className="mt-1 text-sm font-semibold text-ink">{selectedEvent.title}</p><p className="mt-1 line-clamp-2 text-xs leading-5 text-muted">{selectedEvent.detail}</p></div>
+        <div className="flex items-start gap-2 text-xs font-semibold text-muted"><Clock3 className="mt-0.5 h-3.5 w-3.5" />{formatClock(selectedEvent.timestamp)}</div>
       </motion.div></AnimatePresence>}
+      <p className="sr-only">Use left and right arrows for adjacent events. Use left and right brackets to move the time window.</p>
     </div>
   );
 }

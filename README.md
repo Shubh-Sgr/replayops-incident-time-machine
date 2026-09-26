@@ -8,7 +8,7 @@ Its differentiated workflow is: symptom → evidence → explanation → falsifi
 
 The included workspace is production-configurable and also runs without cloud credentials using a synthetic in-memory organization.
 
-For an end-to-end explanation of the architecture, feature flows, engineering decisions, API routes, database model, and user guide, see [`CODE_WALKTHROUGH.md`](CODE_WALKTHROUGH.md). The current operating model and implementation map are in [`docs/REPLAYOPS_OPERATING_GUIDE.md`](docs/REPLAYOPS_OPERATING_GUIDE.md); the bounded replay/CI contract is in [`docs/HTTP_REPLAY.md`](docs/HTTP_REPLAY.md); and the auditable 40-item delivery ledger is in [`docs/REPLAYOPS_IMPLEMENTATION_CHECKLIST.md`](docs/REPLAYOPS_IMPLEMENTATION_CHECKLIST.md).
+For an end-to-end explanation of the architecture, feature flows, engineering decisions, API routes, database model, and user guide, see [`CODE_WALKTHROUGH.md`](CODE_WALKTHROUGH.md). A focused answer to how OTLP, normalization, incident lifecycle, queueing, hypotheses, historical comparisons, approvals, and bounded HTTP replay work is in [`docs/REPLAYOPS_SYSTEM_WALKTHROUGH.md`](docs/REPLAYOPS_SYSTEM_WALKTHROUGH.md). The current operating model and implementation map are in [`docs/REPLAYOPS_OPERATING_GUIDE.md`](docs/REPLAYOPS_OPERATING_GUIDE.md); the bounded replay/CI contract is in [`docs/HTTP_REPLAY.md`](docs/HTTP_REPLAY.md); and the auditable 40-item delivery ledger is in [`docs/REPLAYOPS_IMPLEMENTATION_CHECKLIST.md`](docs/REPLAYOPS_IMPLEMENTATION_CHECKLIST.md).
 
 ## Architecture
 

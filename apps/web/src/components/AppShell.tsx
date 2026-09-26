@@ -22,6 +22,7 @@ export function AppShell() {
   const { user, signOut } = useAuth();
   const { theme, toggleTheme } = useTheme();
   const notifications = useQuery({ queryKey: ["notifications"], queryFn: api.notifications, refetchInterval: 20_000 });
+  const workspace = useQuery({ queryKey: ["workspace"], queryFn: api.workspace });
   const queryClient=useQueryClient();
   const notificationState=useMutation({mutationFn:({id,input}:{id:string;input:{read?:boolean;resolved?:boolean}})=>api.updateNotification(id,input),onSuccess:()=>void queryClient.invalidateQueries({queryKey:["notifications"]})});
 
@@ -73,7 +74,7 @@ export function AppShell() {
             <CircleUserRound className="h-5 w-5 text-muted" />
             <div className="min-w-0 flex-1">
               <p className="truncate text-sm font-semibold">{user?.name}</p>
-              <p className="truncate text-xs text-muted">{user?.demo ? "Demo responder" : user?.email}</p>
+              <p className="truncate text-xs capitalize text-muted">{user?.demo ? `Demo · ${workspace.data?.role ?? "checking role"}` : `${user?.email} · ${workspace.data?.role ?? "checking role"}`}</p>
             </div>
           </div>
           <button className="control-quiet mt-2 w-full !justify-start !px-2" onClick={() => void signOut()}><LogOut className="mr-2 h-4 w-4" /> Sign out</button>

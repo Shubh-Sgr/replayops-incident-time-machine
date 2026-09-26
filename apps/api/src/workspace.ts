@@ -7,6 +7,19 @@ import type { ActionNotification, AuditEntry, HypothesisTest, HypothesisTestStat
 type Row = Record<string, unknown>;
 type ServiceInput = Pick<ServiceDefinition, "name" | "ownerTeam" | "tier" | "repositoryUrl" | "runbookUrl" | "dependencies">;
 
+export function mitigationReviewPermission(input: { requestedBy: string; actor: string; role: WorkspaceRole; status: "approved" | "rejected"; stale: boolean }) {
+  const self = input.requestedBy.trim().toLowerCase() === input.actor.trim().toLowerCase();
+  if (input.status === "approved") {
+    if (input.role !== "admin") return { allowed:false, action:"", error:"Only a workspace administrator can approve a production mitigation." } as const;
+    if (self) return { allowed:false, action:"", error:"The requester cannot approve their own production mitigation. Sign in as another administrator." } as const;
+    if (input.stale) return { allowed:false, action:"", error:"Evidence changed after this candidate was saved. Recalculate it before approval." } as const;
+    return { allowed:true, action:"approved mitigation", error:null } as const;
+  }
+  if (self && (input.role === "admin" || input.role === "responder")) return { allowed:true, action:"withdrew mitigation request", error:null } as const;
+  if (input.role === "admin") return { allowed:true, action:"rejected mitigation", error:null } as const;
+  return { allowed:false, action:"", error:"Only a workspace administrator can reject another responder’s mitigation request." } as const;
+}
+
 const mapService = (row: Row): ServiceDefinition => ({
   id: String(row.id), name: String(row.name), ownerTeam: String(row.owner_team), tier: row.tier as ServiceDefinition["tier"],
   repositoryUrl: row.repository_url ? String(row.repository_url) : null, runbookUrl: row.runbook_url ? String(row.runbook_url) : null,
@@ -63,7 +76,10 @@ class WorkspaceService {
     { id: "svc-inventory", name: "inventory-api", ownerTeam: "Commerce", tier: "critical", repositoryUrl: null, runbookUrl: null, dependencies: ["catalog-db"], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }
   ];
   private memoryPolicy: IncidentPolicy = { incidentThreshold: 65, groupingWindowMinutes: 120, suppressLowSeverity: true, maintenanceMode: false, updatedAt: new Date().toISOString() };
-  private memoryMembers: TeamMember[] = [{ userId: "00000000-0000-4000-8000-000000000001", email: "operator@replayops.dev", displayName: "Maya Chen", role: "admin", joinedAt: new Date().toISOString() }];
+  private memoryMembers: TeamMember[] = [
+    { userId: "00000000-0000-4000-8000-000000000001", email: "operator@replayops.dev", displayName: "Maya Chen", role: "admin", joinedAt: new Date().toISOString() },
+    { userId: "00000000-0000-4000-8000-000000000002", email: "reviewer@replayops.dev", displayName: "Alex Rivera", role: "admin", joinedAt: new Date().toISOString() }
+  ];
   private memoryInvites: TeamInvitation[] = [];
   private memoryAudit: AuditEntry[] = [];
   private memoryMitigations: MitigationRequest[] = [];
@@ -178,7 +194,7 @@ class WorkspaceService {
   }
 
   async context(userId: string): Promise<WorkspaceContext> {
-    if (!this.pool) return { organizationId: "demo-organization", organizationName: "ReplayOps demonstration", role: "admin" };
+    if (!this.pool) return { organizationId: "demo-organization", organizationName: "ReplayOps demonstration", role: this.memoryMembers.find((item) => item.userId === userId)?.role ?? "responder" };
     const result = await this.pool.query(`select m.organization_id,m.role,o.name from organization_members m join organizations o on o.id=m.organization_id where m.user_id=$1 order by m.created_at desc limit 1`, [userId]);
     const row = result.rows[0] as Row | undefined;
     if (!row) throw new Error("No workspace membership exists for this account.");
@@ -362,18 +378,27 @@ class WorkspaceService {
   }
 
   async reviewMitigation(userId: string, actor: string, requestId: string, status: "approved" | "rejected") {
-    const context = await this.assertRole(userId, ["admin"]);
+    const context = await this.context(userId);
     let request: MitigationRequest | undefined;
     if (!this.pool) {
       request = this.memoryMitigations.find((item) => item.id === requestId);
-      if (request?.requestedBy === actor) throw new Error("A mitigation requester cannot approve their own production action.");
+      if (!request || request.status !== "pending") throw new Error("This review request is unavailable or has already been decided.");
+      const permission = mitigationReviewPermission({ requestedBy:request.requestedBy, actor, role:context.role, status, stale:request.stale });
+      if (!permission.allowed) throw new Error(permission.error);
       if (request) Object.assign(request, { status, reviewedBy: actor, reviewedAt: new Date().toISOString() });
+      await this.audit(userId, actor, permission.action, "mitigation", request.id, { incidentId: request.incidentId });
     } else {
-      const result = await this.pool.query(`update mitigation_requests m set status=$3,reviewed_by=$4,reviewed_at=now() from incidents i where m.id=$2 and m.organization_id=$1 and m.status='pending' and m.requested_by<>$4 and i.id=m.incident_id and i.evidence_revision=m.evidence_version returning m.*,i.evidence_revision as incident_evidence_revision`, [context.organizationId, requestId, status, actor]);
+      const existing = await this.pool.query(`select m.*,i.evidence_revision as incident_evidence_revision from mitigation_requests m join incidents i on i.id=m.incident_id where m.organization_id=$1 and m.id=$2 and m.status='pending'`, [context.organizationId, requestId]);
+      if (!existing.rows[0]) throw new Error("This review request is unavailable or has already been decided.");
+      const current = mapMitigation(existing.rows[0] as Row);
+      const permission = mitigationReviewPermission({ requestedBy:current.requestedBy, actor, role:context.role, status, stale:current.stale });
+      if (!permission.allowed) throw new Error(permission.error);
+      const evidenceGuard = status === "approved" ? "and i.evidence_revision=m.evidence_version" : "";
+      const result = await this.pool.query(`update mitigation_requests m set status=$3,reviewed_by=$4,reviewed_at=now() from incidents i where m.id=$2 and m.organization_id=$1 and m.status='pending' and i.id=m.incident_id ${evidenceGuard} returning m.*,i.evidence_revision as incident_evidence_revision`, [context.organizationId, requestId, status, actor]);
       request = result.rows[0] ? mapMitigation(result.rows[0] as Row) : undefined;
+      if (!request) throw new Error("Evidence changed while this request was being reviewed. Recalculate before approval.");
+      await this.audit(userId, actor, permission.action, "mitigation", request.id, { incidentId: request.incidentId });
     }
-    if (!request) throw new Error("This request is unavailable, already reviewed, or cannot be self-approved.");
-    await this.audit(userId, actor, `${status} mitigation`, "mitigation", request.id, { incidentId: request.incidentId });
     return request;
   }
 

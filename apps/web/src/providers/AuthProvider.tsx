@@ -30,9 +30,20 @@ interface AuthContextValue {
 }
 
 export const TEST_CREDENTIALS = {
+  id: "00000000-0000-4000-8000-000000000001",
   email: "operator@replayops.dev",
-  password: "ReplayOps!2026"
+  password: "ReplayOps!2026",
+  name: "Maya Chen"
 } as const;
+
+export const REVIEWER_CREDENTIALS = {
+  id: "00000000-0000-4000-8000-000000000002",
+  email: "reviewer@replayops.dev",
+  password: "ReplayOps!2026",
+  name: "Alex Rivera"
+} as const;
+
+const DEMO_PERSONAS = [TEST_CREDENTIALS, REVIEWER_CREDENTIALS] as const;
 
 const LOCAL_ACCOUNTS_KEY = "replayops-local-accounts";
 const LOCAL_SESSION_KEY = "replayops-local-session";
@@ -97,7 +108,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const existing = readLocalSession();
     if (existing) return existing;
     return localStorage.getItem(DEMO_SESSION_KEY) === "true"
-      ? { id: "demo-operator", email: TEST_CREDENTIALS.email, name: "Maya Chen", demo: true }
+      ? { id: TEST_CREDENTIALS.id, email: TEST_CREDENTIALS.email, name: TEST_CREDENTIALS.name, demo: true }
       : null;
   });
   const [loading, setLoading] = useState(Boolean(supabase));
@@ -127,8 +138,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     demoAvailable: demoModeEnabled,
     async signIn(email, password) {
       const normalizedEmail = normalizeEmail(email);
-      if (demoModeEnabled && normalizedEmail === TEST_CREDENTIALS.email && password === TEST_CREDENTIALS.password) {
-        persistLocalUser({ id: "demo-operator", email: TEST_CREDENTIALS.email, name: "Maya Chen", demo: true });
+      const persona = DEMO_PERSONAS.find((candidate) => candidate.email === normalizedEmail && candidate.password === password);
+      if (demoModeEnabled && persona) {
+        persistLocalUser({ id: persona.id, email: persona.email, name: persona.name, demo: true });
         return {};
       }
 
@@ -161,7 +173,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       if (!demoModeEnabled) throw new Error("Account creation requires Supabase configuration in this environment.");
       const accounts = readLocalAccounts();
-      if (normalizedEmail === TEST_CREDENTIALS.email || accounts.some((account) => account.email === normalizedEmail)) {
+      if (DEMO_PERSONAS.some((persona) => persona.email === normalizedEmail) || accounts.some((account) => account.email === normalizedEmail)) {
         throw new Error("An account already exists for this email. Sign in instead.");
       }
 
@@ -184,7 +196,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (error) throw new Error(error.message);
     },
     enterDemo() {
-      persistLocalUser({ id: "demo-operator", email: TEST_CREDENTIALS.email, name: "Maya Chen", demo: true });
+      persistLocalUser({ id: TEST_CREDENTIALS.id, email: TEST_CREDENTIALS.email, name: TEST_CREDENTIALS.name, demo: true });
     },
     async signOut() {
       localStorage.removeItem(DEMO_SESSION_KEY);

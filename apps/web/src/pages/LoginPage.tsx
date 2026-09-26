@@ -3,7 +3,7 @@ import { Activity, ArrowRight, CheckCircle2, Github, KeyRound, LoaderCircle, Shi
 import { useState, type FormEvent } from "react";
 import { Navigate, useLocation } from "react-router-dom";
 import { CausalTrace } from "../components/CausalTrace";
-import { TEST_CREDENTIALS, useAuth } from "../providers/AuthProvider";
+import { REVIEWER_CREDENTIALS, TEST_CREDENTIALS, useAuth } from "../providers/AuthProvider";
 import type { Incident } from "../types";
 
 const previewIncident: Incident = {
@@ -93,14 +93,15 @@ export function LoginPage() {
 
           {mode === "login" && demoAvailable && (
             <div className="mt-6 rounded-control bg-elevated p-4">
-              <div className="flex items-start gap-3">
-                <KeyRound className="mt-0.5 h-4 w-4 shrink-0 text-accent" />
-                <div className="min-w-0 flex-1">
-                  <p className="text-sm font-semibold">Test credentials</p>
-                  <p className="measurement-number mt-1 break-all text-xs text-muted">{TEST_CREDENTIALS.email}</p>
-                  <p className="measurement-number mt-1 text-xs text-muted">{TEST_CREDENTIALS.password}</p>
-                </div>
-                <button type="button" className="control-quiet !min-h-9 shrink-0 !px-3" onClick={() => { setEmail(TEST_CREDENTIALS.email); setPassword(TEST_CREDENTIALS.password); setError(""); }}>Fill</button>
+              <div className="flex items-center gap-2"><KeyRound className="h-4 w-4 text-accent" /><p className="text-sm font-semibold">Approval test personas</p></div>
+              <p className="mt-1 text-xs leading-5 text-muted">Request as the operator, then sign out and approve as the independent reviewer.</p>
+              <div className="mt-3 space-y-2">
+                {[{ label:"Operator · requester", credentials:TEST_CREDENTIALS }, { label:"Admin · reviewer", credentials:REVIEWER_CREDENTIALS }].map(({ label, credentials }) => (
+                  <div key={credentials.email} className="flex items-center gap-3 rounded-[8px] bg-panel px-3 py-2.5">
+                    <div className="min-w-0 flex-1"><p className="text-xs font-semibold">{label}</p><p className="measurement-number mt-0.5 truncate text-xs text-muted">{credentials.email} · {credentials.password}</p></div>
+                    <button type="button" className="control-quiet !min-h-8 shrink-0 !px-2.5" onClick={() => { setEmail(credentials.email); setPassword(credentials.password); setError(""); }}>Fill</button>
+                  </div>
+                ))}
               </div>
             </div>
           )}
