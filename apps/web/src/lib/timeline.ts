@@ -156,3 +156,11 @@ export function windowContains(window: TimelineWindow, timestamp: string): boole
   const value = Date.parse(timestamp);
   return Number.isFinite(value) && value >= window.startMs && value <= window.endMs;
 }
+
+export function timelinePosition(timestamp: string | number, window: TimelineWindow, insetPercent = 0): number {
+  const value = typeof timestamp === "number" ? timestamp : Date.parse(timestamp);
+  const span = Math.max(window.endMs - window.startMs, SECOND);
+  const ratio = Math.min(1, Math.max(0, (value - window.startMs) / span));
+  const inset = Math.min(25, Math.max(0, insetPercent));
+  return inset + ratio * (100 - inset * 2);
+}

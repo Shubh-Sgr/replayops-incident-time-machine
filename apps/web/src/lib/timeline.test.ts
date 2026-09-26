@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { IncidentEvent } from "../types";
-import { clusterTimelineEvents, formatElapsed, shiftTimelineWindow, timelineExtent, timelineTicks, zoomTimelineWindow } from "./timeline";
+import { clusterTimelineEvents, formatElapsed, shiftTimelineWindow, timelineExtent, timelinePosition, timelineTicks, zoomTimelineWindow } from "./timeline";
 
 function event(id: string, timestamp: string, service = "checkout"): IncidentEvent {
   return { id, incidentId: "inc-1", timestamp, service, kind: "metric", title: id, detail: id, impactScore: 0 };
@@ -35,5 +35,12 @@ describe("timeline model", () => {
     expect(extent.startMs).toBe(Date.parse("2026-09-20T00:00:00Z"));
     expect(extent.endMs).toBe(Date.parse("2026-09-23T00:00:00Z"));
     expect(formatElapsed(extent.startMs, Date.parse("2026-09-22T06:30:00Z"))).toBe("+2d 6h");
+  });
+
+  it("keeps first and last markers inside the visible plot", () => {
+    const window = { startMs: 1_000, endMs: 11_000 };
+    expect(timelinePosition(1_000, window, 5)).toBe(5);
+    expect(timelinePosition(6_000, window, 5)).toBe(50);
+    expect(timelinePosition(11_000, window, 5)).toBe(95);
   });
 });

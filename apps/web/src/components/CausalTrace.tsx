@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { ChevronLeft, ChevronRight, Clock3, Focus, Minus, Plus, ScanLine } from "lucide-react";
+import { ChevronLeft, ChevronRight, Clock3, Focus, Minus, Plus, ScanLine, X, ZoomIn } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Incident, IncidentEvent } from "../types";
 import { cn } from "../lib/utils";
@@ -11,6 +11,7 @@ import {
   timelineDensity,
   timelineDurations,
   timelineExtent,
+  timelinePosition,
   timelineTicks,
   windowContains,
   zoomTimelineWindow,
@@ -46,8 +47,11 @@ export function CausalTrace({ incident, compact = false, selectedEventId, onSele
   const sortedEvents = useMemo(() => [...incident.events].sort((left, right) => Date.parse(left.timestamp) - Date.parse(right.timestamp)), [incident.events]);
   const extent = useMemo(() => timelineExtent(sortedEvents, incident.startedAt, incident.resolvedAt), [incident.startedAt, incident.resolvedAt, sortedEvents]);
   const previousExtent = useRef(extent);
+  const plotRef = useRef<HTMLDivElement | null>(null);
   const [window, setWindow] = useState<TimelineWindow>(extent);
   const [internalId, setInternalId] = useState(sortedEvents[0]?.id ?? "");
+  const [plotWidth, setPlotWidth] = useState(720);
+  const [clusterEventIds, setClusterEventIds] = useState<string[]>([]);
   const activeId = selectedEventId ?? internalId;
   const selectedIndex = Math.max(0, sortedEvents.findIndex((event) => event.id === activeId));
   const selectedEvent = sortedEvents[selectedIndex];
@@ -68,6 +72,17 @@ export function CausalTrace({ incident, compact = false, selectedEventId, onSele
 
   useEffect(() => onWindowChange?.(window), [window.startMs, window.endMs]);
 
+  useEffect(() => {
+    const element = plotRef.current;
+    if (!element) return;
+    const update = () => setPlotWidth(Math.max(1, element.clientWidth));
+    update();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
   const serviceCounts = useMemo(() => {
     const counts = new Map<string, number>();
     for (const event of inWindow) counts.set(event.service, (counts.get(event.service) ?? 0) + 1);
@@ -78,16 +93,16 @@ export function CausalTrace({ incident, compact = false, selectedEventId, onSele
   const namedServices = serviceCounts.slice(0, hasOverflowLane ? laneLimit - 1 : laneLimit).map(([service]) => service);
   const lanes = hasOverflowLane ? [...namedServices, "Other services"] : namedServices;
   const laneFor = (event: IncidentEvent) => namedServices.includes(event.service) ? event.service : "Other services";
-  const clusters = useMemo(() => clusterTimelineEvents(inWindow, window, laneFor, compact ? 36 : 60), [inWindow, window, namedServices.join("|")]);
-  const ticks = useMemo(() => timelineTicks(window, compact ? 4 : 6), [window, compact]);
+  const clusterBuckets = Math.max(5, Math.floor(plotWidth / (compact ? 42 : 36)));
+  const clusters = useMemo(() => clusterTimelineEvents(inWindow, window, laneFor, clusterBuckets), [inWindow, window, namedServices.join("|"), clusterBuckets]);
+  const tickCount = Math.max(2, Math.min(compact ? 4 : 6, Math.floor(plotWidth / 90)));
+  const ticks = useMemo(() => timelineTicks(window, tickCount), [window, tickCount]);
   const density = useMemo(() => timelineDensity(sortedEvents, extent), [sortedEvents, extent]);
   const maximumDensity = Math.max(...density, 1);
   const selectedOutside = Boolean(selectedEvent && !windowContains(window, selectedEvent.timestamp));
   const isFitted = Math.abs(window.startMs - extent.startMs) < 2 && Math.abs(window.endMs - extent.endMs) < 2;
-  const xFor = (timestamp: string | number) => {
-    const value = typeof timestamp === "number" ? timestamp : Date.parse(timestamp);
-    return Math.min(100, Math.max(0, ((value - window.startMs) / span) * 100));
-  };
+  const plotInsetPercent = Math.min(14, Math.max(2.5, (24 / plotWidth) * 100));
+  const xFor = (timestamp: string | number) => timelinePosition(timestamp, window, plotInsetPercent);
   const tickFormatter = useMemo(() => {
     const timeZone = mode === "utc" ? "UTC" : undefined;
     if (span >= 90 * timelineDurations.day) return new Intl.DateTimeFormat("en", { month: "short", year: "2-digit", timeZone });
@@ -105,8 +120,10 @@ export function CausalTrace({ incident, compact = false, selectedEventId, onSele
     return startDate === endDate ? `${startDate} · ${time.format(start)}–${time.format(end)}` : `${startDate} ${time.format(start)} → ${endDate} ${time.format(end)}`;
   }, [mode, window.startMs, window.endMs]);
   const availablePresets = PRESETS.filter((preset) => fullSpan > preset.duration);
+  const inspectedClusterEvents = clusterEventIds.map((id) => sortedEvents.find((event) => event.id === id)).filter((event): event is IncidentEvent => Boolean(event));
 
-  const choose = (eventId: string) => {
+  const choose = (eventId: string, keepCluster = false) => {
+    if (!keepCluster) setClusterEventIds([]);
     setInternalId(eventId);
     onSelectEvent?.(eventId);
   };
@@ -124,6 +141,24 @@ export function CausalTrace({ incident, compact = false, selectedEventId, onSele
   const moveOverview = (clientX: number, bounds: DOMRect) => {
     const center = extent.startMs + ((clientX - bounds.left) / bounds.width) * fullSpan;
     applyWindow({ startMs: center - span / 2, endMs: center + span / 2 });
+  };
+  const inspectCluster = (events: IncidentEvent[]) => {
+    const first = events[0];
+    if (!first) return;
+    if (events.length === 1) {
+      choose(first.id);
+      return;
+    }
+    setClusterEventIds(events.map((event) => event.id));
+    choose(first.id, true);
+  };
+  const zoomIntoCluster = () => {
+    if (!inspectedClusterEvents.length) return;
+    const timestamps = inspectedClusterEvents.map((event) => Date.parse(event.timestamp));
+    const first = Math.min(...timestamps);
+    const last = Math.max(...timestamps);
+    const padding = Math.max((last - first) * 0.75, 500);
+    applyWindow({ startMs: first - padding, endMs: last + padding });
   };
 
   if (!selectedEvent) {
@@ -151,7 +186,7 @@ export function CausalTrace({ incident, compact = false, selectedEventId, onSele
         <div className="min-w-0">
           <p className="measurement-number text-xs text-muted">{incident.code} · {inWindow.length} OF {sortedEvents.length} EVENTS · {zoneLabel}</p>
           <p className="measurement-number mt-1 text-sm font-semibold text-ink">{rangeLabel}</p>
-          <p className="mt-1 text-xs text-muted">Spacing reflects elapsed time. Clusters combine collisions; proximity still does not prove causation.</p>
+          <p className="mt-1 text-xs text-muted">Every event in this window is represented. Numbered markers contain overlapping observations; proximity does not prove causation.</p>
         </div>
         <div className="flex flex-wrap items-center gap-1 rounded-control bg-panel p-1" aria-label="Timeline range controls">
           <button className="control-quiet !min-h-9 !px-2.5" onClick={() => applyWindow(shiftTimelineWindow(window, extent, -1))} disabled={window.startMs <= extent.startMs} aria-label="Earlier time window"><ChevronLeft className="h-4 w-4" /></button>
@@ -179,13 +214,12 @@ export function CausalTrace({ incident, compact = false, selectedEventId, onSele
         </button>
       </div>
 
-      <div className="mt-4 overflow-x-auto pb-2">
-        <div className="min-w-[620px]">
-          {lanes.length ? <div className="grid grid-cols-[112px_minmax(0,1fr)] gap-3">
+      <div className="mt-4 min-w-0 pb-2">
+          {lanes.length ? <div className="grid min-w-0 grid-cols-[82px_minmax(0,1fr)] gap-2 sm:grid-cols-[112px_minmax(0,1fr)] sm:gap-3">
             <div className="relative" style={{ height: plotHeight }}>
-              {lanes.map((lane, index) => <span key={lane} className="measurement-number absolute right-0 max-w-[106px] truncate pr-2 text-xs text-muted" style={{ top: 22 + index * 48 }}>{lane}</span>)}
+              {lanes.map((lane, index) => <span key={lane} className="measurement-number absolute right-0 max-w-[78px] truncate pr-1 text-xs text-muted sm:max-w-[106px] sm:pr-2" style={{ top: 22 + index * 48 }}>{lane}</span>)}
             </div>
-            <div className="instrument-grid relative overflow-hidden rounded-control bg-panel" style={{ height: plotHeight }}>
+            <div ref={plotRef} className="instrument-grid relative min-w-0 overflow-hidden rounded-control bg-panel" style={{ height: plotHeight }}>
               {ticks.map((tick, index) => <div key={tick} className="absolute bottom-0 top-0 border-l border-line/70" style={{ left: `${xFor(tick)}%` }}><span className={cn("measurement-number absolute bottom-2 whitespace-nowrap text-xs text-faint", index === 0 ? "left-1" : index === ticks.length - 1 ? "right-1" : "-translate-x-1/2")}>{tickFormatter.format(new Date(tick))}</span></div>)}
               {lanes.map((lane, index) => <div key={lane} className="absolute left-0 right-0 h-px bg-line" style={{ top: 28 + index * 48 }} />)}
               {clusters.map((cluster) => {
@@ -193,7 +227,7 @@ export function CausalTrace({ incident, compact = false, selectedEventId, onSele
                 const containsSelected = cluster.events.some((item) => item.id === selectedEvent.id);
                 const representative = containsSelected ? selectedEvent : cluster.events[0];
                 if (!representative) return null;
-                return <button key={cluster.key} className="group absolute -translate-x-1/2 -translate-y-1/2" style={{ left: `${xFor(cluster.timestampMs)}%`, top: 28 + laneIndex * 48 }} onClick={() => choose(representative.id)} aria-label={`${cluster.events.length > 1 ? `${cluster.events.length} events near ` : ""}${formatDateTime(representative.timestamp)}. ${representative.title}`} aria-pressed={containsSelected}>
+                return <button key={cluster.key} className="group absolute flex h-11 w-11 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full" style={{ left: `${xFor(cluster.timestampMs)}%`, top: 28 + laneIndex * 48 }} onClick={() => inspectCluster(cluster.events)} aria-label={`${cluster.events.length > 1 ? `${cluster.events.length} events near ` : ""}${formatDateTime(representative.timestamp)}. ${representative.title}`} aria-pressed={containsSelected}>
                   <motion.span className={cn("measurement-number flex h-7 items-center justify-center border-2 text-xs font-semibold shadow-sm", cluster.events.length > 1 ? "min-w-8 rounded-full px-1.5" : "w-7 rounded-full", markerTone(cluster.events), containsSelected && "border-accent bg-accent text-accent-ink")} animate={{ scale: containsSelected ? 1.08 : 1 }} transition={{ type: "spring", stiffness: 420, damping: 28 }}>{cluster.events.length > 1 ? cluster.events.length : <span className="h-1.5 w-1.5 rounded-full bg-current" />}</motion.span>
                 </button>;
               })}
@@ -201,10 +235,14 @@ export function CausalTrace({ incident, compact = false, selectedEventId, onSele
               {!selectedOutside && <motion.div className="pointer-events-none absolute bottom-7 top-0 w-px bg-accent" animate={{ left: `${xFor(selectedEvent.timestamp)}%` }} transition={{ type: "spring", stiffness: 380, damping: 34 }} />}
             </div>
           </div> : <div className="flex min-h-40 items-center justify-center rounded-control bg-panel text-sm text-muted">No events are visible in this time window.</div>}
-        </div>
       </div>
 
       {hasOverflowLane && <p className="mt-1 text-xs text-muted">Showing the {namedServices.length} busiest service lanes in this window; {serviceCounts.length - namedServices.length} lower-volume services are grouped without dropping their evidence.</p>}
+
+      {inspectedClusterEvents.length > 1 && <div className="mt-4 border-t border-line pt-4" role="region" aria-label="Overlapping timeline events">
+        <div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-sm font-semibold text-ink">{inspectedClusterEvents.length} events share this marker</p><p className="mt-1 text-xs text-muted">Select an event here or zoom into the cluster. The page stays at the timeline.</p></div><div className="flex gap-1"><button className="control-secondary inline-flex !min-h-9 items-center gap-1.5 !px-3" onClick={zoomIntoCluster}><ZoomIn className="h-3.5 w-3.5" />Zoom into cluster</button><button className="control-quiet !min-h-9 !px-2.5" onClick={() => setClusterEventIds([])} aria-label="Close overlapping events"><X className="h-4 w-4" /></button></div></div>
+        <div className="mt-3 max-h-48 divide-y divide-line overflow-y-auto border-y border-line">{inspectedClusterEvents.map((event) => <button key={event.id} className={cn("grid min-h-11 w-full gap-1 px-2 py-2.5 text-left transition-colors hover:bg-panel sm:grid-cols-[110px_120px_minmax(0,1fr)]", event.id === selectedEvent.id && "bg-info/10")} onClick={() => choose(event.id, true)} aria-pressed={event.id === selectedEvent.id}><span className="measurement-number text-xs text-muted">{formatClock(event.timestamp)}</span><span className="measurement-number truncate text-xs text-muted">{event.service}</span><span className="text-sm font-semibold text-ink">{event.title}</span></button>)}</div>
+      </div>}
 
       {!compact && <AnimatePresence mode="wait"><motion.div key={selectedEvent.id} initial={{ opacity: .4, y: 3 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: .18 }} className="mt-4 grid gap-3 border-t border-line pt-4 sm:grid-cols-[180px_minmax(0,1fr)_auto]">
         <div><p className="text-xs text-muted">Selected · {formatElapsed(incident.startedAt, selectedEvent.timestamp)}</p><p className="measurement-number mt-1 text-sm">{formatDateTime(selectedEvent.timestamp)}</p></div>
