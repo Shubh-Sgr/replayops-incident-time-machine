@@ -26,6 +26,36 @@ describe("automated ingestion", () => {
     expect(signals[0]).toMatchObject({ service: "acme/checkout", kind: "alert", severity: "high", impactScore: 76 });
   });
 
+  it("keeps CI success and inactive deployments separate from production health", () => {
+    const workflow = normalizePayload("github", { repository:{ id:7, full_name:"acme/api" }, workflow_run:{ id:9, workflow_id:4, name:"CI", status:"completed", conclusion:"success", head_sha:"abc", head_branch:"main", run_attempt:2, updated_at:"2026-09-20T10:00:00Z" } }, "delivery-ci", "workflow_run")[0]!;
+    const inactive = normalizePayload("github", { repository:{ id:7, full_name:"acme/api" }, deployment:{ id:3, environment:"production", sha:"abc" }, deployment_status:{ state:"inactive", created_at:"2026-09-20T10:01:00Z" } }, "delivery-deploy", "deployment_status")[0]!;
+    expect(workflow.kind).toBe("metric");
+    expect(workflow.metadata).toMatchObject({ eventType:"workflow_run", runId:9, runAttempt:2, productionHealthMeasured:false });
+    expect(inactive.kind).toBe("metric");
+  });
+
+  it("preserves Grafana firing, resolved, and refiring lifecycle observations", () => {
+    const payload = (status:string, startsAt:string, endsAt?:string) => ({ status, alerts:[{ status, fingerprint:"checkout-errors", startsAt, endsAt, labels:{ alertname:"CheckoutErrors", service:"checkout-api", environment:"production" }, annotations:{ summary:"Checkout errors", stateReason:"threshold" }, values:{ A:7.2 } }] });
+    const firing = normalizePayload("generic", payload("firing", "2026-09-20T10:00:00Z"), "delivery-1")[0]!;
+    const resolved = normalizePayload("generic", payload("resolved", "2026-09-20T10:00:00Z", "2026-09-20T10:15:00Z"), "delivery-2")[0]!;
+    const refiring = normalizePayload("generic", payload("firing", "2026-09-20T10:30:00Z"), "delivery-3")[0]!;
+    expect(new Set([firing.externalId,resolved.externalId,refiring.externalId]).size).toBe(3);
+    expect(resolved).toMatchObject({ kind:"recovery", timestamp:"2026-09-20T10:15:00.000Z", environment:"production" });
+    expect(resolved.metadata).toMatchObject({ alertIdentity:"checkout-errors", startsAt:"2026-09-20T10:00:00.000Z", values:{ A:7.2 } });
+  });
+
+  it("does not infer a threshold alert from a zero-valued error gauge", () => {
+    const signal = normalizePayload("otel", { resourceMetrics:[{ resource:{ attributes:[{key:"service.name",value:{stringValue:"checkout-api"}}] }, scopeMetrics:[{ metrics:[{ name:"http.errors", unit:"1", gauge:{ dataPoints:[{ asInt:0, timeUnixNano:"1789898400000000000" }] } }] }] }] }, "delivery-metric")[0]!;
+    expect(signal.kind).toBe("metric");
+    expect(signal.title).toContain("measurement received");
+    expect(signal.metadata).toMatchObject({ metricType:"gauge", value:0, recoveryEligibility:"requires-configured-evaluator" });
+  });
+
+  it("does not turn malformed timestamps into fresh evidence", () => {
+    const signal = normalizePayload("generic", { title:"Bad clock", detail:"invalid timestamp", timestamp:"not-a-date" }, "delivery-bad-time")[0]!;
+    expect(signal.timestamp).toBe("1970-01-01T00:00:00.000Z");
+  });
+
   it("filters OTLP traces to failed or slow spans and preserves trace context", () => {
     const signals = normalizePayload("otel", {
       resourceSpans: [{

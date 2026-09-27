@@ -21,4 +21,24 @@ describe("investigation intelligence",()=>{
     expect(serialized).not.toContain("secret-value");
     expect(serialized).toContain("trace-safe");
   });
+
+  it("rejects unmatched healthy routes and regions as controls",()=>{
+    const incident=structuredClone(seedIncidents[0]!);
+    incident.events=[
+      {id:"fail",incidentId:incident.id,timestamp:"2026-09-20T10:00:00Z",service:"checkout-api",kind:"alert",title:"checkout failed",detail:"failed",impactScore:80,metadata:{signal:"trace",cohortRole:"failing",route:"/checkout",method:"POST",region:"us-east-1",durationMs:900}},
+      {id:"healthy",incidentId:incident.id,timestamp:"2026-09-20T10:00:01Z",service:"checkout-api",kind:"metric",title:"health ok",detail:"healthy",impactScore:5,metadata:{signal:"trace",cohortRole:"healthy",route:"/health",method:"GET",region:"eu-west-1",durationMs:20}}
+    ];
+    const result=buildInvestigationIntelligence(incident,[incident]);
+    expect(result.cohorts.healthy.sampleCount).toBe(0);
+    expect(result.cohorts.limitations.join(" ")).toContain("excluded");
+  });
+
+  it("does not combine unrelated numerator and denominator events",()=>{
+    const incident=structuredClone(seedIncidents[0]!);
+    incident.events=[
+      {...incident.events[0]!,id:"failed",metadata:{failedRequests:10,measurementSeriesId:"errors",measurementScope:"prod",intervalStart:"2026-09-20T10:00:00Z",intervalEnd:"2026-09-20T10:05:00Z"}},
+      {...incident.events[1]!,id:"total",metadata:{totalRequests:100,measurementSeriesId:"requests",measurementScope:"prod",intervalStart:"2026-09-20T10:00:00Z",intervalEnd:"2026-09-20T10:05:00Z"}}
+    ];
+    expect(buildInvestigationIntelligence(incident,[incident]).impact.measured).toBe(false);
+  });
 });

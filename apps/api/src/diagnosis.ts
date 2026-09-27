@@ -9,6 +9,11 @@ const hasCorrelationContext = (event: IncidentEvent) => {
   return keys.some((key) => ["traceid", "spanid", "requestid"].includes(key));
 };
 
+const hasTraceRelationship = (events: IncidentEvent[]) => {
+  const spanIds = new Set(events.map((event) => String(event.metadata?.spanId ?? "")).filter(Boolean));
+  return events.some((event) => Boolean(event.metadata?.traceId && event.metadata?.parentSpanId && spanIds.has(String(event.metadata.parentSpanId))));
+};
+
 function signalDeltas(events: IncidentEvent[], symptom: IncidentEvent): SignalDelta[] {
   const before = events.filter((event) => event.timestamp < symptom.timestamp);
   const failure = events.filter((event) => event.timestamp >= symptom.timestamp);
@@ -125,6 +130,7 @@ export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = [
 
   const topCandidate = sourceCandidates.find((event) => event.id === changeCandidates[0]?.eventId) ?? sourceCandidates[0]!;
   const correlated = events.some(hasCorrelationContext);
+  const linkedTracePath = hasTraceRelationship(events);
   const servicePath = [...new Set(events.map((event) => event.service))];
   const hasRecovery = events.some((event) => event.kind === "recovery");
   const hasChange = events.some((event) => event.kind === "deploy" || event.kind === "dependency");
@@ -146,12 +152,12 @@ export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = [
   const hypotheses: DiagnosticHypothesis[] = [{
     id: `origin-${topCandidate.id}`,
     rank: 1,
-    title: `${topCandidate.service} initiated the recorded propagation`,
-    claim: `“${topCandidate.title}” is the strongest recorded precursor to the first high-impact symptom in ${symptom.service}.`,
+    title: `Inspect the strongest recorded precursor in ${topCandidate.service}`,
+    claim: `“${topCandidate.title}” occurred before the first high-impact symptom in ${symptom.service}; the current evidence does not by itself establish cause.`,
     confidence: Math.min(confidence, clamp(changeCandidates[0]?.score ?? confidence, 20, 94)),
     supportingEvidence: [
       `${topCandidate.title} was recorded ${evidenceSpan ? `${Math.max(1, Math.round(evidenceSpan / 60))}m before` : "at"} the first high-impact symptom.`,
-      `A high-severity downstream observation was then recorded in ${peak.service}.`
+      `A high-severity observation was later recorded in ${peak.service}.`
     ],
     conflictingEvidence: correlated
       ? ["Correlation IDs exist, but the relevant request path still needs to be inspected before assigning cause."]
@@ -160,14 +166,14 @@ export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = [
     ...hypothesisOutcome(`origin-${topCandidate.id}`, tests)
   }];
 
-  if (amplificationEvent && servicePath.length > 1) {
+  if (amplificationEvent && servicePath.length > 1 && linkedTracePath) {
     hypotheses.push({
       id: `amplification-${amplificationEvent.id}`,
       rank: 2,
       title: "A feedback loop amplified a smaller upstream fault",
       claim: `The recorded ${amplificationEvent.kind} “${amplificationEvent.title}” may explain why impact spread across ${servicePath.length} services.`,
       confidence: clamp(confidence - 9, 22, 86),
-      supportingEvidence: [`The service path expanded ${servicePath.join(" → ")}.`, amplificationEvent.detail],
+      supportingEvidence: [`Retained parent/child spans link ${servicePath.join(" → ")}.`, amplificationEvent.detail],
       conflictingEvidence: ["The current evidence does not include a healthy control cohort with the same upstream condition."],
       nextTest: "Compare request volume and retry count for affected versus successful requests, then verify whether amplification begins after the upstream latency shift.",
       safeAction: "Apply a bounded retry or concurrency ceiling and watch whether downstream pressure falls without increasing failed requests.",
@@ -175,14 +181,14 @@ export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = [
     });
   }
 
-  if (servicePath.length > 1) {
+  if (servicePath.length > 1 && linkedTracePath) {
     hypotheses.push({
       id: `downstream-${symptom.id}`,
       rank: hypotheses.length + 1,
       title: `${symptom.service} may be the first visible victim, not the origin`,
       claim: `The first high-impact alert occurred in ${symptom.service}, but earlier evidence exists in ${topCandidate.service}.`,
       confidence: clamp(confidence - 18, 18, 72),
-      supportingEvidence: [`The observed path crosses ${servicePath.length} services.`, `The peak appeared in ${peak.service}, not necessarily where propagation began.`],
+      supportingEvidence: [`Retained parent/child spans cross ${servicePath.length} services.`, `The peak appeared in ${peak.service}, not necessarily where the failing request began.`],
       conflictingEvidence: ["Service-level timestamps can be skewed, and missing telemetry may reorder the apparent path."],
       nextTest: `Inspect one slow exemplar trace from ${symptom.service} and one healthy trace, then compare their first divergent span.`,
       safeAction: "Preserve exemplars and logs before changing the downstream service; avoid treating the loudest alert as root cause.",

@@ -16,15 +16,17 @@ const numberValue = (value: unknown, fallback = 0) => {
   return Number.isFinite(parsed) ? parsed : fallback;
 };
 const boundedImpact = (value: unknown, fallback = 50) => Math.max(0, Math.min(100, Math.round(numberValue(value, fallback))));
+const UNKNOWN_TIME = "1970-01-01T00:00:00.000Z";
 const isoTime = (value: unknown) => {
-  const date = value ? new Date(String(value)) : new Date();
-  return Number.isNaN(date.getTime()) ? new Date().toISOString() : date.toISOString();
+  if (value === undefined || value === null || value === "") return UNKNOWN_TIME;
+  const date = new Date(String(value));
+  return Number.isNaN(date.getTime()) ? UNKNOWN_TIME : date.toISOString();
 };
 const nanoTime = (value: unknown) => {
   try {
     return new Date(Number(BigInt(String(value)) / 1_000_000n)).toISOString();
   } catch {
-    return new Date().toISOString();
+    return UNKNOWN_TIME;
   }
 };
 const severityForImpact = (impact: number): Severity => impact >= 88 ? "critical" : impact >= 70 ? "high" : impact >= 45 ? "medium" : "low";
@@ -90,6 +92,7 @@ function normalizeGitHub(payload: JsonRecord, eventName: string, deliveryId: str
   const repository = object(payload.repository);
   const repositoryName = textValue(repository.full_name, textValue(repository.name, "github-repository"));
   const repositoryUrl = textValue(repository.html_url);
+  const repositoryId = textValue(repository.node_id, String(repository.id ?? ""));
   const sender = textValue(object(payload.sender).login, "GitHub");
 
   if (eventName === "deployment") {
@@ -102,7 +105,7 @@ function normalizeGitHub(payload: JsonRecord, eventName: string, deliveryId: str
       detail: `${sender} deployed ${ref} to ${environment}. This change is buffered as precursor evidence until an incident matches it.`,
       impactScore: 24, sourceUrl: repositoryUrl, environment,
       correlationKey: textValue(deployment.task, `${repositoryName}:${environment}`),
-      metadata: { provider: "github", ref, sha: deployment.sha, creator: sender }
+      metadata: { provider: "github", eventType: "deployment", repositoryId, repository: repositoryName, deploymentId: deployment.id, deploymentEnvironment: environment, ref, sha: deployment.sha, creator: sender, sourceUrl: repositoryUrl }
     })];
   }
 
@@ -110,7 +113,7 @@ function normalizeGitHub(payload: JsonRecord, eventName: string, deliveryId: str
     const deployment = object(payload.deployment);
     const deploymentStatus = object(payload.deployment_status);
     const state = textValue(deploymentStatus.state, "unknown").toLowerCase();
-    const failed = ["failure", "error", "inactive"].includes(state);
+    const failed = ["failure", "error"].includes(state);
     const successful = state === "success";
     const environment = textValue(deployment.environment, textValue(deploymentStatus.environment, "production"));
     const environmentUrl = textValue(deploymentStatus.environment_url, textValue(deploymentStatus.target_url, repositoryUrl));
@@ -122,23 +125,23 @@ function normalizeGitHub(payload: JsonRecord, eventName: string, deliveryId: str
       impactScore: failed ? 78 : successful ? 28 : 44,
       severity: failed ? "high" : "low", sourceUrl: environmentUrl, environment,
       correlationKey: `${repositoryName}:${environment}`,
-      metadata: { provider: "github", state, sha: deployment.sha, creator: sender }
+      metadata: { provider: "github", eventType: "deployment_status", repositoryId, repository: repositoryName, deploymentId: deployment.id, deploymentEnvironment: environment, state, sha: deployment.sha, creator: sender, sourceUrl: environmentUrl, productionHealthMeasured: false }
     })];
   }
 
   if (eventName === "workflow_run") {
     const workflow = object(payload.workflow_run);
     const conclusion = textValue(workflow.conclusion, textValue(workflow.status, "unknown")).toLowerCase();
-    const failed = ["failure", "timed_out", "cancelled", "action_required"].includes(conclusion);
+    const failed = ["failure", "timed_out", "action_required"].includes(conclusion);
     return [normalized({
       externalId: `${deliveryId}:workflow`, timestamp: isoTime(workflow.updated_at ?? workflow.created_at), service: repositoryName,
-      kind: failed ? "alert" : "deploy",
+      kind: failed ? "alert" : "metric",
       title: `${textValue(workflow.name, "Deployment workflow")} ${conclusion}`,
       detail: `${sender}'s ${textValue(workflow.event, "workflow")} run on ${textValue(workflow.head_branch, "unknown branch")} concluded ${conclusion}.`,
       impactScore: failed ? 76 : 26, severity: failed ? "high" : "low",
       sourceUrl: textValue(workflow.html_url, repositoryUrl),
       correlationKey: `${repositoryName}:${textValue(workflow.head_sha, textValue(workflow.id))}`,
-      metadata: { provider: "github", conclusion, sha: workflow.head_sha, runNumber: workflow.run_number }
+      metadata: { provider: "github", eventType: "workflow_run", repositoryId, repository: repositoryName, workflowId: workflow.workflow_id, workflow: workflow.name, workflowName: workflow.name, runId: workflow.id, runNumber: workflow.run_number, attempt: workflow.run_attempt ?? 1, runAttempt: workflow.run_attempt ?? 1, status: workflow.status, conclusion, sha: workflow.head_sha, branch: workflow.head_branch, sourceUrl: workflow.html_url, ciOnly: true, productionHealthMeasured: false }
     })];
   }
 
@@ -146,12 +149,12 @@ function normalizeGitHub(payload: JsonRecord, eventName: string, deliveryId: str
     const headCommit = object(payload.head_commit);
     const ref = textValue(payload.ref, "unknown ref");
     return [normalized({
-      externalId: `${deliveryId}:push`, timestamp: isoTime(headCommit.timestamp), service: repositoryName, kind: "deploy",
+      externalId: `${deliveryId}:push`, timestamp: isoTime(headCommit.timestamp), service: repositoryName, kind: "metric",
       title: `Code pushed to ${ref.replace("refs/heads/", "")}`,
       detail: textValue(headCommit.message, `${sender} pushed ${array(payload.commits).length} commit(s).`),
       impactScore: 18, sourceUrl: textValue(headCommit.url, repositoryUrl),
       correlationKey: `${repositoryName}:${textValue(payload.after, ref)}`,
-      metadata: { provider: "github", ref, sha: payload.after, pusher: sender }
+      metadata: { provider: "github", eventType: "push", repositoryId, repository: repositoryName, ref, branch: ref.replace("refs/heads/", ""), sha: payload.after, beforeSha: payload.before, pusher: sender, sourceUrl: textValue(headCommit.url, repositoryUrl), productionHealthMeasured: false }
     })];
   }
 
@@ -186,7 +189,7 @@ function normalizeOtelTraces(payload: JsonRecord, deliveryId: string): Normalize
           kind: failed ? "alert" : "metric", title: `${failed ? "Failed" : slow ? "Slow" : "Healthy sampled"} span: ${textValue(span.name, "unnamed operation")}`,
           detail: `${durationMs}ms span${httpStatus ? ` returned HTTP ${httpStatus}` : ""}${object(span.status).message ? ` — ${String(object(span.status).message)}` : ""}.`,
           impactScore: healthySample ? 8 : impact, severity: healthySample ? "low" : undefined, traceId, correlationKey: traceId || `${service}:${spanId}`, environment,
-          metadata: { provider: "opentelemetry", signal: "trace", spanId, durationMs, httpStatus, route: spanAttributes["http.route"] ?? spanAttributes["url.path"] ?? span.name, release: resourceAttributes["service.version"], region: resourceAttributes["cloud.region"], cohortRole: healthySample ? "healthy" : failed ? "failing" : "slow", sampleRate: healthySample ? 0.05 : 1, attributes: spanAttributes }
+          metadata: { provider: "opentelemetry", signal: "trace", traceCompleteness: "retained-span-only", traceId, spanId, parentSpanId: textValue(span.parentSpanId), spanKind: span.kind, operation: span.name, method: spanAttributes["http.request.method"] ?? spanAttributes["http.method"], durationMs, httpStatus, route: spanAttributes["http.route"] ?? spanAttributes["url.path"] ?? span.name, release: resourceAttributes["service.version"], region: resourceAttributes["cloud.region"], environment, scopeName: object(scopeSpanValue).scope ? object(object(scopeSpanValue).scope).name : undefined, cohortRole: healthySample ? "healthy" : failed ? "failing" : "slow", sampleRate: healthySample ? 0.05 : 1, attributes: spanAttributes }
         }));
       }
     }
@@ -236,21 +239,26 @@ function normalizeOtelMetrics(payload: JsonRecord, deliveryId: string): Normaliz
       for (const metricValue of array(object(scopeMetricValue).metrics)) {
         const metric = object(metricValue);
         const name = textValue(metric.name, "unnamed.metric");
-        const metricName = name.toLowerCase();
-        if (!/(error|failure|latency|duration|timeout|retry|saturation)/.test(metricName)) continue;
+        const metricType = metric.gauge ? "gauge" : metric.sum ? "sum" : metric.histogram ? "histogram" : metric.exponentialHistogram ? "exponential_histogram" : "unsupported";
         const data = object(metric.gauge ?? metric.sum ?? metric.histogram ?? metric.exponentialHistogram);
         for (const [index, pointValue] of array(data.dataPoints).entries()) {
           const point = object(pointValue);
-          const value = numberValue(point.asDouble ?? point.asInt ?? point.sum ?? point.count);
+          const rawValue = point.asDouble ?? point.asInt ?? point.sum ?? point.count;
+          const parsedValue = typeof rawValue === "number" ? rawValue : Number(rawValue);
+          const numericValid = rawValue !== undefined && rawValue !== null && Number.isFinite(parsedValue);
+          const value = numericValid ? parsedValue : null;
           const pointAttributes = attributes(point.attributes);
-          const impact = /(error|failure|timeout)/.test(metricName) ? 68 : /(latency|duration|saturation)/.test(metricName) ? 58 : 48;
+          const impact = 28;
           const timestamp = nanoTime(point.timeUnixNano ?? point.startTimeUnixNano);
+          const intervalStart = nanoTime(point.startTimeUnixNano);
+          const unit = textValue(metric.unit);
+          const aggregationTemporality = data.aggregationTemporality ?? null;
           signals.push(normalized({
             externalId: `${deliveryId}:metric:${name}:${index}:${String(point.timeUnixNano ?? "now")}`, timestamp, service,
-            kind: impact >= 65 ? "alert" : "metric", title: `${name} crossed the ingestion filter`,
-            detail: `${name} reported ${value}${textValue(metric.unit) ? ` ${textValue(metric.unit)}` : ""}.`,
+            kind: "metric", title: `${name} measurement received`,
+            detail: numericValid ? `${name} reported ${value}${unit ? ` ${unit}` : ""}. No threshold conclusion was inferred.` : `${name} contained no valid numeric measurement.`,
             impactScore: impact, correlationKey: `${service}:${Math.floor(new Date(timestamp).getTime() / 300_000)}`, environment,
-            metadata: { provider: "opentelemetry", signal: "metric", metric: name, value, unit: metric.unit, attributes: pointAttributes }
+            metadata: { provider: "opentelemetry", signal: "metric", metric: name, metricType, value, numericValid, unit, aggregationTemporality, isMonotonic: data.isMonotonic ?? null, intervalStart, intervalEnd: timestamp, resourceDimensions: resourceAttributes, attributes: pointAttributes, recoveryEligibility: metricType === "gauge" || metricType === "sum" ? "requires-configured-evaluator" : "unsupported-aggregation" }
           }));
         }
       }
@@ -284,14 +292,20 @@ function normalizeGeneric(payload: JsonRecord, deliveryId: string): NormalizedSi
       const item = object(alert);
       const labels = object(item.labels);
       const annotations = object(item.annotations);
-      const status = textValue(payload.status, textValue(item.status, "firing"));
+      const status = textValue(item.status, textValue(payload.status, "firing")).toLowerCase();
+      const fingerprint = textValue(item.fingerprint, `alert:${index}`);
+      const startsAt = isoTime(item.startsAt);
+      const endsAt = isoTime(item.endsAt);
+      const observedAt = status === "resolved" && endsAt !== UNKNOWN_TIME ? endsAt : startsAt;
+      const environment = textValue(labels.environment, textValue(labels.env, textValue(labels.deployment_environment, "Unknown")));
       return [normalized({
-        externalId: textValue(item.fingerprint, `${deliveryId}:alert:${index}`), timestamp: isoTime(item.startsAt ?? item.endsAt),
+        externalId: `${deliveryId}:grafana:${fingerprint}:${status}:${observedAt}`, timestamp: observedAt,
         service: textValue(labels.service, textValue(labels.alertname, "grafana-alert")), kind: status === "resolved" ? "recovery" : "alert",
         title: textValue(annotations.summary, textValue(labels.alertname, "Grafana alert")),
         detail: textValue(annotations.description, textValue(payload.title, `Alert status: ${status}`)),
-        impactScore: status === "resolved" ? 20 : 78, correlationKey: textValue(item.fingerprint),
-        sourceUrl: textValue(item.generatorURL, textValue(payload.externalURL)), metadata: { provider: "grafana", labels }
+        impactScore: status === "resolved" ? 20 : 78, correlationKey: fingerprint,
+        sourceUrl: textValue(item.generatorURL, textValue(payload.externalURL)), environment,
+        metadata: { provider: "grafana", signal: "alert-lifecycle", alertIdentity: fingerprint, occurrenceIdentity: `${fingerprint}:${status}:${observedAt}`, status, startsAt, endsAt, timestampValid: observedAt !== UNKNOWN_TIME, environment, labels, values: item.values ?? payload.values ?? null, ruleUrl: item.generatorURL ?? null, ruleReference: labels.alertname ?? null, stateReason: annotations.stateReason ?? annotations.reason ?? item.valueString ?? null, measurementProvenance: "grafana-webhook" }
       })];
     });
   }

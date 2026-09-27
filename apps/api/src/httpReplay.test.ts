@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createServer } from "node:http";
 import { config } from "./config.js";
 import { httpReplayService } from "./httpReplay.js";
 import type { HttpReplaySpec } from "./types.js";
@@ -26,5 +27,25 @@ describe("bounded HTTP replay",()=>{
     const result=await httpReplayService.execute("demo-operator",spec);
     expect(result.status).toBe("unsupported");
     expect(result.limitation).toContain("loopback replay target");
+  });
+
+  it("executes against a real loopback candidate and preserves assertion output",async()=>{
+    const server=createServer((request,response)=>{
+      if(request.headers["x-replayops-version"]==="fixed-sha"){
+        response.writeHead(200,{"content-type":"application/json"});response.end('{"status":"confirmed"}');return;
+      }
+      response.writeHead(500,{"content-type":"application/json"});response.end('{"error":"reservation lost"}');
+    });
+    await new Promise<void>((resolve,reject)=>{server.once("error",reject);server.listen(0,"127.0.0.1",()=>resolve());});
+    try{
+      const address=server.address();if(!address||typeof address==="string")throw new Error("Loopback fixture did not expose a port.");
+      config.replayTargetBaseUrl=`http://127.0.0.1:${address.port}`;
+      const oldRun=await httpReplayService.execute("demo-operator",{...spec,applicationVersion:"old-sha"});
+      const fixedRun=await httpReplayService.execute("demo-operator",{...spec,applicationVersion:"fixed-sha"});
+      expect(oldRun.status).toBe("failed");
+      expect(oldRun.responseStatus).toBe(500);
+      expect(fixedRun.status).toBe("passed");
+      expect(fixedRun.assertionResults.every((item)=>item.passed)).toBe(true);
+    }finally{await new Promise<void>((resolve,reject)=>server.close((error)=>error?reject(error):resolve()));}
   });
 });

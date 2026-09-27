@@ -1,6 +1,6 @@
 import { supabase } from "./supabase";
 import { encodeDemoSessionToken } from "./demoSession";
-import type { ActionNotification, AssistantResponse, AuditEntry, DashboardData, EvidenceBundle, HttpReplayExecution, HttpReplaySpec, HypothesisTest, HypothesisTestStatus, Incident, IncidentComment, IncidentDecision, IncidentDiagnosis, IncidentEvent, IncidentPolicy, IncidentPostmortem, IngestionResult, Integration, IntegrationProvider, InvestigationIntelligence, MitigationRequest, PrivacySettings, QueueJob, RecoveryVerification, ReplayConfig, ReplayResult, SearchResult, ServiceDefinition, TeamInvitation, TeamMember, WorkspaceContext, WorkspaceRole } from "../types";
+import type { ActionNotification, AssistantResponse, AuditEntry, CaseworkSnapshot, ChangeProposal, DashboardData, EvidenceBundle, HttpReplayExecution, HttpReplaySpec, HypothesisTest, HypothesisTestStatus, Incident, IncidentComment, IncidentDecision, IncidentDiagnosis, IncidentEvent, IncidentPolicy, IncidentPostmortem, IngestionResult, Integration, IntegrationProvider, InvestigationCheck, InvestigationCheckStatus, InvestigationIntelligence, MitigationRequest, PrivacySettings, ProposalReview, QueueJob, RecoveryCriterion, RecoveryVerification, ReplayConfig, ReplayResult, SearchResult, ServiceDefinition, TeamInvitation, TeamMember, TypedMeasurement, ValidationArtifact, WorkspaceContext, WorkspaceRole } from "../types";
 
 const API_URL = (import.meta.env.VITE_API_URL ?? "http://localhost:8787/api").replace(/\/$/, "");
 
@@ -41,6 +41,17 @@ export const api = {
   incident: (id: string) => request<Incident>(`/incidents/${id}`),
   diagnosis: (id: string) => request<IncidentDiagnosis>(`/incidents/${id}/diagnosis`),
   intelligence: (id: string) => request<InvestigationIntelligence>(`/incidents/${id}/intelligence`),
+  casework:(id:string)=>request<CaseworkSnapshot>(`/incidents/${id}/casework`),
+  acknowledgeEvidence:(id:string)=>request<{evidenceRevision:string;reviewedAt:string}>(`/incidents/${id}/evidence-review`,{method:"POST"}),
+  createCheck:(id:string,input:Omit<InvestigationCheck,"id"|"incidentId"|"result"|"status"|"evidenceRevision"|"conclusionState"|"createdAt"|"updatedAt">)=>request<InvestigationCheck>(`/incidents/${id}/checks`,{method:"POST",body:JSON.stringify(input)}),
+  updateCheck:(incidentId:string,checkId:string,input:{status:InvestigationCheckStatus;result:string;evidenceIds:string[]})=>request<InvestigationCheck>(`/incidents/${incidentId}/checks/${checkId}`,{method:"PATCH",body:JSON.stringify(input)}),
+  createProposal:(id:string,input:{title:string;change:string;rollbackPlan:string;target:Record<string,unknown>})=>request<ChangeProposal>(`/incidents/${id}/proposals`,{method:"POST",body:JSON.stringify(input)}),
+  addValidation:(id:string,input:{proposalId:string;kind:ValidationArtifact["kind"];status:ValidationArtifact["status"];summary:string;provenance:Record<string,unknown>})=>request<ValidationArtifact>(`/incidents/${id}/validations`,{method:"POST",body:JSON.stringify(input)}),
+  requestProposalReview:(incidentId:string,proposalId:string)=>request<ProposalReview>(`/incidents/${incidentId}/proposals/${proposalId}/review-request`,{method:"POST"}),
+  reviewProposal:(incidentId:string,reviewId:string,input:{status:"approved"|"rejected";reason:string})=>request<ProposalReview>(`/incidents/${incidentId}/proposal-reviews/${reviewId}`,{method:"PATCH",body:JSON.stringify(input)}),
+  createRecoveryCriterion:(id:string,input:Omit<RecoveryCriterion,"id"|"incidentId"|"version"|"createdAt">)=>request<RecoveryCriterion>(`/incidents/${id}/recovery-criteria`,{method:"POST",body:JSON.stringify(input)}),
+  addMeasurement:(id:string,input:Omit<TypedMeasurement,"id"|"incidentId"|"createdAt">)=>request<TypedMeasurement>(`/incidents/${id}/measurements`,{method:"POST",body:JSON.stringify(input)}),
+  transitionIncident:(id:string,input:{action:"start_monitoring"|"resolve"|"reopen";reason:string;expectedEvidenceRevision:string})=>request<Incident>(`/incidents/${id}/lifecycle`,{method:"POST",body:JSON.stringify(input)}),
   evidenceBundle: (id: string) => request<EvidenceBundle>(`/incidents/${id}/evidence-bundle`, { method: "POST" }),
   createIncident: (incident: Omit<Incident, "id" | "code" | "createdAt" | "updatedAt" | "events">) => request<Incident>("/incidents", { method: "POST", body: JSON.stringify(incident) }),
   updateIncident: (id: string, incident: Partial<Incident>) => request<Incident>(`/incidents/${id}`, { method: "PATCH", body: JSON.stringify(incident) }),

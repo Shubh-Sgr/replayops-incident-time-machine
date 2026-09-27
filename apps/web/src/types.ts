@@ -240,6 +240,17 @@ export interface IncidentPostmortem { incidentId: string; summary: string; rootC
 export interface IncidentComment { id:string; incidentId:string; actor:string; body:string; eventId?:string|null; createdAt:string }
 export interface ActionNotification { id: string; kind: "approval" | "ingestion" | "hypothesis"; title: string; detail: string; incidentId?: string; href: string; createdAt: string; read: boolean; resolved: boolean; urgency: "normal" | "urgent"; reason: string; owner?: string }
 
+export type InvestigationCheckStatus = "planned" | "running" | "supported" | "disproved" | "inconclusive";
+export interface InvestigationCheck { id:string; incidentId:string; templateId:string; title:string; question:string; method:string; expectedSignal:string; conditions:string; result:string; status:InvestigationCheckStatus; assignee:string; evidenceIds:string[]; evidenceRevision:string; conclusionState:"current"|"needs_recheck"; createdAt:string; updatedAt:string }
+export interface SuggestedCheck { id:string; title:string; question:string; method:string; expectedSignal:string; applicable:boolean; blockedReason:string|null }
+export interface ChangeProposal { id:string; incidentId:string; version:number; supersedesId:string|null; title:string; change:string; rollbackPlan:string; target:Record<string,unknown>; evidenceRevision:string; createdBy:string; createdAt:string }
+export interface ValidationArtifact { id:string; incidentId:string; proposalId:string; proposalVersion:number; kind:"ci"|"manual"|"isolated_http"; status:"passed"|"failed"|"unsupported"; summary:string; provenance:Record<string,unknown>; evidenceRevision:string; createdBy:string; createdAt:string }
+export interface ProposalReview { id:string; incidentId:string; proposalId:string; proposalVersion:number; requestedBy:string; reviewedBy:string|null; status:"pending"|"approved"|"rejected"; reason:string; evidenceRevision:string; createdAt:string; reviewedAt:string|null }
+export interface RecoveryCriterion { id:string; incidentId:string; version:number; kind:"runtime"|"delivery"; name:string; source:string; query:string; unit:string; comparison:"lte"|"gte"; targetValue:number; minConsecutiveWindows:number; maxAgeMinutes:number; observationMinutes:number; deliveryIdentity:Record<string,unknown>|null; createdAt:string }
+export interface TypedMeasurement { id:string; incidentId:string; criterionId:string; value:number|null; unit:string; source:string; query:string; windowStartedAt:string; windowEndedAt:string; observedAt:string; state:"valid"|"missing"|"invalid"; note:string; createdAt:string }
+export interface RecoveryEvaluation { state:"verified"|"failed"|"insufficient"|"stale"; reason:string; criterionVersion:number|null; evaluatedAt:string; supportingMeasurementIds:string[] }
+export interface CaseworkSnapshot { caseKind:"delivery"|"runtime"|"uncertain"; checks:InvestigationCheck[]; proposals:ChangeProposal[]; validations:ValidationArtifact[]; reviews:ProposalReview[]; criteria:RecoveryCriterion[]; measurements:TypedMeasurement[]; recovery:RecoveryEvaluation; evidenceReview:{reviewedRevision:string|null;currentRevision:string;changed:boolean;affectedCheckIds:string[]}; suggestedChecks:SuggestedCheck[] }
+
 export interface InvestigationIntelligence {
   generatedAt: string;
   evidenceRevision: string;

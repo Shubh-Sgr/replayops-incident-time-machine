@@ -1,5 +1,7 @@
 # ReplayOps operating guide and code map
 
+> **2026-09-27:** The final flow specification supersedes the legacy scenario-estimator workflow in this guide. Use [`REPLAYOPS_FINAL_FLOW_SPEC_2026-09-27.md`](REPLAYOPS_FINAL_FLOW_SPEC_2026-09-27.md) for current behavior.
+
 This guide describes the current product after the 40-item production-debugging redesign. It deliberately separates what ReplayOps observes, infers, estimates, executes, and verifies.
 
 ## The responder workflow

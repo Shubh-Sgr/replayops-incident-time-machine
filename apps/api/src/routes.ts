@@ -13,6 +13,7 @@ import { ingestionQueue } from "./queue.js";
 import { workspaceService } from "./workspace.js";
 import { buildEvidenceBundle, buildInvestigationIntelligence } from "./intelligence.js";
 import { httpReplayService } from "./httpReplay.js";
+import { caseworkService } from "./casework.js";
 
 const severity = z.enum(["critical", "high", "medium", "low"]);
 const status = z.enum(["investigating", "identified", "monitoring", "resolved"]);
@@ -96,6 +97,14 @@ const httpReplaySchema = z.object({
   assertions:z.object({ status:z.number().int().min(100).max(599), bodyIncludes:z.string().max(1000).optional() }),
   dependencies:z.array(z.object({ name:z.string().min(1).max(160), mode:z.enum(["mocked","disabled"]), fixture:z.string().max(16000) })).max(30)
 });
+const checkSchema=z.object({templateId:z.string().min(2).max(80),title:z.string().min(4).max(180),question:z.string().min(8).max(1000),method:z.string().min(8).max(2000),expectedSignal:z.string().min(8).max(1200),conditions:z.string().min(4).max(1200),assignee:z.string().min(2).max(160),evidenceIds:z.array(z.string().uuid()).max(100).default([])});
+const checkResultSchema=z.object({status:z.enum(["planned","running","supported","disproved","inconclusive"]),result:z.string().max(4000),evidenceIds:z.array(z.string().uuid()).max(100).default([])}).superRefine((value,context)=>{if(["supported","disproved","inconclusive"].includes(value.status)&&value.result.trim().length<8)context.addIssue({code:z.ZodIssueCode.custom,path:["result"],message:"Record the observed result and conditions."});});
+const proposalSchema=z.object({title:z.string().min(4).max(180),change:z.string().min(12).max(4000),rollbackPlan:z.string().min(12).max(4000),target:z.record(z.unknown())});
+const validationSchema=z.object({proposalId:z.string().uuid(),kind:z.enum(["ci","manual","isolated_http"]),status:z.enum(["passed","failed","unsupported"]),summary:z.string().min(8).max(4000),provenance:z.record(z.unknown())});
+const proposalReviewSchema=z.object({status:z.enum(["approved","rejected"]),reason:z.string().min(8).max(2000)});
+const criterionSchema=z.object({kind:z.enum(["runtime","delivery"]),name:z.string().min(3).max(180),source:z.string().min(2).max(240),query:z.string().max(4000),unit:z.string().min(1).max(40),comparison:z.enum(["lte","gte"]),targetValue:z.number(),minConsecutiveWindows:z.number().int().min(1).max(20),maxAgeMinutes:z.number().int().min(1).max(10080),observationMinutes:z.number().int().min(1).max(10080),deliveryIdentity:z.record(z.unknown()).nullable()});
+const measurementSchema=z.object({criterionId:z.string().uuid(),value:z.number().nullable(),unit:z.string().min(1).max(40),source:z.string().min(2).max(240),query:z.string().max(4000),windowStartedAt:z.string().datetime(),windowEndedAt:z.string().datetime(),observedAt:z.string().datetime(),state:z.enum(["valid","missing","invalid"]),note:z.string().max(2000).default("")});
+const lifecycleSchema=z.object({action:z.enum(["start_monitoring","resolve","reopen"]),reason:z.string().min(8).max(2000),expectedEvidenceRevision:z.string().datetime()});
 
 const parseOrReply = <T>(schema: z.ZodSchema<T>, value: unknown) => {
   const result = schema.safeParse(value);
@@ -174,6 +183,83 @@ apiRouter.get("/incidents/:id/intelligence", async (req, res) => {
   res.json(buildInvestigationIntelligence(incident, await repository.listIncidents(userId(req))));
 });
 
+apiRouter.get("/incidents/:id/casework", async (req, res) => {
+  const incident=await repository.getIncident(userId(req),String(req.params.id));
+  if(!incident){res.status(404).json({error:"Incident not found."});return;}
+  res.json({...await caseworkService.snapshot(userId(req),incident),suggestedChecks:caseworkService.suggestions(incident)});
+});
+
+apiRouter.post("/incidents/:id/evidence-review",async(req,res)=>{
+  const incident=await repository.getIncident(userId(req),String(req.params.id));if(!incident){res.status(404).json({error:"Incident not found."});return;}
+  res.json(await caseworkService.acknowledge(userId(req),incident));
+});
+
+apiRouter.post("/incidents/:id/checks",async(req:AuthenticatedRequest,res)=>{
+  const parsed=parseOrReply(checkSchema,req.body);if("error" in parsed){res.status(400).json(parsed);return;}
+  const incident=await repository.getIncident(userId(req),String(req.params.id));if(!incident){res.status(404).json({error:"Incident not found."});return;}
+  res.status(201).json(await caseworkService.createCheck(userId(req),incident,actor(req),{...parsed.data,evidenceIds:parsed.data.evidenceIds??[]}));
+});
+
+apiRouter.patch("/incidents/:id/checks/:checkId",async(req,res)=>{
+  const parsed=parseOrReply(checkResultSchema,req.body);if("error" in parsed){res.status(400).json(parsed);return;}
+  const incident=await repository.getIncident(userId(req),String(req.params.id));if(!incident){res.status(404).json({error:"Incident not found."});return;}
+  res.json(await caseworkService.updateCheck(userId(req),String(req.params.checkId),{...parsed.data,evidenceIds:parsed.data.evidenceIds??[]},incident));
+});
+
+apiRouter.post("/incidents/:id/proposals",async(req:AuthenticatedRequest,res)=>{
+  const parsed=parseOrReply(proposalSchema,req.body);if("error" in parsed){res.status(400).json(parsed);return;}
+  const incident=await repository.getIncident(userId(req),String(req.params.id));if(!incident){res.status(404).json({error:"Incident not found."});return;}
+  res.status(201).json(await caseworkService.createProposal(userId(req),incident,actor(req),parsed.data));
+});
+
+apiRouter.post("/incidents/:id/validations",async(req:AuthenticatedRequest,res)=>{
+  const parsed=parseOrReply(validationSchema,req.body);if("error" in parsed){res.status(400).json(parsed);return;}
+  const incident=await repository.getIncident(userId(req),String(req.params.id));if(!incident){res.status(404).json({error:"Incident not found."});return;}
+  const snapshot=await caseworkService.snapshot(userId(req),incident);const proposal=snapshot.proposals.find((item)=>item.id===parsed.data.proposalId);if(!proposal){res.status(404).json({error:"Proposal version not found."});return;}
+  let input=parsed.data;
+  if(input.kind==="ci"){
+    const required=["repository","workflow","sha","runId","attempt"];
+    if(required.some((key)=>input.provenance[key]===undefined)){res.status(400).json({error:"CI validation requires repository, workflow, SHA, run ID, and attempt."});return;}
+    const source=incident.events.find((event)=>required.every((key)=>String(event.metadata?.[key]??event.metadata?.[key==="runId"?"runId":key]??"")===String(input.provenance[key])));
+    if(!source){res.status(400).json({error:"No ingested GitHub workflow event matches that exact CI identity."});return;}
+    const conclusion=String(source.metadata?.conclusion??"").toLowerCase();
+    input={...input,status:conclusion==="success"?"passed":["failure","timed_out","action_required"].includes(conclusion)?"failed":"unsupported",provenance:{...input.provenance,sourceEventId:source.id,sourceUrl:source.metadata?.sourceUrl??null,productionHealthMeasured:false}};
+  }
+  res.status(201).json(await caseworkService.addValidation(userId(req),incident,proposal,actor(req),input));
+});
+
+apiRouter.post("/incidents/:id/proposals/:proposalId/review-request",async(req:AuthenticatedRequest,res)=>{
+  const incident=await repository.getIncident(userId(req),String(req.params.id));if(!incident){res.status(404).json({error:"Incident not found."});return;}
+  const snapshot=await caseworkService.snapshot(userId(req),incident);const proposal=snapshot.proposals.find((item)=>item.id===String(req.params.proposalId));if(!proposal){res.status(404).json({error:"Proposal version not found."});return;}
+  try{res.status(201).json(await caseworkService.requestReview(userId(req),incident,proposal,actor(req)));}catch(error){res.status(409).json({error:error instanceof Error?error.message:"Review request failed."});}
+});
+
+apiRouter.patch("/incidents/:id/proposal-reviews/:reviewId",async(req:AuthenticatedRequest,res)=>{
+  const parsed=parseOrReply(proposalReviewSchema,req.body);if("error" in parsed){res.status(400).json(parsed);return;}
+  const incident=await repository.getIncident(userId(req),String(req.params.id));if(!incident){res.status(404).json({error:"Incident not found."});return;}
+  try{const context=await workspaceService.context(userId(req));res.json(await caseworkService.reviewProposal(userId(req),incident,String(req.params.reviewId),actor(req),context.role,parsed.data));}catch(error){res.status(409).json({error:error instanceof Error?error.message:"Proposal review failed."});}
+});
+
+apiRouter.post("/incidents/:id/recovery-criteria",async(req,res)=>{
+  const parsed=parseOrReply(criterionSchema,req.body);if("error" in parsed){res.status(400).json(parsed);return;}
+  if(parsed.data.kind==="delivery"&&!parsed.data.deliveryIdentity){res.status(400).json({error:"Delivery recovery requires exact repository, workflow, ref, SHA, and attempt identity."});return;}
+  const incident=await repository.getIncident(userId(req),String(req.params.id));if(!incident){res.status(404).json({error:"Incident not found."});return;}
+  res.status(201).json(await caseworkService.createCriterion(userId(req),incident,parsed.data));
+});
+
+apiRouter.post("/incidents/:id/measurements",async(req,res)=>{
+  const parsed=parseOrReply(measurementSchema,req.body);if("error" in parsed){res.status(400).json(parsed);return;}
+  const incident=await repository.getIncident(userId(req),String(req.params.id));if(!incident){res.status(404).json({error:"Incident not found."});return;}
+  const snapshot=await caseworkService.snapshot(userId(req),incident);const criterion=snapshot.criteria.find((item)=>item.id===parsed.data.criterionId);if(!criterion||criterion.kind!=="runtime"){res.status(400).json({error:"Measurement must reference a runtime recovery criterion in this incident."});return;}
+  res.status(201).json(await caseworkService.addMeasurement(userId(req),incident,{...parsed.data,note:parsed.data.note??""}));
+});
+
+apiRouter.post("/incidents/:id/lifecycle",async(req:AuthenticatedRequest,res)=>{
+  const parsed=parseOrReply(lifecycleSchema,req.body);if("error" in parsed){res.status(400).json(parsed);return;}
+  try{const context=await workspaceService.context(userId(req));res.json(await caseworkService.transition(userId(req),String(req.params.id),actor(req),context.role,parsed.data));}
+  catch(error){res.status(409).json({error:error instanceof Error?error.message:"Lifecycle transition failed."});}
+});
+
 apiRouter.post("/incidents/:id/evidence-bundle", async (req: AuthenticatedRequest, res) => {
   const incident = await repository.getIncident(userId(req), String(req.params.id));
   if (!incident) { res.status(404).json({ error: "Incident not found." }); return; }
@@ -199,7 +285,7 @@ apiRouter.patch("/incidents/:id", async (req, res) => {
     res.status(400).json(parsed);
     return;
   }
-  if (parsed.data.status === "resolved") await workspaceService.assertRecoveryVerified(userId(req), req.params.id);
+  if (parsed.data.status === "resolved") { res.status(409).json({ error:"Resolve through the monitored recovery workflow so the latest evidence is re-evaluated and audited atomically." }); return; }
   const privacy=await workspaceService.getPrivacy(userId(req));
   const embedding = parsed.data.title || parsed.data.summary || parsed.data.service
     ? await embedText(`${parsed.data.title ?? ""}\n${parsed.data.summary ?? ""}\n${parsed.data.service ?? ""}`,privacy.externalAiEnabled)

@@ -1,5 +1,7 @@
 # ReplayOps 40-item implementation checklist
 
+> **2026-09-27 final-flow update:** This ledger remains historical evidence. The current workflow and completion status are in [`REPLAYOPS_FINAL_FLOW_SPEC_2026-09-27.md`](REPLAYOPS_FINAL_FLOW_SPEC_2026-09-27.md) and [`REPLAYOPS_FINAL_IMPLEMENTATION_REPORT_2026-09-27.md`](REPLAYOPS_FINAL_IMPLEMENTATION_REPORT_2026-09-27.md). The universal scenario estimator is no longer part of the primary UI.
+
 Source: `REPLAYOPS_PRODUCT_REVIEW_2026-09-24.md`. This ledger is the durable delivery record for the redesign. A UI label is not sufficient evidence of completion; each item must meet its behavioral validation.
 
 Status values: **not started**, **in progress**, **implemented**, **verified**, **blocked**. “Verified” requires automated coverage plus a browser or API journey where applicable.

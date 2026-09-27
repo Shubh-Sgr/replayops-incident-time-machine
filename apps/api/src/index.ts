@@ -8,6 +8,7 @@ import { ingestionQueue } from "./queue.js";
 import { apiRouter } from "./routes.js";
 import { workspaceService } from "./workspace.js";
 import { httpReplayService } from "./httpReplay.js";
+import { caseworkService } from "./casework.js";
 
 const app = express();
 
@@ -44,6 +45,7 @@ app.use(errorHandler);
 await repository.initialize();
 await workspaceService.initialize();
 await httpReplayService.initialize();
+await caseworkService.initialize();
 await ingestionQueue.initialize();
 app.listen(config.port, "0.0.0.0", () => {
   console.log(`ReplayOps API listening on http://localhost:${config.port}`);

@@ -14,8 +14,17 @@ const activeEvents = (incident: Incident) => incident.events.filter((event) => e
 export function buildInvestigationIntelligence(incident: Incident, history: Incident[]) {
   const events = activeEvents(incident);
   const traceEvents = events.filter((event) => event.metadata?.signal === "trace");
-  const healthy = traceEvents.filter((event) => event.metadata?.cohortRole === "healthy");
   const failing = traceEvents.filter((event) => event.metadata?.cohortRole === "failing");
+  const failingScope = failing[0];
+  const comparisonDimensions = ["service", "route", "method", "region"] as const;
+  const sameDimension = (candidate: IncidentEvent, dimension: typeof comparisonDimensions[number]) => {
+    const expected = dimension === "service" ? failingScope?.service : text(failingScope?.metadata?.[dimension]);
+    const actual = dimension === "service" ? candidate.service : text(candidate.metadata?.[dimension]);
+    return Boolean(expected && actual && expected === actual);
+  };
+  const healthyCandidates = traceEvents.filter((event) => event.metadata?.cohortRole === "healthy");
+  const healthy = failingScope ? healthyCandidates.filter((event) => comparisonDimensions.every((dimension) => sameDimension(event, dimension))) : [];
+  const excludedHealthy = healthyCandidates.length - healthy.length;
   const healthyRates = [...new Set(healthy.map((event) => number(event.metadata?.sampleRate)).filter((value): value is number => value !== undefined))];
   const routes = [...new Set(traceEvents.map((event) => text(event.metadata?.route)).filter((value): value is string => Boolean(value)))];
   const releases = [...new Set(traceEvents.map((event) => text(event.metadata?.release)).filter((value): value is string => Boolean(value)))];
@@ -36,10 +45,15 @@ export function buildInvestigationIntelligence(incident: Incident, history: Inci
     evidenceAgainst: healthy.some((candidate) => candidate.timestamp >= event.timestamp && candidate.service === event.service) ? "Sampled healthy requests also exist after this change." : "No matched healthy control is retained after this change."
   }));
 
-  const explicitFailed = events.map((event) => number(event.metadata?.failedRequests)).find((value) => value !== undefined);
-  const explicitTotal = events.map((event) => number(event.metadata?.totalRequests)).find((value) => value !== undefined);
+  const impactEvent = events.find((event) => {
+    const failed = number(event.metadata?.failedRequests);
+    const total = number(event.metadata?.totalRequests);
+    return failed !== undefined && total !== undefined && total > 0 && Boolean(event.metadata?.measurementSeriesId && event.metadata?.measurementScope && event.metadata?.intervalStart && event.metadata?.intervalEnd);
+  });
+  const explicitFailed = number(impactEvent?.metadata?.failedRequests);
+  const explicitTotal = number(impactEvent?.metadata?.totalRequests);
   const impact = explicitFailed !== undefined && explicitTotal !== undefined && explicitTotal > 0
-    ? { measured:true, failedRequests:explicitFailed, totalRequests:explicitTotal, rate:explicitFailed / explicitTotal, source:"telemetry metadata", unknowns:[] as string[] }
+    ? { measured:true, failedRequests:explicitFailed, totalRequests:explicitTotal, rate:explicitFailed / explicitTotal, source:`paired telemetry series ${String(impactEvent?.metadata?.measurementSeriesId)}`, unknowns:[] as string[] }
     : { measured:false, failedRequests:failing.length || null, totalRequests:null, rate:null, source:"retained trace sample", unknowns:["The complete request denominator was not provided.", ...(healthyRates.includes(.05) ? ["Healthy traces are sampled at 5% while failing traces are retained at 100%; raw sample counts are not a population failure rate."] : [])] };
 
   const comparisons = history.filter((item) => item.id !== incident.id && item.service === incident.service).map((item) => {
@@ -59,7 +73,7 @@ export function buildInvestigationIntelligence(incident: Incident, history: Inci
   return {
     generatedAt:new Date().toISOString(),
     evidenceRevision:incident.evidenceRevision ?? incident.updatedAt,
-    cohorts:{ healthy:{ sampleCount:healthy.length, medianDurationMs:median(healthy.map((event) => number(event.metadata?.durationMs)).filter((value): value is number => value !== undefined)) }, failing:{ sampleCount:failing.length, medianDurationMs:median(failing.map((event) => number(event.metadata?.durationMs)).filter((value): value is number => value !== undefined)) }, routes, releases, regions, window, limitations:[...(healthy.length ? [`Healthy cohort uses ${Math.round((healthyRates[0] ?? .05) * 100)}% deterministic sampling.`] : ["No matched healthy cohort is available."]), ...(failing.length ? [] : ["No failing OTLP request spans are retained."]), "Counts reflect retained evidence, not total traffic."] },
+    cohorts:{ healthy:{ sampleCount:healthy.length, medianDurationMs:median(healthy.map((event) => number(event.metadata?.durationMs)).filter((value): value is number => value !== undefined)) }, failing:{ sampleCount:failing.length, medianDurationMs:median(failing.map((event) => number(event.metadata?.durationMs)).filter((value): value is number => value !== undefined)) }, routes, releases, regions, window, comparisonDimensions: failingScope ? Object.fromEntries(comparisonDimensions.map((dimension) => [dimension, dimension === "service" ? failingScope.service : text(failingScope.metadata?.[dimension]) ?? "missing"])) : {}, excludedHealthySamples:excludedHealthy, limitations:[...(healthy.length ? [`Healthy cohort uses ${Math.round((healthyRates[0] ?? .05) * 100)}% deterministic sampling.`] : ["No matched healthy cohort is available for the same service, route, method, and region."]), ...(excludedHealthy ? [`${excludedHealthy} healthy sample${excludedHealthy === 1 ? " was" : "s were"} excluded because comparison dimensions differed or were missing.`] : []), ...(failing.length ? [] : ["No failing OTLP request spans are retained."]), "Counts reflect retained evidence, not total traffic."] },
     changes,
     impact,
     comparisons,
