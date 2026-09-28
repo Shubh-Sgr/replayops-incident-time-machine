@@ -7,6 +7,7 @@ import { buildInvestigationIntelligence } from "./intelligence.js";
 import type { Incident, IncidentEvent } from "./types.js";
 
 const repo = "acme/api";
+const testWith = (hypothesisId: string, status: "supported"): import("./types.js").HypothesisTest => ({ id: "t", incidentId: "i", hypothesisId, title: "t", instruction: "i", assignee: "a", status, result: "observed", createdAt: "2026-09-28T10:05:00Z", updatedAt: "2026-09-28T10:05:00Z" });
 const event = (id: string, timestamp: string, kind: IncidentEvent["kind"], metadata: Record<string, unknown>): IncidentEvent => ({ id, incidentId: "i", timestamp, service: repo, kind, title: id, detail: id, impactScore: kind === "alert" ? 78 : 24, metadata: { provider: "github", repository: repo, ...metadata } });
 const incident = (events: IncidentEvent[]): Incident => ({ id: "i", code: "AUTO-1", title: "Deployment failure", summary: "", service: repo, environment: "production", severity: "high", status: "monitoring", owner: "a@b.c", startedAt: "2026-09-28T10:04:00Z", resolvedAt: null, createdAt: "2026-09-28T10:04:00Z", updatedAt: "2026-09-28T10:04:00Z", events });
 const push = event("push", "2026-09-28T10:00:00Z", "metric", { eventType: "push", sha: "bbbbbbb1", beforeSha: "aaaaaaa1" });
@@ -32,6 +33,23 @@ describe("GitHub delivery incidents", () => {
     const queries = buildInvestigationIntelligence(incident([push, deploy, failed]), []).querySuggestions;
     expect(queries.map((item) => item.source)).toEqual(["GitHub", "GitHub"]);
     expect(queries[1]!.query).toBe("https://ci/run/1");
+  });
+
+  it("links diffs only for real changes, not for workflow results", () => {
+    const earlierRun = event("earlier-run", "2026-09-28T09:58:00Z", "metric", { eventType: "workflow_run", conclusion: "success", sha: "zzzzzzz1", workflow: "CI" });
+    const queries = buildInvestigationIntelligence(incident([earlierRun, push, deploy, failed]), []).querySuggestions;
+    expect(queries.filter((item) => item.label === "Diff of the deployed change")).toHaveLength(1);
+  });
+
+  it("tells a confirmed CI failure to push a fix, not to redeploy to production", () => {
+    const drillPush = event("drill-push", "2026-09-28T10:00:00Z", "metric", { eventType: "push", sha: "ddddddd1", beforeSha: "0000000000", branch: "drill" });
+    const runFailed = event("run-failed", "2026-09-28T10:01:00Z", "alert", { eventType: "workflow_run", conclusion: "failure", sha: "ddddddd1", workflow: "CI", branch: "drill" });
+    const open = { ...incident([drillPush, runFailed]), status: "investigating" as const };
+    const leading = diagnoseIncident(open).hypotheses[0]!;
+    const confirmed = diagnoseIncident(open, [{ ...testWith(leading.id, "supported") }]);
+    expect(confirmed.nextAction.label).toBe("Fix it, then confirm recovery");
+    expect(confirmed.nextAction.reason).toContain("on drill");
+    expect(confirmed.nextAction.reason).not.toContain("production");
   });
 
   it("points a monitoring incident at recovery", () => {

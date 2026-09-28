@@ -49,10 +49,15 @@ export function githubChangeRange(event: IncidentEvent, events: IncidentEvent[])
 function testFor(event: IncidentEvent, symptom: IncidentEvent, events: IncidentEvent[] = []) {
   const range = githubChangeRange(event, events);
   if (range) {
-    const environment = String(event.metadata?.deploymentEnvironment ?? event.metadata?.environment ?? "production");
+    const workflowFailure = symptom.metadata?.eventType === "workflow_run";
+    const sha = range.sha.slice(0, 7);
+    const branch = typeof event.metadata?.branch === "string" ? event.metadata.branch : undefined;
+    const environment = String(symptom.metadata?.deploymentEnvironment ?? event.metadata?.deploymentEnvironment ?? "production");
     return {
-      nextTest: `Review the change ${range.before ? `${range.before.slice(0, 7)}…${range.sha.slice(0, 7)}` : range.sha.slice(0, 7)} (${range.compareUrl}) and the failing ${symptom.metadata?.eventType === "workflow_run" ? "workflow" : "deployment"} logs for the first error; confirm the failure does not occur on the previous commit.`,
-      safeAction: range.before ? `Redeploy the last good commit ${range.before.slice(0, 7)} to ${environment} and confirm the deployment succeeds.` : `Revert ${range.sha.slice(0, 7)} and redeploy to ${environment}; confirm the deployment succeeds.`
+      nextTest: `Review the change ${range.before ? `${range.before.slice(0, 7)}…${sha}` : sha} (${range.compareUrl}) and the failing ${workflowFailure ? "workflow" : "deployment"} logs for the first error; confirm the failure does not occur on the previous commit.`,
+      safeAction: workflowFailure
+        ? `Push a fix or revert ${sha}${branch ? ` on ${branch}` : ""}; the next successful “${String(symptom.metadata?.workflow ?? symptom.metadata?.workflowName ?? "workflow")}” run confirms recovery automatically.`
+        : range.before ? `Redeploy the last good commit ${range.before.slice(0, 7)} to ${environment} (or push a fix); the next successful deployment confirms recovery automatically.` : `Revert ${sha} and redeploy to ${environment}; the next successful deployment confirms recovery automatically.`
     };
   }
   if (event.kind === "deploy") {
@@ -171,7 +176,7 @@ export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = [
   const hypotheses: DiagnosticHypothesis[] = [{
     id: `origin-${topCandidate.id}`,
     rank: 1,
-    title: `Inspect the strongest recorded precursor in ${topCandidate.service}`,
+    title: topCandidate.id === symptom.id ? `What led to “${symptom.title}”?` : `Did “${topCandidate.title}” cause this?`,
     claim: `“${topCandidate.title}” occurred before the first high-impact symptom in ${symptom.service}; the current evidence does not by itself establish cause.`,
     confidence: Math.min(confidence, clamp(changeCandidates[0]?.score ?? confidence, 20, 94)),
     supportingEvidence: [
@@ -218,13 +223,16 @@ export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = [
   const evidenceGaps: string[] = [];
   if (!correlated && servicePath.length > 1) evidenceGaps.push("No trace, span, or request ID is attached; cross-service causality cannot be verified.");
   if (!events.some((event) => event.kind === "deploy" || event.metadata?.eventType === "push")) evidenceGaps.push("No deployment or configuration change is recorded in the incident window.");
-  if (!hasRecovery) evidenceGaps.push("No recovery event is recorded, so mitigation effectiveness cannot be measured against the same signals.");
+  const githubOnly = events.every((event) => event.metadata?.provider === "github");
+  if (!hasRecovery && !githubOnly) evidenceGaps.push("No recovery has been observed yet, so there is nothing to compare a fix against.");
   if (events.filter((event) => event.timestamp < symptom.timestamp).length < 2) evidenceGaps.push("The pre-symptom baseline is thin; add healthy-window measurements for comparison.");
-  if (events.length < 5) evidenceGaps.push("Fewer than five evidence points are available; hypothesis confidence is intentionally capped.");
+  if (events.length < 5) evidenceGaps.push(`Only ${events.length} piece${events.length === 1 ? "" : "s"} of evidence so far, so the explanation is tentative. Connect more sources or add an observation.`);
 
   // Once a test has run, repeating the same test adds nothing. Point the responder at the next distinct step.
   for (const hypothesis of hypotheses) {
-    if (hypothesis.state === "supported") hypothesis.nextTest = `Confirm by intervention: ${hypothesis.safeAction} Verify that the ${symptom.service} symptom falls and returns if the change is reverted.`;
+    if (hypothesis.state === "supported") hypothesis.nextTest = events.some((event) => githubChangeRange(event, events)) && hypothesis.id === `origin-${topCandidate.id}` && githubChangeRange(topCandidate, events)
+      ? `Fix it: ${hypothesis.safeAction}`
+      : `Confirm by intervention: ${hypothesis.safeAction} Verify that the ${symptom.service} symptom falls and returns if the change is reverted.`;
     else if (hypothesis.state === "inconclusive") hypothesis.nextTest = `The previous test did not discriminate. Break down “${symptom.title}” by instance, zone, and release, and compare the failing cohort with a healthy cohort in the same window.`;
     else if (hypothesis.state === "contested") hypothesis.nextTest = "Re-run the conflicting tests on the same cohort, window, and release so their results can be compared directly.";
   }
@@ -246,7 +254,7 @@ export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = [
     : contested
       ? { label: "Resolve contradictory test results", reason: contested.outcomeSummary, href: `?area=investigate&hypothesis=${encodeURIComponent(contested.id)}` }
     : leading?.state === "supported"
-      ? { label: "Validate a bounded fix", reason: leading.nextTest, href: "?area=validate" }
+      ? { label: leading.nextTest.startsWith("Fix it:") ? "Fix it, then confirm recovery" : "Validate a bounded fix", reason: leading.nextTest, href: "?area=validate" }
     : leading
       ? { label: leading.testCount ? "Run a different test" : "Run the next test", reason: leading.nextTest, href: `?area=investigate&hypothesis=${encodeURIComponent(leading.id)}` }
       : { label: "Add missing evidence", reason: evidenceGaps[0] ?? "Every current explanation has been disproved.", href: "?area=evidence&gap=missing" };

@@ -77,7 +77,7 @@ export function buildInvestigationIntelligence(incident: Incident, history: Inci
   const traceIds = [...new Set([...failing, ...events].map((event) => text(event.metadata?.traceId)).filter((value): value is string => Boolean(value)))];
   const environmentLimitation = knownEnvironment ? "" : " The environment is unknown, so results may mix environments; set it with Edit facts.";
   const githubOnly = events.length > 0 && events.every((event) => event.metadata?.provider === "github");
-  const githubRanges = [...new Map(events.map((event) => githubChangeRange(event, events)).filter((item): item is NonNullable<typeof item> => Boolean(item)).map((item) => [item.compareUrl, item])).values()];
+  const githubRanges = [...new Map(events.filter((event) => ["push", "deployment"].includes(String(event.metadata?.eventType))).map((event) => githubChangeRange(event, events)).filter((item): item is NonNullable<typeof item> => Boolean(item)).map((item) => [item.compareUrl, item])).values()];
   const githubFailures = events.filter((event) => event.metadata?.provider === "github" && event.kind === "alert" && text(event.metadata?.logUrl ?? event.metadata?.sourceUrl));
   const githubSuggestions = [
     ...githubRanges.slice(0, 2).map((range, index) => ({ id:`github-diff-${index}`, label:"Diff of the deployed change", source:"GitHub", query:range.compareUrl, limitation: range.before ? "Everything between the last good commit and the deployed one." : "No earlier push is retained, so only the deployed commit is linked." })),

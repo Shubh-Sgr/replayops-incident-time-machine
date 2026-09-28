@@ -5,6 +5,8 @@ import { api } from "../lib/api";
 import { usePersistentDraft } from "../lib/usePersistentDraft";
 import { useOwnerName } from "../lib/useOwnerName";
 import { cn, formatRelative } from "../lib/utils";
+import { useAuth } from "../providers/AuthProvider";
+import { Linkified } from "./Linkified";
 import type { DiagnosticHypothesis, HypothesisTest, Incident, InvestigationCheck, SuggestedCheck } from "../types";
 
 type Outcome = "supported" | "disproved" | "inconclusive";
@@ -49,7 +51,7 @@ function OpenCheckCard({ item, incident }: { item: UnifiedCheck; incident: Incid
   const ready = draft.value.trim().length >= 8;
   return <article id={item.source === "test" ? `test-${item.id}` : `check-${item.id}`} className="scroll-mt-24 rounded-control border border-info/25 bg-panel p-4">
     <div className="flex flex-wrap items-start justify-between gap-2"><p className="text-sm font-semibold">{item.title}</p><span className="rounded-full bg-info/10 px-2.5 py-1 text-xs font-semibold text-info">In progress · {ownerName(item.assignee)}</span></div>
-    <p className="mt-1 text-sm leading-6 text-muted">{item.instruction}</p>
+    <p className="mt-1 text-sm leading-6 text-muted"><Linkified text={item.instruction} /></p>
     <label className="mt-3 block text-xs font-semibold text-muted">What did you see?
       <textarea className="field mt-1.5 min-h-20 resize-y py-3 text-sm font-normal text-ink" value={draft.value} onChange={(event) => draft.setValue(event.target.value)} placeholder="e.g. The 20 slowest requests all waited over 3 s on the inventory replica; healthy requests did not." />
     </label>
@@ -71,7 +73,9 @@ export function RecommendedCheck({ incident, hypothesis }: { incident: Incident;
   const client = useQueryClient();
   const tests = useQuery({ queryKey: ["hypothesis-tests", incident.id], queryFn: () => api.hypothesisTests(incident.id) });
   const members = useQuery({ queryKey: ["team-members"], queryFn: api.teamMembers });
-  const [assignee, setAssignee] = useState(incident.owner);
+  const { user } = useAuth();
+  // "Automation" owns auto-opened incidents; a check needs a person, so default to whoever is starting it.
+  const [assignee, setAssignee] = useState(incident.owner && incident.owner !== "Automation" ? incident.owner : user?.email ?? incident.owner);
   const open = tests.data?.find((test) => test.hypothesisId === hypothesis.id && (test.status === "planned" || test.status === "running") && test.instruction === hypothesis.nextTest);
   const start = useMutation({
     mutationFn: () => api.createHypothesisTest(incident.id, { hypothesisId: hypothesis.id, title: hypothesis.title, instruction: hypothesis.nextTest, assignee: assignee || incident.owner }),
@@ -80,11 +84,11 @@ export function RecommendedCheck({ incident, hypothesis }: { incident: Incident;
   if (open) return <div className="mt-6"><p className="text-xs font-semibold uppercase tracking-[.12em] text-muted">Check in progress</p><div className="mt-2"><OpenCheckCard item={fromTest(open)} incident={incident} /></div></div>;
   return <div className="mt-6 rounded-control bg-elevated p-4">
     <p className="text-xs font-semibold uppercase tracking-[.12em] text-muted">Recommended next check</p>
-    <p className="mt-2 text-sm font-semibold leading-6">{hypothesis.nextTest}</p>
+    <p className="mt-2 text-sm font-semibold leading-6"><Linkified text={hypothesis.nextTest} /></p>
     <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
       <button className="inline-flex items-center control-primary" onClick={() => start.mutate()} disabled={start.isPending || hypothesis.state === "disproved"}><Play className="mr-2 h-4 w-4" />Start this check</button>
       <label className="flex items-center gap-2 text-xs text-muted">Owner
-        <select className="field !min-h-9 max-w-56 text-sm" value={assignee} onChange={(event) => setAssignee(event.target.value)}>{members.data?.map((member) => <option key={member.userId} value={member.email}>{member.displayName}</option>)}{!members.data?.some((member) => member.email === assignee) && <option value={assignee}>{assignee}</option>}</select>
+        <select className="field !min-h-9 max-w-56 text-sm" value={assignee} onChange={(event) => setAssignee(event.target.value)}>{members.data?.map((member) => <option key={member.userId} value={member.email}>{member.displayName}</option>)}{assignee && !members.data?.some((member) => member.email === assignee) && <option value={assignee}>{assignee}</option>}</select>
       </label>
     </div>
     {start.error && <p role="alert" className="mt-2 text-xs text-danger">{start.error.message}</p>}
