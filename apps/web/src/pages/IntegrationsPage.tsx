@@ -111,7 +111,7 @@ function ConnectorInstructions({ integration }: { integration: Integration }) {
             <span className="measurement-number text-xs text-panel/65">SETUP</span>
             <CopyButton value={snippet} label="Copy setup" />
           </div>
-          <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all text-xs leading-6 text-panel/90"><code>{snippet}</code></pre>
+          <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all text-xs leading-6 text-panel/90"><code>{integration.connector.token ? snippet.split(integration.connector.token).join("•".repeat(12)) : snippet}</code></pre>
         </div>
         <ol className="mt-5 grid gap-3 sm:grid-cols-3" aria-label="Connector verification steps">
           {[integration.provider === "github" ? "Add repository webhook" : integration.provider === "otel" ? "Configure OTLP exporter" : "Configure webhook sender", "Send a signed delivery", "Confirm evidence and incident"].map((step, index) => <li key={step} className="flex items-start gap-2 text-xs leading-5 text-muted"><span className="measurement-number flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-elevated text-xs font-semibold text-ink">{index + 1}</span>{step}</li>)}

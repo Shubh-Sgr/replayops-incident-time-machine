@@ -205,6 +205,7 @@ export interface IntegrationTarget {
   name: string;
   provider: IntegrationProvider;
   status: IntegrationStatus;
+  healthySampleRate?: number;
 }
 
 export interface NormalizedSignal {

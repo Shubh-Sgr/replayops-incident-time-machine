@@ -221,7 +221,7 @@ export class MemoryRepository implements Repository {
   }
   async getIntegrationTarget(integrationId: string) {
     const integration = this.integrations.find((item) => item.id === integrationId);
-    return integration ? { id: integration.id, organizationId: "demo-organization", name: integration.name, provider: integration.provider, status: integration.status } : null;
+    return integration ? { id: integration.id, organizationId: "demo-organization", name: integration.name, provider: integration.provider, status: integration.status, healthySampleRate: integration.healthySampleRate } : null;
   }
   async ingest(integration: IntegrationTarget, batch: IngestionBatch) {
     const policy = await workspaceService.policyForOrganization(integration.organizationId);
@@ -740,11 +740,12 @@ class PostgresRepository implements Repository {
     )).rowCount === 1;
   }
   async getIntegrationTarget(integrationId: string) {
-    const result = await this.pool.query("select id, organization_id, name, provider, status from integrations where id = $1", [integrationId]);
+    const result = await this.pool.query("select id, organization_id, name, provider, status, healthy_sample_rate from integrations where id = $1", [integrationId]);
     const row = result.rows[0] as Row | undefined;
     return row ? {
       id: String(row.id), organizationId: String(row.organization_id), name: String(row.name),
-      provider: row.provider as IntegrationTarget["provider"], status: row.status as IntegrationTarget["status"]
+      provider: row.provider as IntegrationTarget["provider"], status: row.status as IntegrationTarget["status"],
+      healthySampleRate: Number(row.healthy_sample_rate ?? .05)
     } : null;
   }
   async ingest(integration: IntegrationTarget, batch: IngestionBatch) {

@@ -9,6 +9,7 @@ import { api } from "../lib/api";
 import { formatRelative } from "../lib/utils";
 import type { Incident, IncidentStatus } from "../types";
 import { useAuth } from "../providers/AuthProvider";
+import { useOwnerName } from "../lib/useOwnerName";
 
 type InvestigationView = "active" | "mine" | "unassigned" | "waiting" | "resolved" | "all";
 
@@ -21,6 +22,7 @@ export function IncidentsPage() {
   const [editing, setEditing] = useState<Incident | null | undefined>(undefined);
   const queryClient = useQueryClient();
   const { user } = useAuth();
+  const ownerName = useOwnerName();
   const incidents = useQuery({ queryKey: ["incidents"], queryFn: api.incidents });
   const save = useMutation({
     mutationFn: async ({ draft, incident }: { draft: IncidentDraft; incident?: Incident | null }) => {
@@ -84,7 +86,7 @@ export function IncidentsPage() {
                 <div className="min-w-0"><Link to={`/incidents/${incident.id}?area=investigate`} className="font-semibold text-ink underline decoration-transparent underline-offset-4 hover:decoration-line">{incident.title}</Link><p className="mt-1 line-clamp-1 text-xs text-muted">{incident.customerImpact || "Impact unknown"}</p><div className="mt-1 flex flex-wrap items-center gap-2"><span className="measurement-number text-xs text-muted">{incident.service}</span><SeverityMark value={incident.severity} /></div></div>
                 <span className="measurement-number text-xs text-muted">{incident.environment ?? "unknown"}</span>
                 <StatusMark value={incident.status} />
-                <span className="text-sm text-muted lg:text-ink">{incident.owner || "Unassigned"}</span>
+                <span className="text-sm text-muted lg:text-ink">{ownerName(incident.owner)}</span>
                 <span className="text-xs text-muted">{formatRelative(incident.evidenceRevision ?? incident.updatedAt)}<span className="mt-1 block font-semibold text-info">{incident.status==="monitoring"?"Verify recovery":incident.events.length<2?"Acquire evidence":"Run next test"}</span></span>
                 <div className="flex gap-1 lg:justify-end"><button className="control-quiet !min-h-9 !px-2.5" onClick={() => setEditing(incident)} aria-label={`Edit ${incident.code}`}>Edit</button><button className="control-quiet !min-h-9 !px-2.5 text-danger hover:text-danger" onClick={() => { if (window.confirm(`Delete ${incident.code}? This also removes its timeline.`)) remove.mutate(incident.id); }} aria-label={`Delete ${incident.code}`}><Trash2 className="h-4 w-4" /></button></div>
               </div>

@@ -161,7 +161,10 @@ function normalizeGitHub(payload: JsonRecord, eventName: string, deliveryId: str
   return [];
 }
 
-function normalizeOtelTraces(payload: JsonRecord, deliveryId: string): NormalizedSignal[] {
+function normalizeOtelTraces(payload: JsonRecord, deliveryId: string, healthySampleRate = .05): NormalizedSignal[] {
+  // Deterministic per trace, so every span of a sampled healthy trace is kept together.
+  const sampleBuckets = 10_000;
+  const sampleThreshold = Math.round(Math.min(1, Math.max(0, healthySampleRate)) * sampleBuckets);
   const signals: NormalizedSignal[] = [];
   for (const resourceSpanValue of array(payload.resourceSpans)) {
     const resourceSpan = object(resourceSpanValue);
@@ -181,7 +184,7 @@ function normalizeOtelTraces(payload: JsonRecord, deliveryId: string): Normalize
         const slow = durationMs >= 2_000;
         const traceId = textValue(span.traceId);
         const spanId = textValue(span.spanId, `${signals.length}`);
-        const healthySample = !failed && !slow && Number.parseInt(createHash("sha256").update(traceId || spanId).digest("hex").slice(0, 4), 16) % 20 === 0;
+        const healthySample = !failed && !slow && Number.parseInt(createHash("sha256").update(traceId || spanId).digest("hex").slice(0, 8), 16) % sampleBuckets < sampleThreshold;
         if (!failed && !slow && !healthySample) continue;
         const impact = failed ? Math.min(96, 76 + Math.round(Math.min(20, durationMs / 500))) : Math.min(72, 48 + Math.round(durationMs / 500));
         signals.push(normalized({
@@ -189,7 +192,7 @@ function normalizeOtelTraces(payload: JsonRecord, deliveryId: string): Normalize
           kind: failed ? "alert" : "metric", title: `${failed ? "Failed" : slow ? "Slow" : "Healthy sampled"} span: ${textValue(span.name, "unnamed operation")}`,
           detail: `${durationMs}ms span${httpStatus ? ` returned HTTP ${httpStatus}` : ""}${object(span.status).message ? ` — ${String(object(span.status).message)}` : ""}.`,
           impactScore: healthySample ? 8 : impact, severity: healthySample ? "low" : undefined, traceId, correlationKey: traceId || `${service}:${spanId}`, environment,
-          metadata: { provider: "opentelemetry", signal: "trace", traceCompleteness: "retained-span-only", traceId, spanId, parentSpanId: textValue(span.parentSpanId), spanKind: span.kind, operation: span.name, method: spanAttributes["http.request.method"] ?? spanAttributes["http.method"], durationMs, httpStatus, route: spanAttributes["http.route"] ?? spanAttributes["url.path"] ?? span.name, release: resourceAttributes["service.version"], region: resourceAttributes["cloud.region"], environment, scopeName: object(scopeSpanValue).scope ? object(object(scopeSpanValue).scope).name : undefined, cohortRole: healthySample ? "healthy" : failed ? "failing" : "slow", sampleRate: healthySample ? 0.05 : 1, attributes: spanAttributes }
+          metadata: { provider: "opentelemetry", signal: "trace", traceCompleteness: "retained-span-only", traceId, spanId, parentSpanId: textValue(span.parentSpanId), spanKind: span.kind, operation: span.name, method: spanAttributes["http.request.method"] ?? spanAttributes["http.method"], durationMs, httpStatus, route: spanAttributes["http.route"] ?? spanAttributes["url.path"] ?? span.name, release: resourceAttributes["service.version"], region: resourceAttributes["cloud.region"], environment, scopeName: object(scopeSpanValue).scope ? object(object(scopeSpanValue).scope).name : undefined, cohortRole: healthySample ? "healthy" : failed ? "failing" : "slow", sampleRate: healthySample ? healthySampleRate : 1, attributes: spanAttributes }
         }));
       }
     }
@@ -313,10 +316,10 @@ function normalizeGeneric(payload: JsonRecord, deliveryId: string): NormalizedSi
   return source.map((event, index) => normalizeGenericEvent(event, index, deliveryId)).filter((event): event is NormalizedSignal => Boolean(event));
 }
 
-export function normalizePayload(provider: IntegrationProvider, payload: JsonRecord, deliveryId: string, eventName = "") {
+export function normalizePayload(provider: IntegrationProvider, payload: JsonRecord, deliveryId: string, eventName = "", healthySampleRate = .05) {
   if (provider === "github") return normalizeGitHub(payload, eventName, deliveryId);
   if (provider === "otel") {
-    if (payload.resourceSpans) return normalizeOtelTraces(payload, deliveryId);
+    if (payload.resourceSpans) return normalizeOtelTraces(payload, deliveryId, healthySampleRate);
     if (payload.resourceLogs) return normalizeOtelLogs(payload, deliveryId);
     if (payload.resourceMetrics) return normalizeOtelMetrics(payload, deliveryId);
     return [];
@@ -358,7 +361,7 @@ async function receive(req: RawRequest, res: Response) {
   const payload = object(req.body);
   const externalId = req.get("x-github-delivery") ?? req.get("x-request-id") ?? createHash("sha256").update(rawBody).digest("hex").slice(0, 32) ?? randomUUID();
   const eventName = req.get("x-github-event") ?? textValue(req.params.signal);
-  const batch: IngestionBatch = { externalId, signals: normalizePayload(integration.provider, payload, externalId, eventName) };
+  const batch: IngestionBatch = { externalId, signals: normalizePayload(integration.provider, payload, externalId, eventName, integration.healthySampleRate) };
   const queued = await ingestionQueue.enqueue(integration, batch);
   if (queued.duplicate && queued.job.status === "completed") {
     res.status(200).json({ status: "duplicate", acceptedSignals: 0, incidentIds: [], queueId: queued.job.id });

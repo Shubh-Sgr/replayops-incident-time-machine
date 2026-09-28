@@ -71,6 +71,17 @@ describe("automated ingestion", () => {
     expect(signals[0]).toMatchObject({ service: "payments-api", kind: "alert", traceId: "5b8efff798038103d269b633813fc60c" });
   });
 
+  it("honors the connector's healthy trace sample rate", () => {
+    const spans = Array.from({ length: 400 }, (_, index) => ({ traceId: `trace-${index}`, spanId: `span-${index}`, name: "GET /ok", startTimeUnixNano: "1789898400000000000", endTimeUnixNano: "1789898400100000000", status: { code: 0 }, attributes: [] }));
+    const payload = { resourceSpans: [{ resource: { attributes: [{ key: "service.name", value: { stringValue: "api" } }] }, scopeSpans: [{ spans }] }] };
+    expect(normalizePayload("otel", payload, "d", "", 0)).toHaveLength(0);
+    expect(normalizePayload("otel", payload, "d", "", 1)).toHaveLength(400);
+    const half = normalizePayload("otel", payload, "d", "", 0.5);
+    expect(half.length).toBeGreaterThan(150);
+    expect(half.length).toBeLessThan(250);
+    expect(half[0]!.metadata?.sampleRate).toBe(0.5);
+  });
+
   it("buffers a deployment, opens an incident on the later alert, and backfills the precursor", async () => {
     const repository = new MemoryRepository();
     const integration = await repository.createIntegration("demo", { name: "Production telemetry", provider: "generic" });

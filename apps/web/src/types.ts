@@ -153,7 +153,7 @@ export interface SearchResult {
 
 export interface AssistantResponse {
   answer: string;
-  citations: Array<{ code: string; title: string; incidentId: string; eventIds: string[]; excerpt: string }>;
+  citations: Array<{ code: string; title: string; incidentId: string; eventIds: string[]; events?: Array<{ id: string; title: string; service: string; timestamp: string }>; excerpt: string }>;
   confidence: number;
   mode: "deterministic" | "provider";
   providerModel?: string;

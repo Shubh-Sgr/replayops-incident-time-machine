@@ -1,5 +1,5 @@
 import { config } from "./config.js";
-import type { SearchResult } from "./types.js";
+import type { Incident, IncidentDiagnosis, IncidentEvent, SearchResult } from "./types.js";
 
 const sensitivePatterns = [
   /\b(?:sk|pk|api)[-_][a-z0-9_-]{16,}\b/gi,
@@ -36,15 +36,74 @@ export async function embedText(text: string, externalAllowed = true): Promise<n
   return data.data?.[0]?.embedding;
 }
 
-export async function answerQuestion(question: string, evidence: SearchResult[], externalAllowed = true) {
-  const citations = evidence.slice(0, 4).map(({ incident }) => ({
-    code: incident.code,
-    title: redactSensitiveText(incident.title).text,
-    incidentId: incident.id,
-    eventIds: incident.events.slice(0, 5).map((event) => event.id),
-    excerpt: redactSensitiveText(incident.events[0]?.title ?? incident.summary.slice(0, 140)).text
-  }));
-  const rawEvidence = evidence.slice(0, 4).map(({ incident }) => `${incident.code} ${incident.title}\n${incident.summary}\n${incident.events.slice(0, 5).map((event) => `[event:${event.id}] ${event.timestamp}: ${event.title} — ${event.detail}`).join("\n")}`).join("\n\n");
+type AssistantIntent = "challenge" | "next-test" | "changes" | "explain";
+
+// Buttons send a leading instruction ("Challenge…", "Propose…falsification test"); classify on that, not the whole prompt.
+export function assistantIntent(question: string): AssistantIntent {
+  const lead = question.split(/[.?!\n]/)[0] ?? question;
+  if (/challenge|contradict|adversarial|disconfirm/i.test(lead)) return "challenge";
+  if (/next test|falsif|what should i (test|check)|suggest/i.test(lead)) return "next-test";
+  if (/what changed|summari[sz]e|changes/i.test(lead)) return "changes";
+  return "explain";
+}
+
+const clock = (timestamp: string) => `${timestamp.slice(11, 19)} UTC`;
+const cite = (event: IncidentEvent | undefined) => event ? `[${clock(event.timestamp)} ${event.service}: ${event.title}]` : "";
+
+// Deterministic, incident-scoped answer built from the same diagnosis the workbench shows.
+export function scopedDeterministicAnswer(question: string, incident: Incident, diagnosis: IncidentDiagnosis) {
+  const events = [...incident.events].filter((event) => event.evidenceState !== "excluded").sort((left, right) => left.timestamp.localeCompare(right.timestamp));
+  const symptom = events.find((event) => event.id === diagnosis.symptomEventId);
+  const precursor = events.find((event) => event.id === diagnosis.changeCandidates[0]?.eventId);
+  const peak = events.reduce<IncidentEvent | undefined>((highest, event) => !highest || event.impactScore > highest.impactScore ? event : highest, undefined);
+  const recovery = [...events].reverse().find((event) => event.kind === "recovery");
+  const changes = events.filter((event) => event.kind === "deploy" || /config|feature flag|schema|migration|release/i.test(`${event.title} ${event.detail}`));
+  const leading = diagnosis.hypotheses.find((hypothesis) => hypothesis.state !== "disproved");
+  const gaps = diagnosis.evidenceGaps.slice(0, 2).join(" ");
+  const intent = assistantIntent(question);
+  let answer: string;
+  let cited: IncidentEvent[];
+  if (!events.length) {
+    answer = "No active evidence is attached to this investigation. Add a timestamped symptom and at least one earlier observation before asking for an explanation.";
+    cited = [];
+  } else if (intent === "challenge") {
+    const hasContext = events.some((event) => Object.keys(event.metadata ?? {}).some((key) => /^(trace|span|request)_?id$/i.test(key)));
+    answer = precursor && symptom && precursor.id !== symptom.id
+      ? `Strongest challenge: ${cite(precursor)} precedes ${cite(symptom)}, but ${hasContext ? "the retained trace context has not yet been inspected end to end" : "no trace or request ID shows the same requests crossed both"}. Downgrade the explanation if healthy ${symptom.service} requests show the same ${precursor.service} condition, or if failures began before it. Upgrade it only when correlated failing requests diverge at ${precursor.service}.`
+      : `There is no earlier precursor to challenge: the first recorded observation is also the first high-impact symptom ${cite(symptom ?? events[0])}. Add a pre-symptom baseline or a healthy control cohort.`;
+    cited = [precursor, symptom].filter((event): event is IncidentEvent => Boolean(event));
+  } else if (intent === "next-test") {
+    answer = `${diagnosis.nextAction.label}: ${diagnosis.nextAction.reason}${leading ? ` This tests “${leading.title}” (currently ${leading.state}).` : ""}${leading?.safeAction && !diagnosis.nextAction.reason.includes(leading.safeAction) ? ` Safe bounded action if confirmed: ${leading.safeAction}` : ""}${gaps ? ` Missing evidence that would sharpen the test: ${gaps}` : ""}`;
+    cited = [precursor, symptom].filter((event): event is IncidentEvent => Boolean(event));
+  } else if (intent === "changes") {
+    const latest = events.slice(-3);
+    answer = `${changes.length ? `Recorded changes: ${changes.map(cite).join(", ")}.` : "No deployment, configuration, flag, or schema change is recorded in this investigation."} Latest evidence: ${latest.map(cite).join(", ")}. ${recovery ? `Recovery was observed ${cite(recovery)}.` : "No recovery observation is recorded yet."} Evidence revision ${incident.evidenceRevision ?? incident.updatedAt}.`;
+    cited = [...changes, ...latest];
+  } else {
+    answer = `Sequence: first observation ${cite(events[0])}${precursor && precursor.id !== events[0]?.id ? `, strongest precursor ${cite(precursor)}` : ""}${symptom ? `, first high-impact symptom ${cite(symptom)}` : ""}${peak && peak.id !== symptom?.id ? `, peak impact ${cite(peak)}` : ""}${recovery ? `, recovery ${cite(recovery)}` : ", no recovery recorded yet"}. Services in order: ${diagnosis.servicePath.join(" → ")}. ${diagnosis.currentExplanation}${gaps ? ` Unknowns: ${gaps}` : ""}`;
+    cited = [events[0], precursor, symptom, peak, recovery].filter((event): event is IncidentEvent => Boolean(event));
+  }
+  const uniqueCited = [...new Map(cited.map((event) => [event.id, event])).values()];
+  return { answer, eventIds: uniqueCited.map((event) => event.id), confidence: Math.max(0.2, Math.min(0.85, diagnosis.causalConfidence / 100)) };
+}
+
+export async function answerQuestion(question: string, evidence: SearchResult[], externalAllowed = true, scope?: { incident: Incident; diagnosis: IncidentDiagnosis }) {
+  const scoped = scope ? scopedDeterministicAnswer(question, scope.incident, scope.diagnosis) : undefined;
+  const citations = evidence.slice(0, 4).map(({ incident }) => {
+    const eventIds = scoped && incident.id === scope?.incident.id ? scoped.eventIds : incident.events.slice(0, 5).map((event) => event.id);
+    return {
+      code: incident.code,
+      title: redactSensitiveText(incident.title).text,
+      incidentId: incident.id,
+      eventIds,
+      events: eventIds.map((id) => incident.events.find((event) => event.id === id)).filter((event): event is IncidentEvent => Boolean(event)).map((event) => ({ id: event.id, title: redactSensitiveText(event.title).text, service: event.service, timestamp: event.timestamp })),
+      excerpt: redactSensitiveText(incident.events[0]?.title ?? incident.summary.slice(0, 140)).text
+    };
+  });
+  const scopedEvidence = scope
+    ? `${scope.incident.code} ${scope.incident.title}\n${scope.incident.summary}\nService path: ${scope.diagnosis.servicePath.join(" -> ")}\nCurrent explanation: ${scope.diagnosis.currentExplanation}\nKnown gaps: ${scope.diagnosis.evidenceGaps.join(" ")}\n${[...scope.incident.events].filter((event) => event.evidenceState !== "excluded").sort((left, right) => left.timestamp.localeCompare(right.timestamp)).slice(0, 40).map((event) => `[event:${event.id}] ${event.timestamp} ${event.service} ${event.kind}: ${event.title} — ${event.detail}`).join("\n")}`
+    : "";
+  const rawEvidence = [scopedEvidence, ...evidence.slice(0, 4).filter(({ incident }) => incident.id !== scope?.incident.id).map(({ incident }) => `${incident.code} ${incident.title}\n${incident.summary}\n${incident.events.slice(0, 5).map((event) => `[event:${event.id}] ${event.timestamp}: ${event.title} — ${event.detail}`).join("\n")}`)].filter(Boolean).join("\n\n");
   const safeQuestion = redactSensitiveText(question);
   const safeEvidence = redactSensitiveText(rawEvidence);
   const redactions = safeQuestion.redactions + safeEvidence.redactions;
@@ -53,6 +112,13 @@ export async function answerQuestion(question: string, evidence: SearchResult[],
     ? `${citations.length} incident record${citations.length === 1 ? "" : "s"} and ${citations.reduce((count, citation) => count + citation.eventIds.length, 0)} cited events`
     : "No matching incident evidence";
   const deterministicAnswer = (providerError?: string) => {
+    if (scoped) {
+      const safeAnswer = redactSensitiveText(scoped.answer);
+      return {
+        answer: safeAnswer.text, citations, confidence: scoped.confidence, mode: "deterministic" as const,
+        redactions: redactions + safeAnswer.redactions, evidenceBoundary, ...(providerError ? { providerError } : {})
+      };
+    }
     const lead = evidence[0]?.incident;
     if (lead && /adversarial|challenge|disconfirm|falsif/i.test(question)) {
       const events = [...lead.events].sort((left, right) => left.timestamp.localeCompare(right.timestamp));

@@ -448,21 +448,24 @@ apiRouter.post("/search", async (req, res) => {
 });
 
 apiRouter.post("/assistant", async (req, res) => {
-  const parsed = z.object({ question: z.string().min(4).max(1200), incidentId: z.string().optional() }).safeParse(req.body);
+  const parsed = z.object({ question: z.string().min(4).max(1200), incidentId: z.string().optional(), scope: z.enum(["incident", "workspace"]).optional() }).safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Ask a specific question about the available incident evidence." });
     return;
   }
   const privacy=await workspaceService.getPrivacy(userId(req));
-  const embedding = await embedText(parsed.data.question,privacy.externalAiEnabled);
-  let evidence = await repository.search(userId(req), parsed.data.question, embedding);
-  if (parsed.data.incidentId) {
-    const selected = await repository.getIncident(userId(req), parsed.data.incidentId);
-    if (selected && !evidence.some((item) => item.incident.id === selected.id)) {
-      evidence = [{ incident: selected, score: 1, matchReason: "Currently selected incident" }, ...evidence];
-    }
+  const selected = parsed.data.incidentId ? await repository.getIncident(userId(req), parsed.data.incidentId) : undefined;
+  if (parsed.data.incidentId && !selected) { res.status(404).json({ error: "Incident not found." }); return; }
+  const context = selected ? { incident: selected, diagnosis: diagnoseIncident(selected, await workspaceService.listHypothesisTests(userId(req), selected.id)) } : undefined;
+  const selectedResult = selected ? [{ incident: selected, score: 1, matchReason: "Currently selected incident" }] : [];
+  // Incident-scoped questions only see that incident's evidence, so answers cannot cite unrelated investigations.
+  if (selected && parsed.data.scope === "incident") {
+    res.json(await answerQuestion(parsed.data.question, selectedResult, privacy.externalAiEnabled, context));
+    return;
   }
-  res.json(await answerQuestion(parsed.data.question, evidence,privacy.externalAiEnabled));
+  const embedding = await embedText(parsed.data.question,privacy.externalAiEnabled);
+  const matches = await repository.search(userId(req), parsed.data.question, embedding);
+  res.json(await answerQuestion(parsed.data.question, [...selectedResult, ...matches.filter((item) => item.incident.id !== selected?.id)], privacy.externalAiEnabled, context));
 });
 
 apiRouter.get("/integrations", async (req, res) => {

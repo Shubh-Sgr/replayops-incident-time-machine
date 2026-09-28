@@ -4,7 +4,7 @@ export const seedIncidents: Incident[] = [
   {
     id: "inc-1842", code: "ROP-1842", title: "Checkout retries amplified inventory latency",
     summary: "A delayed inventory replica triggered synchronized checkout retries and elevated payment authorization latency.",
-    service: "checkout-api", severity: "critical", status: "identified", owner: "Maya Chen",
+    service: "checkout-api", environment: "production", severity: "critical", status: "identified", owner: "Maya Chen",
     startedAt: "2026-09-20T05:41:12.000Z", resolvedAt: null, createdAt: "2026-09-20T05:44:00.000Z", updatedAt: "2026-09-20T06:06:00.000Z",
     events: [
       { id: "evt-1842-1", incidentId: "inc-1842", timestamp: "2026-09-20T05:41:12.000Z", service: "inventory-api", kind: "metric", title: "Connection pool saturation begins", detail: "Pool utilization crossed 92% while median query time remained within baseline.", impactScore: 42 },
@@ -18,7 +18,7 @@ export const seedIncidents: Incident[] = [
   {
     id: "inc-1838", code: "ROP-1838", title: "Search indexing backlog after catalog import",
     summary: "A bulk catalog import exceeded the indexing consumer's safe concurrency and delayed search freshness.",
-    service: "search-indexer", severity: "high", status: "monitoring", owner: "Noah Williams",
+    service: "search-indexer", environment: "production", severity: "high", status: "monitoring", owner: "Noah Williams",
     startedAt: "2026-09-19T21:18:00.000Z", resolvedAt: null, createdAt: "2026-09-19T21:22:00.000Z", updatedAt: "2026-09-20T04:10:00.000Z",
     events: [
       { id: "evt-1838-1", incidentId: "inc-1838", timestamp: "2026-09-19T21:18:00.000Z", service: "search-indexer", kind: "alert", title: "Index freshness exceeds ten minutes", detail: "Consumer lag rose after a 2.1 million item catalog import.", impactScore: 72 },
@@ -28,7 +28,7 @@ export const seedIncidents: Incident[] = [
   {
     id: "inc-1829", code: "ROP-1829", title: "Session cache eviction storm",
     summary: "A cache node replacement shifted hot keys to one shard and increased authentication misses.",
-    service: "identity-edge", severity: "medium", status: "resolved", owner: "Ishan Rao",
+    service: "identity-edge", environment: "production", severity: "medium", status: "resolved", owner: "Ishan Rao",
     startedAt: "2026-09-18T09:10:00.000Z", resolvedAt: "2026-09-18T10:02:00.000Z", createdAt: "2026-09-18T09:13:00.000Z", updatedAt: "2026-09-18T11:20:00.000Z",
     events: [{ id: "evt-1829-1", incidentId: "inc-1829", timestamp: "2026-09-18T09:10:00.000Z", service: "identity-edge", kind: "deploy", title: "Cache node replacement completed", detail: "Consistent-hash ring converged with one shard carrying 46% of hot keys.", impactScore: 61 }]
   }

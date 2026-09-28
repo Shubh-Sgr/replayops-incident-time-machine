@@ -67,6 +67,13 @@ In demo mode, sign in with either local persona (password `ReplayOps!2026`): `op
 - **Smoke test:** with `npm run dev` running, `npm run smoke` walks ingestion, incident CRUD, search, the full check → proposal → validation → independent review → recovery → monitoring → resolve journey, and error handling against the demo API, then cleans up. Set `API=http://host:port` to target another demo-mode instance.
 - **Port conflicts:** the API reads `PORT` (default 8787). If your shell or tooling exports `PORT` for the web server, start with `PORT=8787 npm run dev` so the API does not bind the Vite port.
 
+## Debugging an incident in ReplayOps
+
+- **Healthy vs failing requests:** slow OTLP spans (≥ 2 s) count toward the failing cohort alongside errors, so latency incidents get a real comparison against sampled healthy spans from the same service, route, method, and region. The healthy sample rate set on each source (**Sources → Retention, sampling, and quota**) is applied during ingestion.
+- **Ready-to-run queries:** each investigation generates copyable trace, error-log, exemplar-trace, and recent-change queries covering every affected service. An unknown environment is left out of the query instead of being matched literally.
+- **Next action that advances:** after a test supports the leading explanation, the next action moves to validating a bounded fix; an inconclusive result proposes a different test instead of repeating the same one.
+- **Incident-scoped assistant:** the workbench assistant only sees the selected incident, answers each button (explain, challenge, next test, what changed) differently, and cites events by name. Without an AI key, answers are built from the same diagnosis the workbench shows.
+
 ## Configure Supabase
 
 1. Create a free Supabase project.

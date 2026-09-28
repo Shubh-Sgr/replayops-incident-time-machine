@@ -109,6 +109,10 @@ r = await call("POST", `/api/http-replays/${spec.id}/execute`); check("execute h
 r = await call("POST", `/api/incidents/${inc.id}/comments`, { body: "Looks like the ORM bump", eventId: ev1.id }); check("comment", r.status === 201);
 r = await call("PUT", `/api/incidents/${inc.id}/postmortem`, { summary: "s", rootCause: "N+1", impact: "8%", recovery: "revert", followUps: "add test", status: "draft" }); check("postmortem", r.status === 200);
 r = await call("POST", `/api/incidents/${inc.id}/evidence-bundle`); check("evidence bundle", r.status === 201);
+r = await call("POST", "/api/assistant", { question: "Propose the cheapest safe falsification test. Use only this incident.", incidentId: "inc-1842", scope: "incident" });
+check("scoped assistant cites only its incident", r.status === 200 && r.body.citations.length === 1 && r.body.citations[0].incidentId === "inc-1842" && r.body.citations[0].events?.length > 0, r.body.answer?.slice(0, 60));
+r = await call("GET", "/api/incidents/inc-1842/intelligence");
+check("debug queries cover affected services", r.status === 200 && r.body.querySuggestions.some((item) => item.id === "error-logs" && item.query.includes("payments-api")));
 r = await call("PATCH", "/api/hypothesis-tests/00000000-0000-4000-8000-00000000dead", { status: "supported", result: "evidence text here" }); check("patch missing hypothesis test -> 404", r.status === 404, `got ${r.status}`);
 r = await call("PATCH", "/api/mitigations/00000000-0000-4000-8000-00000000dead", { status: "approved" }); check("patch missing mitigation -> 409", r.status === 409, `got ${r.status}`);
 r = await call("POST", "/api/ingestion-queue/nope/retry"); check("retry missing job -> 404", r.status === 404, `got ${r.status}`);

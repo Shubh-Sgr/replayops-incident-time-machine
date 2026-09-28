@@ -203,6 +203,13 @@ export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = [
   if (events.filter((event) => event.timestamp < symptom.timestamp).length < 2) evidenceGaps.push("The pre-symptom baseline is thin; add healthy-window measurements for comparison.");
   if (events.length < 5) evidenceGaps.push("Fewer than five evidence points are available; hypothesis confidence is intentionally capped.");
 
+  // Once a test has run, repeating the same test adds nothing. Point the responder at the next distinct step.
+  for (const hypothesis of hypotheses) {
+    if (hypothesis.state === "supported") hypothesis.nextTest = `Confirm by intervention: ${hypothesis.safeAction} Verify that the ${symptom.service} symptom falls and returns if the change is reverted.`;
+    else if (hypothesis.state === "inconclusive") hypothesis.nextTest = `The previous test did not discriminate. Break down “${symptom.title}” by instance, zone, and release, and compare the failing cohort with a healthy cohort in the same window.`;
+    else if (hypothesis.state === "contested") hypothesis.nextTest = "Re-run the conflicting tests on the same cohort, window, and release so their results can be compared directly.";
+  }
+
   const stateOrder: Record<DiagnosticHypothesis["state"], number> = { supported: 0, untested: 1, inconclusive: 2, contested: 3, disproved: 4 };
   const orderedHypotheses = hypotheses
     .sort((left, right) => stateOrder[left.state] - stateOrder[right.state] || left.rank - right.rank)
@@ -215,6 +222,8 @@ export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = [
     ? { label: activeTest.status === "running" ? "Record the test outcome" : "Start the assigned test", reason: activeTest.title, href: `?area=investigate&test=${activeTest.id}` }
     : contested
       ? { label: "Resolve contradictory test results", reason: contested.outcomeSummary, href: `?area=investigate&hypothesis=${encodeURIComponent(contested.id)}` }
+    : leading?.state === "supported"
+      ? { label: "Validate a bounded fix", reason: leading.nextTest, href: "?area=validate" }
     : leading
       ? { label: leading.testCount ? "Run a different test" : "Run the next test", reason: leading.nextTest, href: `?area=investigate&hypothesis=${encodeURIComponent(leading.id)}` }
       : { label: "Add missing evidence", reason: evidenceGaps[0] ?? "Every current explanation has been disproved.", href: "?area=evidence&gap=missing" };
