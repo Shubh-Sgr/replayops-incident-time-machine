@@ -67,6 +67,17 @@ In demo mode, sign in with either local persona (password `ReplayOps!2026`): `op
 - **Smoke test:** with `npm run dev` running, `npm run smoke` walks ingestion, incident CRUD, search, the full check → proposal → validation → independent review → recovery → monitoring → resolve journey, and error handling against the demo API, then cleans up. Set `API=http://host:port` to target another demo-mode instance.
 - **Port conflicts:** the API reads `PORT` (default 8787). If your shell or tooling exports `PORT` for the web server, start with `PORT=8787 npm run dev` so the API does not bind the Vite port.
 
+## How an investigation works
+
+Each incident page has three tabs that follow the order you'd work in:
+
+1. **Investigate.** ReplayOps proposes the most likely explanation from the evidence and a *recommended next check*: one concrete thing to look at, such as a log, a commit diff, or a trace. Click **Start this check**, write what you saw, and mark it **Confirms it**, **Rules it out**, or **Unclear**. The explanation and next step update from your answers, and every result is kept under **Already checked**.
+2. **Fix & verify.** Guided steps with a "What to do now" line at the top:
+   - *Record the fix* (optional): the exact change, how to undo it, and how it was tested. A recorded fix needs a teammate's approval before resolving.
+   - *Confirm it's fixed*: for GitHub incidents this happens automatically when a later deploy or run succeeds. For runtime incidents, pick one number (for example error rate ≤ 1%) and record readings after the fix is live.
+   - *Resolve*: start monitoring, then resolve once recovery is confirmed.
+3. **Activity & handoff.** A generated summary of what was known, checked, ruled out, changed, and confirmed, plus the learning record.
+
 ## Debugging an incident in ReplayOps
 
 - **Healthy vs failing requests:** slow OTLP spans (≥ 2 s) count toward the failing cohort alongside errors, so latency incidents get a real comparison against sampled healthy spans from the same service, route, method, and region. The healthy sample rate set on each source (**Sources → Retention, sampling, and quota**) is applied during ingestion.

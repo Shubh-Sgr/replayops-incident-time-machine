@@ -61,24 +61,24 @@ const passes = (criterion: RecoveryCriterion, measurement: TypedMeasurement) => 
   && (criterion.comparison === "lte" ? measurement.value <= criterion.targetValue : measurement.value >= criterion.targetValue);
 
 export function evaluateRuntimeRecovery(criterion: RecoveryCriterion | undefined, measurements: TypedMeasurement[], now = new Date()): RecoveryEvaluation {
-  if (!criterion) return { state:"insufficient", reason:"Define a versioned runtime recovery criterion before monitoring.", criterionVersion:null, evaluatedAt:now.toISOString(), supportingMeasurementIds:[] };
+  if (!criterion) return { state:"insufficient", reason:"Choose the number that shows it's fixed, then record readings after the fix is live.", criterionVersion:null, evaluatedAt:now.toISOString(), supportingMeasurementIds:[] };
   const relevant = measurements.filter((item) => item.criterionId === criterion.id).sort((a,b) => b.observedAt.localeCompare(a.observedAt));
-  if (!relevant.length) return { state:"insufficient", reason:"No runtime measurements have been recorded for this criterion.", criterionVersion:criterion.version, evaluatedAt:now.toISOString(), supportingMeasurementIds:[] };
+  if (!relevant.length) return { state:"insufficient", reason:"No readings recorded yet. Record the current value once the fix is live.", criterionVersion:criterion.version, evaluatedAt:now.toISOString(), supportingMeasurementIds:[] };
   const newest = relevant[0]!;
-  if (newest.state !== "valid") return { state:"insufficient", reason:"The newest measurement is missing or invalid.", criterionVersion:criterion.version, evaluatedAt:now.toISOString(), supportingMeasurementIds:[newest.id] };
+  if (newest.state !== "valid") return { state:"insufficient", reason:"The newest reading has no value.", criterionVersion:criterion.version, evaluatedAt:now.toISOString(), supportingMeasurementIds:[newest.id] };
   const ageMinutes = (now.getTime() - Date.parse(newest.observedAt)) / 60_000;
-  if (ageMinutes > criterion.maxAgeMinutes) return { state:"stale", reason:`The newest measurement is ${Math.round(ageMinutes)} minutes old; the limit is ${criterion.maxAgeMinutes}.`, criterionVersion:criterion.version, evaluatedAt:now.toISOString(), supportingMeasurementIds:[newest.id] };
+  if (ageMinutes > criterion.maxAgeMinutes) return { state:"stale", reason:`The newest reading is ${Math.round(ageMinutes)} minutes old; it must be under ${criterion.maxAgeMinutes}. Record a fresh reading.`, criterionVersion:criterion.version, evaluatedAt:now.toISOString(), supportingMeasurementIds:[newest.id] };
   const consecutive = relevant.slice(0, criterion.minConsecutiveWindows);
   const newestFailure = relevant.find((item) => item.state === "valid" && !passes(criterion, item));
   if (newestFailure && Date.parse(newestFailure.observedAt) >= Date.parse(consecutive.at(-1)?.observedAt ?? newest.observedAt)) {
-    return { state:"failed", reason:"A newer applicable measurement is outside the recovery threshold.", criterionVersion:criterion.version, evaluatedAt:now.toISOString(), supportingMeasurementIds:[newestFailure.id] };
+    return { state:"failed", reason:"The newest reading is outside the target, so it isn't fixed yet.", criterionVersion:criterion.version, evaluatedAt:now.toISOString(), supportingMeasurementIds:[newestFailure.id] };
   }
   if (consecutive.length < criterion.minConsecutiveWindows || !consecutive.every((item) => item.state === "valid" && passes(criterion,item))) {
-    return { state:"insufficient", reason:`Need ${criterion.minConsecutiveWindows} consecutive passing windows; ${consecutive.filter((item)=>item.state === "valid" && passes(criterion,item)).length} are currently available.`, criterionVersion:criterion.version, evaluatedAt:now.toISOString(), supportingMeasurementIds:consecutive.map((item)=>item.id) };
+    return { state:"insufficient", reason:`Need ${criterion.minConsecutiveWindows} passing readings in a row; ${consecutive.filter((item)=>item.state === "valid" && passes(criterion,item)).length} so far. Record another reading.`, criterionVersion:criterion.version, evaluatedAt:now.toISOString(), supportingMeasurementIds:consecutive.map((item)=>item.id) };
   }
   const observedMinutes = (Date.parse(consecutive[0]!.windowEndedAt) - Date.parse(consecutive.at(-1)!.windowStartedAt)) / 60_000;
-  if (observedMinutes < criterion.observationMinutes) return { state:"insufficient", reason:`Passing windows cover ${Math.max(0,Math.round(observedMinutes))} minutes; ${criterion.observationMinutes} are required.`, criterionVersion:criterion.version, evaluatedAt:now.toISOString(), supportingMeasurementIds:consecutive.map((item)=>item.id) };
-  return { state:"verified", reason:"The newest consecutive runtime windows satisfy the versioned recovery criterion.", criterionVersion:criterion.version, evaluatedAt:now.toISOString(), supportingMeasurementIds:consecutive.map((item)=>item.id) };
+  if (observedMinutes < criterion.observationMinutes) return { state:"insufficient", reason:`Passing readings cover ${Math.max(0,Math.round(observedMinutes))} of the ${criterion.observationMinutes} minutes needed. Record another reading in a few minutes.`, criterionVersion:criterion.version, evaluatedAt:now.toISOString(), supportingMeasurementIds:consecutive.map((item)=>item.id) };
+  return { state:"verified", reason:"Recent readings meet the target, so recovery is confirmed.", criterionVersion:criterion.version, evaluatedAt:now.toISOString(), supportingMeasurementIds:consecutive.map((item)=>item.id) };
 }
 
 export function evaluateDeliveryRecovery(criterion: RecoveryCriterion | undefined, validations: ValidationArtifact[], now = new Date()): RecoveryEvaluation {
