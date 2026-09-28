@@ -71,7 +71,7 @@ export function IncidentsPage() {
       </div>
 
       {incidents.isLoading ? <div className="space-y-2">{Array.from({ length: 5 }).map((_, index) => <Skeleton key={index} className="h-24 w-full rounded-panel" />)}</div> : incidents.error ? (
-        <div className="surface-lined p-6 text-center"><TriangleAlert className="mx-auto h-6 w-6 text-danger" /><p className="mt-3 font-semibold">Could not load incidents</p><button className="control-primary mt-4" onClick={() => void incidents.refetch()}>Retry</button></div>
+        <div className="surface-lined p-6 text-center"><TriangleAlert className="mx-auto h-6 w-6 text-danger" /><p className="mt-3 font-semibold">Could not load incidents</p><p className="mt-2 text-sm text-muted">{incidents.error instanceof Error ? incidents.error.message : "The incident list could not be loaded."}</p><button className="control-primary mt-4" onClick={() => void incidents.refetch()}>Retry</button></div>
       ) : (
         <div className="surface-lined overflow-hidden">
           <div className="hidden grid-cols-[100px_minmax(260px,1fr)_150px_130px_150px_170px_52px] gap-4 border-b border-line bg-rail px-5 py-3 text-xs font-semibold text-muted lg:grid">

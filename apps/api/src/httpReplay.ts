@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import { redactSensitiveText } from "./ai.js";
 import { config } from "./config.js";
+import { notFound } from "./errors.js";
 import type { HttpReplayExecution, HttpReplaySpec } from "./types.js";
 import { workspaceService } from "./workspace.js";
 
@@ -46,7 +47,7 @@ class HttpReplayService {
     const context=await workspaceService.assertRole(userId,["admin","responder"]); const safe=this.sanitize(input);
     if (!this.pool) { const value:HttpReplaySpec={id:randomUUID(),incidentId,evidenceRevision,...safe,networkPolicy:"deny_except_loopback_target",createdAt:new Date().toISOString()};this.specs.unshift(value);return structuredClone(value); }
     const result=await this.pool.query(`insert into http_replay_specs(organization_id,incident_id,name,evidence_revision,application_version,request,assertions,dependencies) select $1,i.id,$3,$4,$5,$6,$7,$8 from incidents i where i.id=$2 and i.organization_id=$1 returning *`,[context.organizationId,incidentId,safe.name,evidenceRevision,safe.applicationVersion,safe.request,safe.assertions,safe.dependencies]);
-    if(!result.rows[0]) throw new Error("Incident not found in this workspace."); return mapSpec(result.rows[0] as Row);
+    if(!result.rows[0]) throw notFound("Incident not found in this workspace."); return mapSpec(result.rows[0] as Row);
   }
   async list(userId:string,incidentId:string) {
     const context=await workspaceService.context(userId);

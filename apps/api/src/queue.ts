@@ -3,6 +3,7 @@ import { Pool } from "pg";
 import { config } from "./config.js";
 import { repository } from "./repository.js";
 import type { IngestionBatch, IngestionResult, IntegrationTarget, QueueJob } from "./types.js";
+import { notFound } from "./errors.js";
 
 type Row = Record<string, unknown>;
 type StoredJob = QueueJob & { integration: IntegrationTarget; batch: IngestionBatch };
@@ -119,9 +120,9 @@ class DurableIngestionQueue {
   }
 
   async retry(userId: string, jobId: string) {
-    if (!this.pool) { const job = this.jobs.find((item) => item.id === jobId); if (!job) throw new Error("Queue job not found."); job.status = "retrying"; job.nextAttemptAt = new Date().toISOString(); job.updatedAt = new Date().toISOString(); return structuredClone(publicJob(job)); }
+    if (!this.pool) { const job = this.jobs.find((item) => item.id === jobId); if (!job) throw notFound("Queue job not found."); job.status = "retrying"; job.nextAttemptAt = new Date().toISOString(); job.updatedAt = new Date().toISOString(); return structuredClone(publicJob(job)); }
     const result = await this.pool.query(`update ingestion_queue q set status='retrying',next_attempt_at=now(),updated_at=now() from integrations i where q.id=$2 and i.id=q.integration_id and exists(select 1 from organization_members m where m.organization_id=i.organization_id and m.user_id=$1 and m.role in ('admin','responder')) returning q.*, i.name as integration_name`, [userId, jobId]);
-    if (!result.rows[0]) throw new Error("Queue job not found or your role cannot retry it.");
+    if (!result.rows[0]) throw notFound("Queue job not found or your role cannot retry it.");
     return mapJob(result.rows[0] as Row);
   }
 }

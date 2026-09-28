@@ -9,7 +9,8 @@
     "typecheck": "npm run typecheck --workspace @replayops/api && npm run typecheck --workspace @replayops/web",
     "test": "npm run test --workspace @replayops/api && npm run test --workspace @replayops/web",
     "replay:http": "node scripts/replay-http.mjs",
-    "start": "npm run start --workspace @replayops/api"
+    "start": "npm run start --workspace @replayops/api",
+    "smoke": "node scripts/smoke-api.mjs"
   },
   "devDependencies": { "concurrently": "^9.1.2" },
   "engines": { "node": ">=20" }

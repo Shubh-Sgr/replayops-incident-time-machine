@@ -57,6 +57,16 @@ npm run dev
 
 Open `http://localhost:5173` and choose **Explore the synthetic workspace**. The frontend uses `http://localhost:8787/api` by default.
 
+In demo mode, sign in with either local persona (password `ReplayOps!2026`): `operator@replayops.dev` requests changes and `reviewer@replayops.dev` independently approves them.
+
+## Debugging ReplayOps itself
+
+- **Request IDs:** every API response carries an `x-request-id` header (a safe caller-supplied value is reused). Error bodies include `requestId`, and UI error messages end with `(HTTP <status> · request <id>)`, so a message on screen maps directly to an API log line.
+- **Request log:** the API logs one line per request: `METHOD /path STATUS 1.2ms req=<id>`. Stack traces are printed only for genuine 5xx faults, prefixed with the same request ID.
+- **Accurate status codes:** malformed JSON returns 400, missing records 404, permission failures 403, and stale-evidence or workflow conflicts 409. Validation failures list each invalid field instead of a generic error.
+- **Smoke test:** with `npm run dev` running, `npm run smoke` walks ingestion, incident CRUD, search, the full check → proposal → validation → independent review → recovery → monitoring → resolve journey, and error handling against the demo API, then cleans up. Set `API=http://host:port` to target another demo-mode instance.
+- **Port conflicts:** the API reads `PORT` (default 8787). If your shell or tooling exports `PORT` for the web server, start with `PORT=8787 npm run dev` so the API does not bind the Vite port.
+
 ## Configure Supabase
 
 1. Create a free Supabase project.

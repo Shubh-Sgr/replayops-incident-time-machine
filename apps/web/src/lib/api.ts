@@ -1,5 +1,6 @@
 import { supabase } from "./supabase";
 import { encodeDemoSessionToken } from "./demoSession";
+import { ApiError, describeApiError } from "./apiErrors";
 import type { ActionNotification, AssistantResponse, AuditEntry, CaseworkSnapshot, ChangeProposal, DashboardData, EvidenceBundle, HttpReplayExecution, HttpReplaySpec, HypothesisTest, HypothesisTestStatus, Incident, IncidentComment, IncidentDecision, IncidentDiagnosis, IncidentEvent, IncidentPolicy, IncidentPostmortem, IngestionResult, Integration, IntegrationProvider, InvestigationCheck, InvestigationCheckStatus, InvestigationIntelligence, MitigationRequest, PrivacySettings, ProposalReview, QueueJob, RecoveryCriterion, RecoveryVerification, ReplayConfig, ReplayResult, SearchResult, ServiceDefinition, TeamInvitation, TeamMember, TypedMeasurement, ValidationArtifact, WorkspaceContext, WorkspaceRole } from "../types";
 
 const API_URL = (import.meta.env.VITE_API_URL ?? "http://localhost:8787/api").replace(/\/$/, "");
@@ -19,17 +20,22 @@ async function accessToken() {
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const token = await accessToken();
-  const response = await fetch(`${API_URL}${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...init?.headers
-    }
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${API_URL}${path}`, {
+      ...init,
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...init?.headers
+      }
+    });
+  } catch {
+    throw new Error(`Cannot reach the ReplayOps API at ${API_URL}. Check that the API server is running and VITE_API_URL is correct.`);
+  }
   if (!response.ok) {
     const payload = await response.json().catch(() => ({ error: "The service returned an unreadable error." }));
-    throw new Error(payload.error ?? "The request could not be completed.");
+    throw new ApiError(describeApiError(payload), response.status, response.headers.get("x-request-id") ?? payload?.requestId ?? null);
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;

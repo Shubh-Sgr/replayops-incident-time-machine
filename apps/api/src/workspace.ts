@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import { config } from "./config.js";
 import { sendInvitationEmail } from "./mailer.js";
+import { conflict, forbidden, HttpError, notFound } from "./errors.js";
 import type { ActionNotification, AuditEntry, HypothesisTest, HypothesisTestStatus, IncidentComment, IncidentPolicy, IncidentPostmortem, MitigationRequest, PrivacySettings, RecoveryVerification, ReplayResult, ServiceDefinition, TeamInvitation, TeamMember, WorkspaceContext, WorkspaceRole } from "./types.js";
 
 type Row = Record<string, unknown>;
@@ -197,13 +198,13 @@ class WorkspaceService {
     if (!this.pool) return { organizationId: "demo-organization", organizationName: "ReplayOps demonstration", role: this.memoryMembers.find((item) => item.userId === userId)?.role ?? "responder" };
     const result = await this.pool.query(`select m.organization_id,m.role,o.name from organization_members m join organizations o on o.id=m.organization_id where m.user_id=$1 order by m.created_at desc limit 1`, [userId]);
     const row = result.rows[0] as Row | undefined;
-    if (!row) throw new Error("No workspace membership exists for this account.");
+    if (!row) throw forbidden("No workspace membership exists for this account.");
     return { organizationId: String(row.organization_id), organizationName: String(row.name), role: row.role as WorkspaceRole };
   }
 
   async assertRole(userId: string, roles: WorkspaceRole[]) {
     const context = await this.context(userId);
-    if (!roles.includes(context.role)) throw new Error("Your workspace role does not allow this action.");
+    if (!roles.includes(context.role)) throw forbidden("Your workspace role does not allow this action.");
     return context;
   }
 
@@ -287,10 +288,10 @@ class WorkspaceService {
 
   async updateMemberRole(userId: string, actor: string, memberId: string, role: WorkspaceRole) {
     const context = await this.assertRole(userId, ["admin"]);
-    if (memberId === userId) throw new Error("Ask another administrator to change your own role.");
-    if (!this.pool) { const member = this.memoryMembers.find((item) => item.userId === memberId); if (!member) throw new Error("Team member not found."); member.role = role; await this.audit(userId, actor, "changed member role", "member", memberId, { role }); return member; }
+    if (memberId === userId) throw forbidden("Ask another administrator to change your own role.");
+    if (!this.pool) { const member = this.memoryMembers.find((item) => item.userId === memberId); if (!member) throw notFound("Team member not found."); member.role = role; await this.audit(userId, actor, "changed member role", "member", memberId, { role }); return member; }
     const result = await this.pool.query(`update organization_members set role=$3 where organization_id=$1 and user_id=$2 returning *`, [context.organizationId, memberId, role]);
-    if (!result.rows[0]) throw new Error("Team member not found.");
+    if (!result.rows[0]) throw notFound("Team member not found.");
     await this.audit(userId, actor, "changed member role", "member", memberId, { role });
     return mapMember(result.rows[0] as Row);
   }
@@ -329,7 +330,7 @@ class WorkspaceService {
     const tokenHash = createHash("sha256").update(token).digest("hex");
     if (!this.pool) {
       const invite = this.memoryInvites.find((item) => item.inviteToken === token && item.email.toLowerCase() === email.toLowerCase() && item.status === "pending");
-      if (!invite || new Date(invite.expiresAt) < new Date()) throw new Error("This invitation is invalid, expired, or belongs to another email address.");
+      if (!invite || new Date(invite.expiresAt) < new Date()) throw new HttpError(410, "This invitation is invalid, expired, or belongs to another email address.");
       invite.status = "accepted";
       this.memoryMembers.push({ userId, email, displayName: email.split("@")[0] ?? "Responder", role: invite.role, joinedAt: new Date().toISOString() });
       return { organizationName: "ReplayOps demonstration", role: invite.role };
@@ -339,7 +340,7 @@ class WorkspaceService {
       await client.query("begin");
       const found = await client.query(`select i.*,o.name as organization_name from organization_invitations i join organizations o on o.id=i.organization_id where i.token_hash=$1 and lower(i.email)=lower($2) and i.status='pending' and i.expires_at>now() for update`, [tokenHash, email]);
       const row = found.rows[0] as Row | undefined;
-      if (!row) throw new Error("This invitation is invalid, expired, or belongs to another email address.");
+      if (!row) throw new HttpError(410, "This invitation is invalid, expired, or belongs to another email address.");
       await client.query(`insert into organization_members(organization_id,user_id,role,email,display_name) values($1,$2,$3,$4,$5) on conflict(organization_id,user_id) do update set role=excluded.role,email=excluded.email`, [row.organization_id, userId, row.role, email, email.split("@")[0] ?? "Responder"]);
       await client.query(`update organization_invitations set status='accepted' where id=$1`, [row.id]);
       await client.query(`insert into workspace_audit_log(organization_id,actor,action,target_type,target_id,detail) values($1,$2,'accepted invitation','member',$3,$4)`, [row.organization_id, email, userId, { role: row.role }]);
@@ -370,7 +371,7 @@ class WorkspaceService {
       this.memoryMitigations.unshift(request);
     } else {
       const result = await this.pool.query(`insert into mitigation_requests(organization_id,incident_id,requested_by,title,action,rollback_plan,current_value,proposed_value,blast_radius,change_owner,observation_minutes,replay_run_id,replay_config,replay_projection,evidence_version) select $1,i.id,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15 from incidents i where i.id=$2 and i.organization_id=$1 returning *,null::timestamptz as incident_evidence_revision`, [context.organizationId, incidentId, actor, input.title, input.action, input.rollbackPlan,input.currentValue,input.proposedValue,input.blastRadius,input.changeOwner,input.observationMinutes, input.replay.id, input.replay.config, input.replay.projection, input.replay.evidenceVersion]);
-      if (!result.rows[0]) throw new Error("Incident not found in this workspace.");
+      if (!result.rows[0]) throw notFound("Incident not found in this workspace.");
       request = mapMitigation(result.rows[0] as Row);
     }
     await this.audit(userId, actor, "requested mitigation approval", "mitigation", request.id, { incidentId, title: input.title });
@@ -382,21 +383,21 @@ class WorkspaceService {
     let request: MitigationRequest | undefined;
     if (!this.pool) {
       request = this.memoryMitigations.find((item) => item.id === requestId);
-      if (!request || request.status !== "pending") throw new Error("This review request is unavailable or has already been decided.");
+      if (!request || request.status !== "pending") throw conflict("This review request is unavailable or has already been decided.");
       const permission = mitigationReviewPermission({ requestedBy:request.requestedBy, actor, role:context.role, status, stale:request.stale });
-      if (!permission.allowed) throw new Error(permission.error);
+      if (!permission.allowed) throw forbidden(permission.error);
       if (request) Object.assign(request, { status, reviewedBy: actor, reviewedAt: new Date().toISOString() });
       await this.audit(userId, actor, permission.action, "mitigation", request.id, { incidentId: request.incidentId });
     } else {
       const existing = await this.pool.query(`select m.*,i.evidence_revision as incident_evidence_revision from mitigation_requests m join incidents i on i.id=m.incident_id where m.organization_id=$1 and m.id=$2 and m.status='pending'`, [context.organizationId, requestId]);
-      if (!existing.rows[0]) throw new Error("This review request is unavailable or has already been decided.");
+      if (!existing.rows[0]) throw conflict("This review request is unavailable or has already been decided.");
       const current = mapMitigation(existing.rows[0] as Row);
       const permission = mitigationReviewPermission({ requestedBy:current.requestedBy, actor, role:context.role, status, stale:current.stale });
-      if (!permission.allowed) throw new Error(permission.error);
+      if (!permission.allowed) throw forbidden(permission.error);
       const evidenceGuard = status === "approved" ? "and i.evidence_revision=m.evidence_version" : "";
       const result = await this.pool.query(`update mitigation_requests m set status=$3,reviewed_by=$4,reviewed_at=now() from incidents i where m.id=$2 and m.organization_id=$1 and m.status='pending' and i.id=m.incident_id ${evidenceGuard} returning m.*,i.evidence_revision as incident_evidence_revision`, [context.organizationId, requestId, status, actor]);
       request = result.rows[0] ? mapMitigation(result.rows[0] as Row) : undefined;
-      if (!request) throw new Error("Evidence changed while this request was being reviewed. Recalculate before approval.");
+      if (!request) throw conflict("Evidence changed while this request was being reviewed. Recalculate before approval.");
       await this.audit(userId, actor, permission.action, "mitigation", request.id, { incidentId: request.incidentId });
     }
     return request;
@@ -411,13 +412,13 @@ class WorkspaceService {
   async createHypothesisTest(userId: string, actor: string, incidentId: string, input: Pick<HypothesisTest, "hypothesisId" | "title" | "instruction" | "assignee">) {
     const context = await this.assertRole(userId, ["admin", "responder"]);
     const existing = (await this.listHypothesisTests(userId, incidentId)).find((item) => item.hypothesisId === input.hypothesisId && ["planned", "running"].includes(item.status));
-    if (existing) throw new Error("This explanation already has an active test. Open that test instead of creating a duplicate.");
+    if (existing) throw conflict("This explanation already has an active test. Open that test instead of creating a duplicate.");
     let value: HypothesisTest;
     if (!this.pool) {
       const now = new Date().toISOString(); value = { id: randomUUID(), incidentId, ...input, status: "planned", result: "", createdAt: now, updatedAt: now }; this.memoryHypothesisTests.unshift(value);
     } else {
       const result = await this.pool.query(`insert into hypothesis_tests(organization_id,incident_id,hypothesis_id,title,instruction,assignee) select $1,i.id,$3,$4,$5,$6 from incidents i where i.id=$2 and i.organization_id=$1 returning *`, [context.organizationId, incidentId, input.hypothesisId, input.title, input.instruction, input.assignee]);
-      if (!result.rows[0]) throw new Error("Incident not found in this workspace."); value = mapHypothesisTest(result.rows[0] as Row);
+      if (!result.rows[0]) throw notFound("Incident not found in this workspace."); value = mapHypothesisTest(result.rows[0] as Row);
     }
     await this.audit(userId, actor, "created hypothesis test", "hypothesis-test", value.id, { incidentId, hypothesisId: input.hypothesisId, assignee: input.assignee }); return value;
   }
@@ -426,7 +427,7 @@ class WorkspaceService {
     const context = await this.assertRole(userId, ["admin", "responder"]); let value: HypothesisTest | undefined;
     if (!this.pool) { value = this.memoryHypothesisTests.find((item) => item.id === id); if (value) Object.assign(value, input, { updatedAt: new Date().toISOString(), completedAt: ["supported","disproved","inconclusive"].includes(input.status) ? new Date().toISOString() : null }); }
     else { const result = await this.pool.query(`update hypothesis_tests set status=$3,result=$4,updated_at=now(),completed_at=case when $3 in ('supported','disproved','inconclusive') then now() else null end where organization_id=$1 and id=$2 returning *`, [context.organizationId, id, input.status, input.result]); value = result.rows[0] ? mapHypothesisTest(result.rows[0] as Row) : undefined; }
-    if (!value) throw new Error("Hypothesis test not found."); await this.audit(userId, actor, "updated hypothesis test", "hypothesis-test", id, { status: input.status }); return value;
+    if (!value) throw notFound("Hypothesis test not found."); await this.audit(userId, actor, "updated hypothesis test", "hypothesis-test", id, { status: input.status }); return value;
   }
 
   async listRecoveries(userId: string, incidentId: string) { const context = await this.context(userId); if (!this.pool) return structuredClone(this.memoryRecoveries.filter((item) => item.incidentId === incidentId)); return (await this.pool.query(`select * from recovery_verifications where organization_id=$1 and incident_id=$2 order by created_at desc`, [context.organizationId, incidentId])).rows.map(mapRecovery); }
@@ -438,16 +439,16 @@ class WorkspaceService {
     const status: RecoveryVerification["status"] = !fresh ? "pending" : meetsTarget ? "verified" : "failed";
     const normalized = { ...input, status, freshnessMinutes };
     if (!this.pool) { const now = new Date().toISOString(); value = { id: randomUUID(), incidentId, ...normalized, createdAt: now, updatedAt: now }; this.memoryRecoveries.unshift(value); }
-    else { const result = await this.pool.query(`insert into recovery_verifications(organization_id,incident_id,metric,target_value,baseline_value,observed_value,observation_minutes,status,reason,unit,comparison,source,query,window_started_at,window_ended_at,observed_at,freshness_minutes) select $1,i.id,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17 from incidents i where i.id=$2 and i.organization_id=$1 returning *`, [context.organizationId, incidentId, input.metric, input.targetValue, input.baselineValue, input.observedValue, input.observationMinutes, status, input.reason, input.unit, input.comparison, input.source, input.query, input.windowStartedAt, input.windowEndedAt, input.observedAt, freshnessMinutes]); if (!result.rows[0]) throw new Error("Incident not found in this workspace."); value = mapRecovery(result.rows[0] as Row); }
+    else { const result = await this.pool.query(`insert into recovery_verifications(organization_id,incident_id,metric,target_value,baseline_value,observed_value,observation_minutes,status,reason,unit,comparison,source,query,window_started_at,window_ended_at,observed_at,freshness_minutes) select $1,i.id,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17 from incidents i where i.id=$2 and i.organization_id=$1 returning *`, [context.organizationId, incidentId, input.metric, input.targetValue, input.baselineValue, input.observedValue, input.observationMinutes, status, input.reason, input.unit, input.comparison, input.source, input.query, input.windowStartedAt, input.windowEndedAt, input.observedAt, freshnessMinutes]); if (!result.rows[0]) throw notFound("Incident not found in this workspace."); value = mapRecovery(result.rows[0] as Row); }
     await this.audit(userId, actor, "recorded recovery verification", "recovery", value.id, { incidentId, status, source: input.source, observedAt: input.observedAt }); return value;
   }
   async assertRecoveryVerified(userId: string, incidentId: string) { const values = await this.listRecoveries(userId, incidentId); const latest = values.sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0]; if (!latest || latest.status !== "verified") throw new Error(latest?.status === "failed" ? "The latest recovery observation regressed. Keep monitoring and record a newer passing window before resolving." : "Record a fresh, server-verified recovery observation before resolving this incident."); }
 
   async getPostmortem(userId: string, incidentId: string) { const context = await this.context(userId); if (!this.pool) return this.memoryPostmortems.find((item) => item.incidentId === incidentId) ?? null; const result = await this.pool.query(`select * from incident_postmortems where organization_id=$1 and incident_id=$2`, [context.organizationId, incidentId]); return result.rows[0] ? mapPostmortem(result.rows[0] as Row) : null; }
-  async savePostmortem(userId: string, actor: string, incidentId: string, input: Omit<IncidentPostmortem, "incidentId" | "updatedAt">) { const context = await this.assertRole(userId, ["admin", "responder"]); let value: IncidentPostmortem; if (!this.pool) { value = { incidentId, ...input, updatedAt: new Date().toISOString() }; this.memoryPostmortems = [value, ...this.memoryPostmortems.filter((item) => item.incidentId !== incidentId)]; } else { const result = await this.pool.query(`insert into incident_postmortems(incident_id,organization_id,summary,root_cause,impact,recovery,follow_ups,status) select i.id,$1,$3,$4,$5,$6,$7,$8 from incidents i where i.id=$2 and i.organization_id=$1 on conflict(incident_id) do update set summary=excluded.summary,root_cause=excluded.root_cause,impact=excluded.impact,recovery=excluded.recovery,follow_ups=excluded.follow_ups,status=excluded.status,updated_at=now() returning *`, [context.organizationId, incidentId, input.summary, input.rootCause, input.impact, input.recovery, input.followUps, input.status]); if (!result.rows[0]) throw new Error("Incident not found in this workspace."); value = mapPostmortem(result.rows[0] as Row); } await this.audit(userId, actor, "saved postmortem", "postmortem", incidentId, { status: input.status }); return value; }
+  async savePostmortem(userId: string, actor: string, incidentId: string, input: Omit<IncidentPostmortem, "incidentId" | "updatedAt">) { const context = await this.assertRole(userId, ["admin", "responder"]); let value: IncidentPostmortem; if (!this.pool) { value = { incidentId, ...input, updatedAt: new Date().toISOString() }; this.memoryPostmortems = [value, ...this.memoryPostmortems.filter((item) => item.incidentId !== incidentId)]; } else { const result = await this.pool.query(`insert into incident_postmortems(incident_id,organization_id,summary,root_cause,impact,recovery,follow_ups,status) select i.id,$1,$3,$4,$5,$6,$7,$8 from incidents i where i.id=$2 and i.organization_id=$1 on conflict(incident_id) do update set summary=excluded.summary,root_cause=excluded.root_cause,impact=excluded.impact,recovery=excluded.recovery,follow_ups=excluded.follow_ups,status=excluded.status,updated_at=now() returning *`, [context.organizationId, incidentId, input.summary, input.rootCause, input.impact, input.recovery, input.followUps, input.status]); if (!result.rows[0]) throw notFound("Incident not found in this workspace."); value = mapPostmortem(result.rows[0] as Row); } await this.audit(userId, actor, "saved postmortem", "postmortem", incidentId, { status: input.status }); return value; }
 
   async listComments(userId:string,incidentId:string){const context=await this.context(userId);if(!this.pool)return structuredClone(this.memoryComments.filter((item)=>item.incidentId===incidentId));const result=await this.pool.query(`select * from incident_comments where organization_id=$1 and incident_id=$2 order by created_at`,[context.organizationId,incidentId]);return(result.rows as Row[]).map((row)=>({id:String(row.id),incidentId:String(row.incident_id),actor:String(row.actor),body:String(row.body),eventId:row.event_id?String(row.event_id):null,createdAt:new Date(String(row.created_at)).toISOString()} satisfies IncidentComment));}
-  async createComment(userId:string,actor:string,incidentId:string,input:{body:string;eventId?:string|null}){const context=await this.assertRole(userId,["admin","responder"]);let value:IncidentComment;if(!this.pool){value={id:randomUUID(),incidentId,actor,...input,createdAt:new Date().toISOString()};this.memoryComments.push(value);}else{const result=await this.pool.query(`insert into incident_comments(organization_id,incident_id,actor,body,event_id) select $1,i.id,$3,$4,$5 from incidents i where i.id=$2 and i.organization_id=$1 returning *`,[context.organizationId,incidentId,actor,input.body,input.eventId??null]);if(!result.rows[0])throw new Error("Incident not found in this workspace.");const row=result.rows[0] as Row;value={id:String(row.id),incidentId:String(row.incident_id),actor:String(row.actor),body:String(row.body),eventId:row.event_id?String(row.event_id):null,createdAt:new Date(String(row.created_at)).toISOString()};}await this.audit(userId,actor,"added evidence-linked comment","incident-comment",value.id,{incidentId,eventId:input.eventId??null});return value;}
+  async createComment(userId:string,actor:string,incidentId:string,input:{body:string;eventId?:string|null}){const context=await this.assertRole(userId,["admin","responder"]);let value:IncidentComment;if(!this.pool){value={id:randomUUID(),incidentId,actor,...input,createdAt:new Date().toISOString()};this.memoryComments.push(value);}else{const result=await this.pool.query(`insert into incident_comments(organization_id,incident_id,actor,body,event_id) select $1,i.id,$3,$4,$5 from incidents i where i.id=$2 and i.organization_id=$1 returning *`,[context.organizationId,incidentId,actor,input.body,input.eventId??null]);if(!result.rows[0])throw notFound("Incident not found in this workspace.");const row=result.rows[0] as Row;value={id:String(row.id),incidentId:String(row.incident_id),actor:String(row.actor),body:String(row.body),eventId:row.event_id?String(row.event_id):null,createdAt:new Date(String(row.created_at)).toISOString()};}await this.audit(userId,actor,"added evidence-linked comment","incident-comment",value.id,{incidentId,eventId:input.eventId??null});return value;}
 
   async listNotifications(userId: string, actor: string): Promise<ActionNotification[]> {
     const context = await this.context(userId);

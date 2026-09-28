@@ -30,3 +30,21 @@ describe("server-owned recovery evaluation",()=>{
     expect(evaluateDeliveryRecovery(delivery,[{...artifact,status:"failed",provenance:{...artifact.provenance,sha:"abc123"}}]).state).toBe("failed");
   });
 });
+
+describe("demo-mode casework lifecycle",()=>{
+  const userId="00000000-0000-4000-8000-000000000001";
+  it("audits lifecycle transitions and reports typed errors",async()=>{
+    const { CaseworkService }=await import("./casework.js");
+    const { repository }=await import("./repository.js");
+    const { workspaceService }=await import("./workspace.js");
+    const { HttpError }=await import("./errors.js");
+    const service=new CaseworkService("");
+    const incident=await repository.createIncident(userId,{title:"Lifecycle audit fixture",summary:"Fixture incident for lifecycle auditing.",service:"orders-api",severity:"high",status:"investigating",owner:"Test Operator",startedAt:"2026-09-27T09:00:00.000Z",resolvedAt:null});
+    const updated=await service.transition(userId,incident.id,"operator@replayops.dev","admin",{action:"start_monitoring",reason:"Observing after rollback",expectedEvidenceRevision:incident.evidenceRevision??incident.updatedAt});
+    expect(updated?.status).toBe("monitoring");
+    const audit=await workspaceService.listAudit(userId);
+    expect(audit.some((entry)=>entry.action==="started recovery monitoring"&&entry.targetId===incident.id)).toBe(true);
+    await expect(service.transition(userId,incident.id,"operator@replayops.dev","admin",{action:"resolve",reason:"No criterion defined yet",expectedEvidenceRevision:updated!.evidenceRevision??updated!.updatedAt})).rejects.toMatchObject({status:409});
+    await expect(service.updateCheck(userId,"missing-check",{status:"planned",result:"",evidenceIds:[]},incident)).rejects.toBeInstanceOf(HttpError);
+  });
+});

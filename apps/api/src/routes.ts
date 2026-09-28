@@ -14,6 +14,7 @@ import { workspaceService } from "./workspace.js";
 import { buildEvidenceBundle, buildInvestigationIntelligence } from "./intelligence.js";
 import { httpReplayService } from "./httpReplay.js";
 import { caseworkService } from "./casework.js";
+import { HttpError } from "./errors.js";
 
 const severity = z.enum(["critical", "high", "medium", "low"]);
 const status = z.enum(["investigating", "identified", "monitoring", "resolved"]);
@@ -44,7 +45,7 @@ const eventSchema = z.object({
   evidenceState: z.enum(["active", "excluded", "corrected"]).optional(),
   provenance: z.enum(["ingested", "manual", "derived"]).optional(),
   correctionReason: z.string().min(4).max(800).nullable().optional(),
-  correctedFromId: z.string().uuid().nullable().optional(),
+  correctedFromId: z.string().min(1).max(160).nullable().optional(),
   metadata: z.record(z.unknown()).optional()
 });
 
@@ -97,13 +98,16 @@ const httpReplaySchema = z.object({
   assertions:z.object({ status:z.number().int().min(100).max(599), bodyIncludes:z.string().max(1000).optional() }),
   dependencies:z.array(z.object({ name:z.string().min(1).max(160), mode:z.enum(["mocked","disabled"]), fixture:z.string().max(16000) })).max(30)
 });
-const checkSchema=z.object({templateId:z.string().min(2).max(80),title:z.string().min(4).max(180),question:z.string().min(8).max(1000),method:z.string().min(8).max(2000),expectedSignal:z.string().min(8).max(1200),conditions:z.string().min(4).max(1200),assignee:z.string().min(2).max(160),evidenceIds:z.array(z.string().uuid()).max(100).default([])});
-const checkResultSchema=z.object({status:z.enum(["planned","running","supported","disproved","inconclusive"]),result:z.string().max(4000),evidenceIds:z.array(z.string().uuid()).max(100).default([])}).superRefine((value,context)=>{if(["supported","disproved","inconclusive"].includes(value.status)&&value.result.trim().length<8)context.addIssue({code:z.ZodIssueCode.custom,path:["result"],message:"Record the observed result and conditions."});});
+// Evidence IDs are checked for membership in the incident rather than format: demo events use readable IDs.
+const evidenceId=z.string().min(1).max(160);
+const unknownEvidence=(incident:{events:Array<{id:string}>},ids:Array<string|null|undefined>)=>ids.filter((id):id is string=>Boolean(id)&&!incident.events.some((event)=>event.id===id));
+const checkSchema=z.object({templateId:z.string().min(2).max(80),title:z.string().min(4).max(180),question:z.string().min(8).max(1000),method:z.string().min(8).max(2000),expectedSignal:z.string().min(8).max(1200),conditions:z.string().min(4).max(1200),assignee:z.string().min(2).max(160),evidenceIds:z.array(evidenceId).max(100).default([])});
+const checkResultSchema=z.object({status:z.enum(["planned","running","supported","disproved","inconclusive"]),result:z.string().max(4000),evidenceIds:z.array(evidenceId).max(100).default([])}).superRefine((value,context)=>{if(["supported","disproved","inconclusive"].includes(value.status)&&value.result.trim().length<8)context.addIssue({code:z.ZodIssueCode.custom,path:["result"],message:"Record the observed result and conditions."});});
 const proposalSchema=z.object({title:z.string().min(4).max(180),change:z.string().min(12).max(4000),rollbackPlan:z.string().min(12).max(4000),target:z.record(z.unknown())});
 const validationSchema=z.object({proposalId:z.string().uuid(),kind:z.enum(["ci","manual","isolated_http"]),status:z.enum(["passed","failed","unsupported"]),summary:z.string().min(8).max(4000),provenance:z.record(z.unknown())});
 const proposalReviewSchema=z.object({status:z.enum(["approved","rejected"]),reason:z.string().min(8).max(2000)});
 const criterionSchema=z.object({kind:z.enum(["runtime","delivery"]),name:z.string().min(3).max(180),source:z.string().min(2).max(240),query:z.string().max(4000),unit:z.string().min(1).max(40),comparison:z.enum(["lte","gte"]),targetValue:z.number(),minConsecutiveWindows:z.number().int().min(1).max(20),maxAgeMinutes:z.number().int().min(1).max(10080),observationMinutes:z.number().int().min(1).max(10080),deliveryIdentity:z.record(z.unknown()).nullable()});
-const measurementSchema=z.object({criterionId:z.string().uuid(),value:z.number().nullable(),unit:z.string().min(1).max(40),source:z.string().min(2).max(240),query:z.string().max(4000),windowStartedAt:z.string().datetime(),windowEndedAt:z.string().datetime(),observedAt:z.string().datetime(),state:z.enum(["valid","missing","invalid"]),note:z.string().max(2000).default("")});
+const measurementSchema=z.object({criterionId:z.string().uuid(),value:z.number().nullable(),unit:z.string().min(1).max(40),source:z.string().min(2).max(240),query:z.string().max(4000),windowStartedAt:z.string().datetime(),windowEndedAt:z.string().datetime(),observedAt:z.string().datetime(),state:z.enum(["valid","missing","invalid"]),note:z.string().max(2000).default("")}).refine((value)=>Date.parse(value.windowEndedAt)>Date.parse(value.windowStartedAt),{path:["windowEndedAt"],message:"Measurement window must end after it starts."});
 const lifecycleSchema=z.object({action:z.enum(["start_monitoring","resolve","reopen"]),reason:z.string().min(8).max(2000),expectedEvidenceRevision:z.string().datetime()});
 
 const parseOrReply = <T>(schema: z.ZodSchema<T>, value: unknown) => {
@@ -131,7 +135,7 @@ apiRouter.use(async (req: AuthenticatedRequest, res, next) => {
     });
     next();
   } catch (error) {
-    res.status(403).json({ error: error instanceof Error ? error.message : "Your workspace role does not allow this action." });
+    res.status(error instanceof HttpError ? error.status : 403).json({ error: error instanceof Error ? error.message : "Your workspace role does not allow this action." });
   }
 });
 
@@ -197,12 +201,14 @@ apiRouter.post("/incidents/:id/evidence-review",async(req,res)=>{
 apiRouter.post("/incidents/:id/checks",async(req:AuthenticatedRequest,res)=>{
   const parsed=parseOrReply(checkSchema,req.body);if("error" in parsed){res.status(400).json(parsed);return;}
   const incident=await repository.getIncident(userId(req),String(req.params.id));if(!incident){res.status(404).json({error:"Incident not found."});return;}
+  const missingEvidence=unknownEvidence(incident,parsed.data.evidenceIds??[]);if(missingEvidence.length){res.status(400).json({error:`Evidence does not belong to this incident: ${missingEvidence.join(", ")}`});return;}
   res.status(201).json(await caseworkService.createCheck(userId(req),incident,actor(req),{...parsed.data,evidenceIds:parsed.data.evidenceIds??[]}));
 });
 
 apiRouter.patch("/incidents/:id/checks/:checkId",async(req,res)=>{
   const parsed=parseOrReply(checkResultSchema,req.body);if("error" in parsed){res.status(400).json(parsed);return;}
   const incident=await repository.getIncident(userId(req),String(req.params.id));if(!incident){res.status(404).json({error:"Incident not found."});return;}
+  const missingEvidence=unknownEvidence(incident,parsed.data.evidenceIds??[]);if(missingEvidence.length){res.status(400).json({error:`Evidence does not belong to this incident: ${missingEvidence.join(", ")}`});return;}
   res.json(await caseworkService.updateCheck(userId(req),String(req.params.checkId),{...parsed.data,evidenceIds:parsed.data.evidenceIds??[]},incident));
 });
 
@@ -231,13 +237,13 @@ apiRouter.post("/incidents/:id/validations",async(req:AuthenticatedRequest,res)=
 apiRouter.post("/incidents/:id/proposals/:proposalId/review-request",async(req:AuthenticatedRequest,res)=>{
   const incident=await repository.getIncident(userId(req),String(req.params.id));if(!incident){res.status(404).json({error:"Incident not found."});return;}
   const snapshot=await caseworkService.snapshot(userId(req),incident);const proposal=snapshot.proposals.find((item)=>item.id===String(req.params.proposalId));if(!proposal){res.status(404).json({error:"Proposal version not found."});return;}
-  try{res.status(201).json(await caseworkService.requestReview(userId(req),incident,proposal,actor(req)));}catch(error){res.status(409).json({error:error instanceof Error?error.message:"Review request failed."});}
+  try{res.status(201).json(await caseworkService.requestReview(userId(req),incident,proposal,actor(req)));}catch(error){res.status(error instanceof HttpError?error.status:409).json({error:error instanceof Error?error.message:"Review request failed."});}
 });
 
 apiRouter.patch("/incidents/:id/proposal-reviews/:reviewId",async(req:AuthenticatedRequest,res)=>{
   const parsed=parseOrReply(proposalReviewSchema,req.body);if("error" in parsed){res.status(400).json(parsed);return;}
   const incident=await repository.getIncident(userId(req),String(req.params.id));if(!incident){res.status(404).json({error:"Incident not found."});return;}
-  try{const context=await workspaceService.context(userId(req));res.json(await caseworkService.reviewProposal(userId(req),incident,String(req.params.reviewId),actor(req),context.role,parsed.data));}catch(error){res.status(409).json({error:error instanceof Error?error.message:"Proposal review failed."});}
+  try{const context=await workspaceService.context(userId(req));res.json(await caseworkService.reviewProposal(userId(req),incident,String(req.params.reviewId),actor(req),context.role,parsed.data));}catch(error){res.status(error instanceof HttpError?error.status:409).json({error:error instanceof Error?error.message:"Proposal review failed."});}
 });
 
 apiRouter.post("/incidents/:id/recovery-criteria",async(req,res)=>{
@@ -257,7 +263,7 @@ apiRouter.post("/incidents/:id/measurements",async(req,res)=>{
 apiRouter.post("/incidents/:id/lifecycle",async(req:AuthenticatedRequest,res)=>{
   const parsed=parseOrReply(lifecycleSchema,req.body);if("error" in parsed){res.status(400).json(parsed);return;}
   try{const context=await workspaceService.context(userId(req));res.json(await caseworkService.transition(userId(req),String(req.params.id),actor(req),context.role,parsed.data));}
-  catch(error){res.status(409).json({error:error instanceof Error?error.message:"Lifecycle transition failed."});}
+  catch(error){res.status(error instanceof HttpError?error.status:409).json({error:error instanceof Error?error.message:"Lifecycle transition failed."});}
 });
 
 apiRouter.post("/incidents/:id/evidence-bundle", async (req: AuthenticatedRequest, res) => {
@@ -379,6 +385,10 @@ apiRouter.post("/incidents/:id/events", async (req, res) => {
     res.status(400).json(parsed);
     return;
   }
+  if (parsed.data.correctedFromId && !(await repository.getIncident(userId(req), req.params.id))?.events.some((item) => item.id === parsed.data.correctedFromId)) {
+    res.status(400).json({ error: "The corrected event does not belong to this incident." });
+    return;
+  }
   const event = await repository.createEvent(userId(req), req.params.id, parsed.data);
   if (!event) {
     res.status(404).json({ error: "Incident not found." });
@@ -393,6 +403,10 @@ apiRouter.patch("/incidents/:incidentId/events/:eventId", async (req, res) => {
   const parsed = parseOrReply(eventSchema.partial(), req.body);
   if ("error" in parsed) {
     res.status(400).json(parsed);
+    return;
+  }
+  if (parsed.data.correctedFromId && !(await repository.getIncident(userId(req), req.params.incidentId))?.events.some((item) => item.id === parsed.data.correctedFromId)) {
+    res.status(400).json({ error: "The corrected event does not belong to this incident." });
     return;
   }
   const event = await repository.updateEvent(userId(req), req.params.incidentId, req.params.eventId, parsed.data);
@@ -578,6 +592,7 @@ apiRouter.post("/ingestion-queue/:id/retry", async (req, res) => {
 });
 
 apiRouter.get("/incidents/:id/mitigations", async (req, res) => {
+  if (!await repository.getIncident(userId(req), String(req.params.id))) { res.status(404).json({ error: "Incident not found." }); return; }
   res.json(await workspaceService.listMitigations(userId(req), String(req.params.id)));
 });
 
@@ -606,4 +621,4 @@ apiRouter.post("/incidents/:id/recovery", async (req: AuthenticatedRequest, res)
 apiRouter.get("/incidents/:id/postmortem", async (req, res) => res.json(await workspaceService.getPostmortem(userId(req), String(req.params.id))));
 apiRouter.put("/incidents/:id/postmortem", async (req: AuthenticatedRequest, res) => { const parsed = parseOrReply(postmortemSchema, req.body); if ("error" in parsed) { res.status(400).json(parsed); return; } res.json(await workspaceService.savePostmortem(userId(req), actor(req), String(req.params.id), parsed.data)); });
 apiRouter.get("/incidents/:id/comments",async(req,res)=>res.json(await workspaceService.listComments(userId(req),String(req.params.id))));
-apiRouter.post("/incidents/:id/comments",async(req:AuthenticatedRequest,res)=>{const parsed=parseOrReply(z.object({body:z.string().min(2).max(2000),eventId:z.string().uuid().nullable().optional()}),req.body);if("error" in parsed){res.status(400).json(parsed);return;}res.status(201).json(await workspaceService.createComment(userId(req),actor(req),String(req.params.id),parsed.data));});
+apiRouter.post("/incidents/:id/comments",async(req:AuthenticatedRequest,res)=>{const parsed=parseOrReply(z.object({body:z.string().min(2).max(2000),eventId:evidenceId.nullable().optional()}),req.body);if("error" in parsed){res.status(400).json(parsed);return;}if(parsed.data.eventId){const incident=await repository.getIncident(userId(req),String(req.params.id));if(!incident){res.status(404).json({error:"Incident not found."});return;}if(unknownEvidence(incident,[parsed.data.eventId]).length){res.status(400).json({error:"The referenced event does not belong to this incident."});return;}}res.status(201).json(await workspaceService.createComment(userId(req),actor(req),String(req.params.id),parsed.data));});

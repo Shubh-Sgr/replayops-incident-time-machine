@@ -3,6 +3,7 @@ import { Pool } from "pg";
 import { config } from "./config.js";
 import { seedActivities, seedDashboardSeries, seedIncidents, seedReplayRuns } from "./seed.js";
 import type { Activity, DashboardData, Incident, IncidentDecision, IncidentEvent, IngestionBatch, IngestionResult, Integration, IntegrationDelivery, IntegrationProvider, IntegrationTarget, NormalizedSignal, ReplayConfig, ReplayProjection, ReplayResult, ReplayRun, SearchResult } from "./types.js";
+import { forbidden } from "./errors.js";
 import { workspaceService } from "./workspace.js";
 
 export type IncidentInput = Omit<Incident, "id" | "code" | "createdAt" | "updatedAt" | "events">;
@@ -508,7 +509,7 @@ class PostgresRepository implements Repository {
       [userId, `ROP-${Math.floor(2000 + Math.random() * 7000)}`, input.title, input.summary, input.service, input.environment ?? "unknown", input.customerImpact ?? "Unknown until measured", input.severity, input.status, input.owner, input.startedAt, input.resolvedAt ?? null, embedding ? `[${embedding.join(",")}]` : null]
     );
     const row = result.rows[0] as Row | undefined;
-    if (!row) throw new Error("No organization membership exists for this account. Complete workspace onboarding before creating incidents.");
+    if (!row) throw forbidden("No organization membership exists for this account. Complete workspace onboarding before creating incidents.");
     return mapIncident(row);
   }
   async updateIncident(userId: string, id: string, input: Partial<IncidentInput>, embedding?: number[]) {
@@ -724,7 +725,7 @@ class PostgresRepository implements Repository {
       [userId, input.name, input.provider]
     );
     const row = result.rows[0] as Row | undefined;
-    if (!row) throw new Error("A responder workspace is required before a connector can be created.");
+    if (!row) throw forbidden("A responder workspace is required before a connector can be created.");
     return mapIntegration(row);
   }
   async updateIntegrationConfig(userId:string,integrationId:string,input:IntegrationConfigInput){const result=await this.pool.query(`update integrations x set expected_cadence_minutes=$3,retention_days=$4,daily_quota=$5,healthy_sample_rate=$6,updated_at=now() where x.id=$2 and exists(select 1 from organization_members m where m.organization_id=x.organization_id and m.user_id=$1 and m.role in ('admin','responder')) returning *`,[userId,integrationId,input.expectedCadenceMinutes,input.retentionDays,input.dailyQuota,input.healthySampleRate]);return result.rows[0]?mapIntegration(result.rows[0] as Row):null;}
