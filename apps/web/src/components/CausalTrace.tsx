@@ -7,6 +7,7 @@ import {
   clampTimelineWindow,
   centerTimelineWindowOn,
   clusterTimelineEvents,
+  evidenceOrigin,
   formatElapsed,
   shiftTimelineWindow,
   timelineDensity,
@@ -305,7 +306,7 @@ export function CausalTrace({ incident, compact = false, selectedEventId, onSele
       </div>}
 
       {!compact && <AnimatePresence mode="wait"><motion.div key={selectedEvent.id} initial={{ opacity: .4, y: 3 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: .18 }} className="mt-4 grid gap-3 border-t border-line pt-4 sm:grid-cols-[180px_minmax(0,1fr)_auto]">
-        <div><p className="text-xs text-muted">Selected · {formatElapsed(incident.startedAt, selectedEvent.timestamp)}</p><p className="measurement-number mt-1 text-sm">{formatDateTime(selectedEvent.timestamp)}</p></div>
+        <div><p className="text-xs text-muted">Selected · {formatElapsed(evidenceOrigin(incident), selectedEvent.timestamp)}</p><p className="measurement-number mt-1 text-sm">{formatDateTime(selectedEvent.timestamp)}</p></div>
         <div><p className="text-xs text-muted">{selectedEvent.service} · {selectedEvent.kind}</p><p className="mt-1 text-sm font-semibold text-ink">{selectedEvent.title}</p><p className="mt-1 line-clamp-2 text-xs leading-5 text-muted">{selectedEvent.detail}</p></div>
         <div className="flex items-start gap-2 text-xs font-semibold text-muted"><Clock3 className="mt-0.5 h-3.5 w-3.5" />{formatClock(selectedEvent.timestamp)}</div>
       </motion.div></AnimatePresence>}

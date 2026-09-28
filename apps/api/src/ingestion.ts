@@ -125,7 +125,7 @@ function normalizeGitHub(payload: JsonRecord, eventName: string, deliveryId: str
       impactScore: failed ? 78 : successful ? 28 : 44,
       severity: failed ? "high" : "low", sourceUrl: environmentUrl, environment,
       correlationKey: `${repositoryName}:${environment}`,
-      metadata: { provider: "github", eventType: "deployment_status", repositoryId, repository: repositoryName, deploymentId: deployment.id, deploymentEnvironment: environment, state, sha: deployment.sha, creator: sender, sourceUrl: environmentUrl, productionHealthMeasured: false }
+      metadata: { provider: "github", eventType: "deployment_status", repositoryId, repository: repositoryName, deploymentId: deployment.id, deploymentEnvironment: environment, state, sha: deployment.sha, creator: sender, sourceUrl: environmentUrl, logUrl: textValue(deploymentStatus.log_url, textValue(deploymentStatus.target_url)) || undefined, productionHealthMeasured: false }
     })];
   }
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { IncidentEvent } from "../types";
-import { centerTimelineWindowOn, clusterTimelineEvents, formatElapsed, shiftTimelineWindow, timelineExtent, timelinePosition, timelineTicks, zoomTimelineWindow } from "./timeline";
+import { centerTimelineWindowOn, clusterTimelineEvents, evidenceOrigin, formatElapsed, shiftTimelineWindow, timelineExtent, timelinePosition, timelineTicks, zoomTimelineWindow } from "./timeline";
 
 function event(id: string, timestamp: string, service = "checkout"): IncidentEvent {
   return { id, incidentId: "inc-1", timestamp, service, kind: "metric", title: id, detail: id, impactScore: 0 };
@@ -49,5 +49,12 @@ describe("timeline model", () => {
     const current = { startMs: 70_000, endMs: 90_000 };
     expect(centerTimelineWindowOn(current, extent, 30_000)).toEqual({ startMs: 20_000, endMs: 40_000 });
     expect(centerTimelineWindowOn(current, extent, 2_000)).toEqual({ startMs: 0, endMs: 20_000 });
+  });
+});
+
+describe("evidenceOrigin", () => {
+  it("uses precursors recorded before the incident opened", () => {
+    const incident = { startedAt: "2026-09-28T07:46:00Z", events: [{ timestamp: "2026-09-28T07:40:43Z" }, { timestamp: "2026-09-28T07:42:43Z" }] };
+    expect(formatElapsed(evidenceOrigin(incident), "2026-09-28T07:42:43Z")).toBe("+2m");
   });
 });

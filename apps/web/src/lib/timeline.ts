@@ -170,3 +170,9 @@ export function timelinePosition(timestamp: string | number, window: TimelineWin
   const inset = Math.min(25, Math.max(0, insetPercent));
   return inset + ratio * (100 - inset * 2);
 }
+
+/** Offsets are measured from the earliest evidence, so precursors recorded before the incident opened don't all collapse to +0s. */
+export function evidenceOrigin(incident: { startedAt: string; events: Array<{ timestamp: string }> }): number {
+  const times = [incident.startedAt, ...incident.events.map((event) => event.timestamp)].map((value) => Date.parse(value)).filter(Number.isFinite);
+  return times.length ? Math.min(...times) : Date.parse(incident.startedAt);
+}

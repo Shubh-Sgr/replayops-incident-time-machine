@@ -1,4 +1,5 @@
 import { redactSensitiveText } from "./ai.js";
+import { githubChangeRange } from "./diagnosis.js";
 import type { Incident, IncidentEvent } from "./types.js";
 
 const text = (value: unknown) => typeof value === "string" ? value : undefined;
@@ -75,7 +76,15 @@ export function buildInvestigationIntelligence(incident: Incident, history: Inci
   // Failing exemplars first: those are the traces a responder should open.
   const traceIds = [...new Set([...failing, ...events].map((event) => text(event.metadata?.traceId)).filter((value): value is string => Boolean(value)))];
   const environmentLimitation = knownEnvironment ? "" : " The environment is unknown, so results may mix environments; set it with Edit facts.";
-  const querySuggestions = [
+  const githubOnly = events.length > 0 && events.every((event) => event.metadata?.provider === "github");
+  const githubRanges = [...new Map(events.map((event) => githubChangeRange(event, events)).filter((item): item is NonNullable<typeof item> => Boolean(item)).map((item) => [item.compareUrl, item])).values()];
+  const githubFailures = events.filter((event) => event.metadata?.provider === "github" && event.kind === "alert" && text(event.metadata?.logUrl ?? event.metadata?.sourceUrl));
+  const githubSuggestions = [
+    ...githubRanges.slice(0, 2).map((range, index) => ({ id:`github-diff-${index}`, label:"Diff of the deployed change", source:"GitHub", query:range.compareUrl, limitation: range.before ? "Everything between the last good commit and the deployed one." : "No earlier push is retained, so only the deployed commit is linked." })),
+    ...githubFailures.slice(0, 2).map((event, index) => ({ id:`github-run-${index}`, label:`Logs for “${event.title}”`, source:"GitHub", query:text(event.metadata?.logUrl ?? event.metadata?.sourceUrl)!, limitation: text(event.metadata?.logUrl) ? "Open the failing run or deployment and find the first error line." : "GitHub sent no log URL for this event; this is the deployment or repository page." }))
+  ];
+  const querySuggestions = githubOnly ? githubSuggestions : [
+    ...githubSuggestions,
     { id:"failing-vs-healthy", label:"Compare failing and healthy requests", source:"OpenTelemetry", query:`service.name = "${incident.service}"${environmentClause} AND time >= "${from}" AND time <= "${to}" GROUP BY status_code, route, region`, limitation: (healthy.length ? `Healthy controls are sampled (${healthy.length} retained).` : "No healthy control sample is retained; enable bounded healthy-span sampling.") + environmentLimitation },
     { id:"dependency-divergence", label:"Find first divergent dependency span", source:"Tracing backend", query:`trace service=${incident.service}${knownEnvironment ? ` environment=${knownEnvironment}` : ""} from=${from} to=${to} sort=duration desc`, limitation:"The generated query is read-only and must be adapted to the connected provider syntax." + environmentLimitation },
     { id:"error-logs", label:"Error logs across affected services", source:"Logs", query:`${serviceClause}${environmentClause} AND severity >= ERROR AND time >= "${from}" AND time <= "${to}"`, limitation:`Covers every service in this investigation (${affectedServices.length}). Compare the first error per service with the timeline order.` },

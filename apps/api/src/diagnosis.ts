@@ -5,8 +5,7 @@ const clamp = (value: number, minimum: number, maximum: number) => Math.min(maxi
 const secondsBetween = (earlier: string, later: string) => Math.max(0, Math.round((Date.parse(later) - Date.parse(earlier)) / 1000));
 
 const hasCorrelationContext = (event: IncidentEvent) => {
-  const keys = Object.keys(event.metadata ?? {}).map((key) => key.toLowerCase().replaceAll("_", ""));
-  return keys.some((key) => ["traceid", "spanid", "requestid"].includes(key));
+  return Object.entries(event.metadata ?? {}).some(([key, value]) => ["traceid", "spanid", "requestid"].includes(key.toLowerCase().replaceAll("_", "")) && typeof value === "string" && value.trim() !== "");
 };
 
 const hasTraceRelationship = (events: IncidentEvent[]) => {
@@ -35,7 +34,27 @@ function signalDeltas(events: IncidentEvent[], symptom: IncidentEvent): SignalDe
   return rows.sort((left, right) => right.score - left.score).slice(0, 6);
 }
 
-function testFor(event: IncidentEvent, symptom: IncidentEvent) {
+/** Last good → suspect commit range for a GitHub deploy, using the push that introduced the deployed SHA. */
+export function githubChangeRange(event: IncidentEvent, events: IncidentEvent[]) {
+  const meta = event.metadata ?? {};
+  if (meta.provider !== "github") return null;
+  const repository = typeof meta.repository === "string" ? meta.repository : undefined;
+  const sha = typeof meta.sha === "string" ? meta.sha : undefined;
+  if (!repository || !sha) return null;
+  const push = events.find((candidate) => candidate.metadata?.eventType === "push" && candidate.metadata?.sha === sha);
+  const before = typeof push?.metadata?.beforeSha === "string" && !/^0+$/.test(push.metadata.beforeSha) ? push.metadata.beforeSha : undefined;
+  return { repository, sha, before, compareUrl: before ? `https://github.com/${repository}/compare/${before}...${sha}` : `https://github.com/${repository}/commit/${sha}` };
+}
+
+function testFor(event: IncidentEvent, symptom: IncidentEvent, events: IncidentEvent[] = []) {
+  const range = githubChangeRange(event, events);
+  if (range) {
+    const environment = String(event.metadata?.deploymentEnvironment ?? event.metadata?.environment ?? "production");
+    return {
+      nextTest: `Review the change ${range.before ? `${range.before.slice(0, 7)}…${range.sha.slice(0, 7)}` : range.sha.slice(0, 7)} (${range.compareUrl}) and the failing ${symptom.metadata?.eventType === "workflow_run" ? "workflow" : "deployment"} logs for the first error; confirm the failure does not occur on the previous commit.`,
+      safeAction: range.before ? `Redeploy the last good commit ${range.before.slice(0, 7)} to ${environment} and confirm the deployment succeeds.` : `Revert ${range.sha.slice(0, 7)} and redeploy to ${environment}; confirm the deployment succeeds.`
+    };
+  }
   if (event.kind === "deploy") {
     return {
       nextTest: `Split ${symptom.service} failures by release version and compare the error distribution immediately before and after “${event.title}”.`,
@@ -144,7 +163,7 @@ export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = [
     hasHealthyCohort ? "A healthy or control cohort is recorded." : "No healthy-versus-failing cohort comparison is recorded.",
     hasRecovery ? "A recovery observation closes the evidence window." : "No recovery observation closes the evidence window."
   ];
-  const primaryTest = testFor(topCandidate, symptom);
+  const primaryTest = testFor(topCandidate, symptom, events);
   const evidenceSpan = secondsBetween(topCandidate.timestamp, symptom.timestamp);
   const peak = events.reduce((highest, event) => event.impactScore > highest.impactScore ? event : highest, events[0]!);
   const amplificationEvent = events.find((event) => /retr|queue|concurr|storm|fan.?out|saturat/i.test(`${event.title} ${event.detail}`));
@@ -197,7 +216,7 @@ export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = [
   }
 
   const evidenceGaps: string[] = [];
-  if (!correlated) evidenceGaps.push("No trace, span, or request ID is attached; cross-service causality cannot be verified.");
+  if (!correlated && servicePath.length > 1) evidenceGaps.push("No trace, span, or request ID is attached; cross-service causality cannot be verified.");
   if (!events.some((event) => event.kind === "deploy")) evidenceGaps.push("No deployment or configuration change is recorded in the incident window.");
   if (!hasRecovery) evidenceGaps.push("No recovery event is recorded, so mitigation effectiveness cannot be measured against the same signals.");
   if (events.filter((event) => event.timestamp < symptom.timestamp).length < 2) evidenceGaps.push("The pre-symptom baseline is thin; add healthy-window measurements for comparison.");
@@ -218,7 +237,11 @@ export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = [
   const contested = orderedHypotheses.find((hypothesis) => hypothesis.state === "contested");
   const activeTest = tests.find((test) => ["planned", "running"].includes(test.status));
   const evidenceStatus: IncidentDiagnosis["evidenceStatus"] = evidenceCompleteness < 35 ? "insufficient" : evidenceCompleteness < 75 ? "partial" : "substantial";
-  const nextAction = activeTest
+  const nextAction = incident.status === "monitoring"
+    ? { label: "Verify recovery, then resolve", reason: "The incident is in Monitoring. Confirm the recovery check passes in Fix & verify, then resolve it.", href: "?area=validate" }
+    : incident.status === "resolved"
+      ? { label: "Write the learning record", reason: "The incident is resolved. Capture what was learned and any follow-ups in Activity & handoff.", href: "?area=handoff" }
+    : activeTest
     ? { label: activeTest.status === "running" ? "Record the test outcome" : "Start the assigned test", reason: activeTest.title, href: `?area=investigate&test=${activeTest.id}` }
     : contested
       ? { label: "Resolve contradictory test results", reason: contested.outcomeSummary, href: `?area=investigate&hypothesis=${encodeURIComponent(contested.id)}` }
