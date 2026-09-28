@@ -1,3 +1,4 @@
+import { evaluateGitHubDeliveryRecovery } from "./deliveryRecovery.js";
 import type { DiagnosticHypothesis, HypothesisTest, Incident, IncidentDiagnosis, IncidentEvent, SignalDelta } from "./types.js";
 
 const clamp = (value: number, minimum: number, maximum: number) => Math.min(maximum, Math.max(minimum, Math.round(value)));
@@ -245,7 +246,10 @@ export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = [
   const contested = orderedHypotheses.find((hypothesis) => hypothesis.state === "contested");
   const activeTest = tests.find((test) => ["planned", "running"].includes(test.status));
   const evidenceStatus: IncidentDiagnosis["evidenceStatus"] = evidenceCompleteness < 35 ? "insufficient" : evidenceCompleteness < 75 ? "partial" : "substantial";
-  const nextAction = incident.status === "monitoring"
+  const deliveryRecovery = incident.status === "resolved" ? null : evaluateGitHubDeliveryRecovery(incident);
+  const nextAction = deliveryRecovery?.state === "verified"
+    ? { label: "Recovered: resolve it", reason: deliveryRecovery.reason.replace(/ This verifies delivery, not runtime health\.$/, ""), href: "?area=validate" }
+    : incident.status === "monitoring"
     ? { label: "Verify recovery, then resolve", reason: "The incident is in Monitoring. Confirm the recovery check passes in Fix & verify, then resolve it.", href: "?area=validate" }
     : incident.status === "resolved"
       ? { label: "Write the learning record", reason: "The incident is resolved. Capture what was learned and any follow-ups in Activity & handoff.", href: "?area=handoff" }
