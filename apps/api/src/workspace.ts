@@ -283,7 +283,7 @@ class WorkspaceService {
   async listMembers(userId: string) {
     const context = await this.context(userId);
     if (!this.pool) return structuredClone(this.memoryMembers);
-    return (await this.pool.query(`select m.*,coalesce(m.email,u.email) as email,coalesce(m.display_name,nullif(u.raw_user_meta_data->>'full_name',''),split_part(coalesce(u.email,''),'@',1)) as display_name from organization_members m left join auth.users u on u.id=m.user_id where m.organization_id=$1 order by m.created_at`, [context.organizationId])).rows.map(mapMember);
+    return (await this.pool.query(`select m.*,coalesce(m.email,u.email) as email,coalesce(nullif(u.raw_user_meta_data->>'full_name',''),nullif(u.raw_user_meta_data->>'name',''),m.display_name,split_part(coalesce(u.email,''),'@',1)) as display_name from organization_members m left join auth.users u on u.id=m.user_id where m.organization_id=$1 order by m.created_at`, [context.organizationId])).rows.map(mapMember);
   }
 
   async updateMemberRole(userId: string, actor: string, memberId: string, role: WorkspaceRole) {

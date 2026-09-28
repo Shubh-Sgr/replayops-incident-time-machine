@@ -68,7 +68,7 @@ function ContextualAi({ incident, hypothesis }: { incident: Incident; hypothesis
 
 function InvestigationPanel({ incident, onOpenTest }: { incident: Incident; onOpenTest(testId: string): void }) {
   const client = useQueryClient();
-  const diagnosis = useQuery({ queryKey: ["diagnosis", incident.id, incident.evidenceRevision], queryFn: () => api.diagnosis(incident.id) });
+  const diagnosis = useQuery({ queryKey: ["diagnosis", incident.id, incident.evidenceRevision, incident.status], queryFn: () => api.diagnosis(incident.id) });
   const tests = useQuery({ queryKey: ["hypothesis-tests", incident.id], queryFn: () => api.hypothesisTests(incident.id) });
   const members = useQuery({ queryKey: ["team-members"], queryFn: api.teamMembers });
   const [selectedId, setSelectedId] = useState("");
@@ -162,7 +162,7 @@ function buildHandoff(incident: Incident, diagnosis: IncidentDiagnosis | undefin
 function HandoffBrief({ incident }: { incident: Incident }) {
   const client = useQueryClient();
   const decisions = useQuery({ queryKey: ["decisions", incident.id], queryFn: () => api.decisions(incident.id) });
-  const diagnosis = useQuery({ queryKey: ["diagnosis", incident.id, incident.evidenceRevision], queryFn: () => api.diagnosis(incident.id) });
+  const diagnosis = useQuery({ queryKey: ["diagnosis", incident.id, incident.evidenceRevision, incident.status], queryFn: () => api.diagnosis(incident.id) });
   const replays = useQuery({ queryKey: ["replays", incident.id], queryFn: () => api.replays(incident.id) });
   const tests = useQuery({ queryKey: ["hypothesis-tests", incident.id], queryFn: () => api.hypothesisTests(incident.id) });
   const recoveries = useQuery({ queryKey: ["recoveries", incident.id], queryFn: () => api.recoveries(incident.id) });
