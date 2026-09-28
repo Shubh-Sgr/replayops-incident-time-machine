@@ -1,0 +1,24 @@
+# Safe incident drill for ReplayOps: runs only on the replayops-drill branch and never deploys.
+# A commit message containing [fail] makes the run fail, which the ReplayOps GitHub webhook turns into an incident.
+name: ReplayOps incident drill
+
+on:
+  push:
+    branches: [replayops-drill]
+
+permissions:
+  contents: read
+
+jobs:
+  health-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Simulated post-deploy health check
+        env:
+          MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          if [[ "$MESSAGE" == *"[fail]"* ]]; then
+            echo "::error::Simulated health check failure: GET /health returned 502 after rollout"
+            exit 1
+          fi
+          echo "Health check passed: GET /health returned 200"
