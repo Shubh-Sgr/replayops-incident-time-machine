@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { evaluateGitHubDeliveryRecovery } from "./casework.js";
+import { normalizePayload } from "./ingestion.js";
+import { MemoryRepository } from "./repository.js";
 import { diagnoseIncident } from "./diagnosis.js";
 import { buildInvestigationIntelligence } from "./intelligence.js";
 import type { Incident, IncidentEvent } from "./types.js";
@@ -34,5 +36,31 @@ describe("GitHub delivery incidents", () => {
 
   it("points a monitoring incident at recovery", () => {
     expect(diagnoseIncident(incident([push, deploy, failed])).nextAction.href).toBe("?area=validate");
+  });
+});
+
+describe("GitHub ingestion noise", () => {
+  const repository = { id: 7, full_name: "acme/api", html_url: "https://github.com/acme/api" };
+  it("ignores queued and in-progress workflow runs and keeps only the commit subject", () => {
+    expect(normalizePayload("github", { repository, workflow_run: { id: 1, name: "CI", status: "queued", head_branch: "main" } }, "q", "workflow_run")).toHaveLength(0);
+    expect(normalizePayload("github", { repository, workflow_run: { id: 1, name: "CI", status: "in_progress", head_branch: "main" } }, "p", "workflow_run")).toHaveLength(0);
+    expect(normalizePayload("github", { repository, workflow_run: { id: 1, name: "CI", status: "completed", conclusion: "failure", head_branch: "main", html_url: "https://github.com/acme/api/actions/runs/1" } }, "c", "workflow_run")[0]!.metadata?.logUrl).toBe("https://github.com/acme/api/actions/runs/1");
+    const push = normalizePayload("github", { repository, ref: "refs/heads/main", after: "b", before: "a", head_commit: { message: "fix: subject\n\nlong body" } }, "push", "push")[0]!;
+    expect(push.detail).toBe("fix: subject");
+  });
+
+  it("groups GitHub evidence by branch", async () => {
+    const repo = new MemoryRepository();
+    const integration = await repo.createIntegration("demo", { name: "GitHub", provider: "github" });
+    const target = (await repo.getIntegrationTarget(integration.id))!;
+    const now = Date.now();
+    const at = (minutes: number) => new Date(now - minutes * 60_000).toISOString();
+    const signal = (id: string, branch: string, minutes: number, impactScore: number, kind: "metric" | "alert" = "metric") => ({ externalId: id, timestamp: at(minutes), service: "acme/api", kind, title: id, detail: id, impactScore, severity: impactScore > 70 ? "high" as const : "low" as const, metadata: { provider: "github", eventType: kind === "alert" ? "workflow_run" : "push", branch } });
+    await repo.ingest(target, { externalId: "d1", signals: [signal("main-push", "main", 10, 18), signal("drill-push", "drill", 5, 18)] });
+    const result = await repo.ingest(target, { externalId: "d2", signals: [signal("drill-fail", "drill", 1, 76, "alert")] });
+    const incident = (await repo.getIncident("demo", result.incidentIds[0]!))!;
+    expect(incident.events.map((event) => event.title).sort()).toEqual(["drill-fail", "drill-push"]);
+    const later = await repo.ingest(target, { externalId: "d3", signals: [signal("main-push-2", "main", 0, 18)] });
+    expect(later.incidentIds).toHaveLength(0);
   });
 });

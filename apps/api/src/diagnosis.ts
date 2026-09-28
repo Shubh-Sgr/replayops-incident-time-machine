@@ -217,7 +217,7 @@ export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = [
 
   const evidenceGaps: string[] = [];
   if (!correlated && servicePath.length > 1) evidenceGaps.push("No trace, span, or request ID is attached; cross-service causality cannot be verified.");
-  if (!events.some((event) => event.kind === "deploy")) evidenceGaps.push("No deployment or configuration change is recorded in the incident window.");
+  if (!events.some((event) => event.kind === "deploy" || event.metadata?.eventType === "push")) evidenceGaps.push("No deployment or configuration change is recorded in the incident window.");
   if (!hasRecovery) evidenceGaps.push("No recovery event is recorded, so mitigation effectiveness cannot be measured against the same signals.");
   if (events.filter((event) => event.timestamp < symptom.timestamp).length < 2) evidenceGaps.push("The pre-symptom baseline is thin; add healthy-window measurements for comparison.");
   if (events.length < 5) evidenceGaps.push("Fewer than five evidence points are available; hypothesis confidence is intentionally capped.");

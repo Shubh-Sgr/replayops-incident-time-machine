@@ -244,7 +244,7 @@ export class MemoryRepository implements Repository {
       let incident = signal.correlationKey
         ? this.incidents.find((item) => item.status !== "resolved" && item.events.some((event) => event.metadata?.correlationKey === signal.correlationKey))
         : undefined;
-      incident ??= this.incidents.find((item) => item.status !== "resolved" && relatedServices.includes(item.service) && (item.environment ?? "unknown") === (signal.environment ?? "unknown") && Math.abs(new Date(item.startedAt).getTime() - new Date(signal.timestamp).getTime()) <= policy.groupingWindowMinutes * 60_000);
+      incident ??= this.incidents.find((item) => item.status !== "resolved" && sameBranchLane(item.events, signal) && relatedServices.includes(item.service) && (item.environment ?? "unknown") === (signal.environment ?? "unknown") && Math.abs(new Date(item.startedAt).getTime() - new Date(signal.timestamp).getTime()) <= policy.groupingWindowMinutes * 60_000);
       const suppressed = policy.maintenanceMode || (policy.suppressLowSeverity && signal.severity === "low");
       if (!incident && !suppressed && signal.impactScore >= policy.incidentThreshold) {
         const now = new Date().toISOString();
@@ -256,7 +256,7 @@ export class MemoryRepository implements Repository {
         };
         this.incidents.unshift(incident);
         const triggerTime = new Date(signal.timestamp).getTime();
-        for (const precursor of this.bufferedSignals.filter((item) => !item.incidentId && relatedServices.includes(item.service) && new Date(item.timestamp).getTime() >= triggerTime - 1_800_000 && new Date(item.timestamp).getTime() <= triggerTime)) {
+        for (const precursor of this.bufferedSignals.filter((item) => !item.incidentId && compatibleBranch(branchOf(item), branchOf(signal)) && relatedServices.includes(item.service) && new Date(item.timestamp).getTime() >= triggerTime - 1_800_000 && new Date(item.timestamp).getTime() <= triggerTime)) {
           precursor.incidentId = incident.id;
           incident.events.push(signalToEvent(incident.id, precursor));
         }
@@ -285,6 +285,15 @@ export class MemoryRepository implements Repository {
     return { status: "accepted", acceptedSignals, incidentIds: [...incidentIds] } satisfies IngestionResult;
   }
 }
+
+// GitHub evidence is grouped per branch, so a failure on one branch doesn't absorb pushes and CI runs from others.
+const branchOf = (item: { metadata?: Record<string, unknown> }) => typeof item.metadata?.branch === "string" && item.metadata.branch ? item.metadata.branch : undefined;
+const compatibleBranch = (left?: string, right?: string) => !left || !right || left === right;
+const sameBranchLane = (events: IncidentEvent[], signal: NormalizedSignal) => {
+  const branch = branchOf(signal);
+  const branches = new Set(events.map(branchOf).filter(Boolean));
+  return !branch || !branches.size || branches.has(branch);
+};
 
 const signalToEvent = (incidentId: string, signal: NormalizedSignal): IncidentEvent => ({
   id: randomUUID(), incidentId, timestamp: signal.timestamp, service: signal.service, kind: signal.kind,
@@ -795,6 +804,9 @@ class PostgresRepository implements Repository {
           `select i.id from incidents i
            where i.organization_id = $1 and i.status <> 'resolved'
            and coalesce(i.environment,'unknown')=coalesce($6::text,'unknown')
+           and ($7::text is null
+             or not exists (select 1 from ingestion_signals b where b.incident_id = i.id and b.metadata->>'branch' is not null)
+             or exists (select 1 from ingestion_signals b where b.incident_id = i.id and b.metadata->>'branch' = $7))
            and (
              ($2::text is not null and exists (
                select 1 from ingestion_signals prior where prior.incident_id = i.id and prior.correlation_key = $2
@@ -806,7 +818,7 @@ class PostgresRepository implements Repository {
                select 1 from ingestion_signals prior where prior.incident_id = i.id and prior.correlation_key = $2
              ) then 0 else 1 end,
              i.started_at desc limit 1`,
-          [integration.organizationId, signal.correlationKey ?? null, relatedServices, signal.timestamp, policy.groupingWindowMinutes, signal.environment ?? "unknown"]
+          [integration.organizationId, signal.correlationKey ?? null, relatedServices, signal.timestamp, policy.groupingWindowMinutes, signal.environment ?? "unknown", branchOf(signal) ?? null]
         );
         let incidentId = match.rows[0] ? String((match.rows[0] as Row).id) : undefined;
 
@@ -825,9 +837,10 @@ class PostgresRepository implements Repository {
             `update ingestion_signals s set incident_id = $1
              where s.incident_id is null and s.occurred_at between $2::timestamptz - interval '30 minutes' and $2::timestamptz + interval '5 minutes'
              and coalesce(s.environment,'unknown')=coalesce($6::text,'unknown')
+             and ($7::text is null or s.metadata->>'branch' is null or s.metadata->>'branch' = $7)
              and (s.service = any($3::text[]) or ($4::text is not null and s.correlation_key = $4))
              and exists (select 1 from integrations x where x.id = s.integration_id and x.organization_id = $5)`,
-            [incidentId, signal.timestamp, relatedServices, signal.correlationKey ?? null, integration.organizationId, signal.environment ?? "unknown"]
+            [incidentId, signal.timestamp, relatedServices, signal.correlationKey ?? null, integration.organizationId, signal.environment ?? "unknown", branchOf(signal) ?? null]
           );
           await client.query(
             `insert into incident_events (incident_id, timestamp, service, kind, title, detail, impact_score, provenance, metadata)

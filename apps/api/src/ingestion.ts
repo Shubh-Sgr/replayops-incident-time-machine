@@ -105,7 +105,7 @@ function normalizeGitHub(payload: JsonRecord, eventName: string, deliveryId: str
       detail: `${sender} deployed ${ref} to ${environment}. This change is buffered as precursor evidence until an incident matches it.`,
       impactScore: 24, sourceUrl: repositoryUrl, environment,
       correlationKey: textValue(deployment.task, `${repositoryName}:${environment}`),
-      metadata: { provider: "github", eventType: "deployment", repositoryId, repository: repositoryName, deploymentId: deployment.id, deploymentEnvironment: environment, ref, sha: deployment.sha, creator: sender, sourceUrl: repositoryUrl }
+      metadata: { provider: "github", eventType: "deployment", repositoryId, repository: repositoryName, deploymentId: deployment.id, deploymentEnvironment: environment, ref, branch: ref, sha: deployment.sha, creator: sender, sourceUrl: repositoryUrl }
     })];
   }
 
@@ -125,12 +125,14 @@ function normalizeGitHub(payload: JsonRecord, eventName: string, deliveryId: str
       impactScore: failed ? 78 : successful ? 28 : 44,
       severity: failed ? "high" : "low", sourceUrl: environmentUrl, environment,
       correlationKey: `${repositoryName}:${environment}`,
-      metadata: { provider: "github", eventType: "deployment_status", repositoryId, repository: repositoryName, deploymentId: deployment.id, deploymentEnvironment: environment, state, sha: deployment.sha, creator: sender, sourceUrl: environmentUrl, logUrl: textValue(deploymentStatus.log_url, textValue(deploymentStatus.target_url)) || undefined, productionHealthMeasured: false }
+      metadata: { provider: "github", eventType: "deployment_status", repositoryId, repository: repositoryName, deploymentId: deployment.id, deploymentEnvironment: environment, branch: textValue(deployment.ref) || undefined, state, sha: deployment.sha, creator: sender, sourceUrl: environmentUrl, logUrl: textValue(deploymentStatus.log_url, textValue(deploymentStatus.target_url)) || undefined, productionHealthMeasured: false }
     })];
   }
 
   if (eventName === "workflow_run") {
     const workflow = object(payload.workflow_run);
+    // Queued and in-progress runs are not outcomes; only the completed run is evidence.
+    if (textValue(workflow.status) && textValue(workflow.status) !== "completed") return [];
     const conclusion = textValue(workflow.conclusion, textValue(workflow.status, "unknown")).toLowerCase();
     const failed = ["failure", "timed_out", "action_required"].includes(conclusion);
     return [normalized({
@@ -141,7 +143,7 @@ function normalizeGitHub(payload: JsonRecord, eventName: string, deliveryId: str
       impactScore: failed ? 76 : 26, severity: failed ? "high" : "low",
       sourceUrl: textValue(workflow.html_url, repositoryUrl),
       correlationKey: `${repositoryName}:${textValue(workflow.head_sha, textValue(workflow.id))}`,
-      metadata: { provider: "github", eventType: "workflow_run", repositoryId, repository: repositoryName, workflowId: workflow.workflow_id, workflow: workflow.name, workflowName: workflow.name, runId: workflow.id, runNumber: workflow.run_number, attempt: workflow.run_attempt ?? 1, runAttempt: workflow.run_attempt ?? 1, status: workflow.status, conclusion, sha: workflow.head_sha, branch: workflow.head_branch, sourceUrl: workflow.html_url, ciOnly: true, productionHealthMeasured: false }
+      metadata: { provider: "github", eventType: "workflow_run", repositoryId, repository: repositoryName, workflowId: workflow.workflow_id, workflow: workflow.name, workflowName: workflow.name, runId: workflow.id, logUrl: textValue(workflow.html_url) || undefined, runNumber: workflow.run_number, attempt: workflow.run_attempt ?? 1, runAttempt: workflow.run_attempt ?? 1, status: workflow.status, conclusion, sha: workflow.head_sha, branch: workflow.head_branch, sourceUrl: workflow.html_url, ciOnly: true, productionHealthMeasured: false }
     })];
   }
 
@@ -151,7 +153,7 @@ function normalizeGitHub(payload: JsonRecord, eventName: string, deliveryId: str
     return [normalized({
       externalId: `${deliveryId}:push`, timestamp: isoTime(headCommit.timestamp), service: repositoryName, kind: "metric",
       title: `Code pushed to ${ref.replace("refs/heads/", "")}`,
-      detail: textValue(headCommit.message, `${sender} pushed ${array(payload.commits).length} commit(s).`),
+      detail: textValue(headCommit.message).split("\n")[0]?.trim() || `${sender} pushed ${array(payload.commits).length} commit(s).`,
       impactScore: 18, sourceUrl: textValue(headCommit.url, repositoryUrl),
       correlationKey: `${repositoryName}:${textValue(payload.after, ref)}`,
       metadata: { provider: "github", eventType: "push", repositoryId, repository: repositoryName, ref, branch: ref.replace("refs/heads/", ""), sha: payload.after, beforeSha: payload.before, pusher: sender, sourceUrl: textValue(headCommit.url, repositoryUrl), productionHealthMeasured: false }

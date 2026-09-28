@@ -34,10 +34,10 @@ export function buildInvestigationIntelligence(incident: Incident, history: Inci
   const timestamps = events.map((event) => Date.parse(event.timestamp)).filter(Number.isFinite);
   const window = timestamps.length ? { start: new Date(Math.min(...timestamps)).toISOString(), end: new Date(Math.max(...timestamps)).toISOString() } : null;
 
-  const changes = events.filter((event) => event.kind === "deploy" || /config|feature flag|schema|migration|infrastructure|terraform|release/i.test(`${event.title} ${event.detail}`)).map((event) => ({
+  const changes = events.filter((event) => event.kind === "deploy" || event.metadata?.eventType === "push" || /config|feature flag|schema|migration|infrastructure|terraform|release/i.test(`${event.title} ${event.detail}`)).map((event) => ({
     eventId: event.id,
     timestamp: event.timestamp,
-    type: event.kind === "deploy" ? "code/deployment" : /flag/i.test(`${event.title} ${event.detail}`) ? "feature flag" : /schema|migration/i.test(`${event.title} ${event.detail}`) ? "schema" : /config/i.test(`${event.title} ${event.detail}`) ? "configuration" : "infrastructure",
+    type: event.kind === "deploy" || event.metadata?.eventType === "push" ? "code/deployment" : /flag/i.test(`${event.title} ${event.detail}`) ? "feature flag" : /schema|migration/i.test(`${event.title} ${event.detail}`) ? "schema" : /config/i.test(`${event.title} ${event.detail}`) ? "configuration" : "infrastructure",
     title: event.title,
     service: event.service,
     sourceUrl: text(event.metadata?.sourceUrl),
@@ -81,7 +81,7 @@ export function buildInvestigationIntelligence(incident: Incident, history: Inci
   const githubFailures = events.filter((event) => event.metadata?.provider === "github" && event.kind === "alert" && text(event.metadata?.logUrl ?? event.metadata?.sourceUrl));
   const githubSuggestions = [
     ...githubRanges.slice(0, 2).map((range, index) => ({ id:`github-diff-${index}`, label:"Diff of the deployed change", source:"GitHub", query:range.compareUrl, limitation: range.before ? "Everything between the last good commit and the deployed one." : "No earlier push is retained, so only the deployed commit is linked." })),
-    ...githubFailures.slice(0, 2).map((event, index) => ({ id:`github-run-${index}`, label:`Logs for “${event.title}”`, source:"GitHub", query:text(event.metadata?.logUrl ?? event.metadata?.sourceUrl)!, limitation: text(event.metadata?.logUrl) ? "Open the failing run or deployment and find the first error line." : "GitHub sent no log URL for this event; this is the deployment or repository page." }))
+    ...githubFailures.slice(0, 2).map((event, index) => ({ id:`github-run-${index}`, label:`Logs for “${event.title}”`, source:"GitHub", query:text(event.metadata?.logUrl ?? event.metadata?.sourceUrl)!, limitation: text(event.metadata?.logUrl) ? "Open the failing run and find the first error line." : "GitHub sent no log URL for this event; this is the deployment page." }))
   ];
   const querySuggestions = githubOnly ? githubSuggestions : [
     ...githubSuggestions,
