@@ -37,7 +37,7 @@ export function semanticAuditForRequest(method: string, path: string, bodyValue:
 
   // These routes already write richer domain-specific audit records, or are personal UI state.
   // Deletes and alert destinations write their own audit entries with a snapshot of what changed.
-  if ((method === "DELETE" && (/^\/incidents\/[^/]+$/.test(path) || /^\/integrations\/[^/]+$/.test(path))) || /^\/alert-channels/.test(path)) return null;
+  if ((method === "DELETE" && (/^\/incidents\/[^/]+$/.test(path) || /^\/integrations\/[^/]+$/.test(path))) || /^\/alert-channels/.test(path) || /^\/workspaces/.test(path) || /^\/api-tokens/.test(path)) return null;
   if (/^\/notifications\//.test(path) || path === "/privacy-settings" || path === "/product-outcomes" || path === "/services" || path === "/incident-policy" || /^\/team\//.test(path) || /\/mitigations$/.test(path) || /^\/mitigations\//.test(path) || /\/hypothesis-tests$/.test(path) || /^\/hypothesis-tests\//.test(path) || /\/recovery$/.test(path) || /\/postmortem$/.test(path) || /\/comments$/.test(path) || /\/evidence-bundle$/.test(path) || /\/http-replays$/.test(path) || /^\/http-replays\//.test(path) || /\/events\/[^/]+\/move$/.test(path)) return null;
 
   return { action: "changed workspace data", targetType: "workspace", detail: {} };

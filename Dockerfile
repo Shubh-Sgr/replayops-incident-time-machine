@@ -17,6 +17,7 @@ COPY --from=build --chown=replayops:replayops /app/package.json ./package.json
 COPY --from=build --chown=replayops:replayops /app/node_modules ./node_modules
 COPY --from=build --chown=replayops:replayops /app/apps/api/package.json ./apps/api/package.json
 COPY --from=build --chown=replayops:replayops /app/apps/api/dist ./apps/api/dist
+COPY --from=build --chown=replayops:replayops /app/apps/api/db/migrations ./apps/api/db/migrations
 USER replayops
 EXPOSE 8787
 CMD ["node", "apps/api/dist/index.js"]

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import { config } from "./config.js";
+import { MEMBERSHIPS } from "./scope.js";
 import { seedActivities, seedDashboardSeries, seedIncidents, seedReplayRuns } from "./seed.js";
 import type { Activity, DashboardData, Incident, IncidentDecision, IncidentEvent, IncidentHeadline, IngestionBatch, IngestionResult, Integration, IntegrationDelivery, IntegrationProvider, IntegrationTarget, NormalizedSignal, ReplayConfig, ReplayProjection, ReplayResult, ReplayRun, SearchResult, Severity } from "./types.js";
 import { forbidden } from "./errors.js";
@@ -30,6 +31,9 @@ export interface Repository {
   runReplay(userId: string, incidentId: string, config: ReplayConfig): Promise<ReplayResult | null>;
   search(userId: string, query: string, embedding?: number[]): Promise<SearchResult[]>;
   setIncidentEmbedding(incidentId: string, embedding: number[]): Promise<void>;
+  impactPreview(userId: string, threshold: number): Promise<{ atOrAbove: number; below: number }>;
+  /** Earliest sighting of each exception fingerprint across the workspace's incidents and retained signals. */
+  exceptionFirstSeen(userId: string, fingerprints: string[]): Promise<Map<string, string>>;
   listIntegrations(userId: string): Promise<Integration[]>;
   createIntegration(userId: string, input: IntegrationInput): Promise<Integration>;
   updateIntegrationConfig(userId: string, integrationId: string, input: IntegrationConfigInput): Promise<Integration | null>;
@@ -103,7 +107,7 @@ export class MemoryRepository implements Repository {
   async dashboard(_userId: string): Promise<DashboardData> {
     return { incidents: clone(this.incidents), activities: clone(seedActivities), replayRuns: clone(this.replayRuns), ...clone(seedDashboardSeries) };
   }
-  async listIncidents(_userId: string) { return clone(this.incidents).sort((a, b) => b.startedAt.localeCompare(a.startedAt)); }
+  async listIncidents(_userId: string) { return clone(this.incidents).sort((a, b) => b.startedAt.localeCompare(a.startedAt)).map(summarize); }
   async getIncident(_userId: string, id: string) { return clone(this.incidents.find((incident) => incident.id === id) ?? null); }
   async createIncident(_userId: string, input: IncidentInput) {
     const now = new Date().toISOString();
@@ -289,6 +293,20 @@ export class MemoryRepository implements Repository {
     return { status: "accepted", acceptedSignals, incidentIds: [...incidentIds], opened, movedToMonitoring } satisfies IngestionResult;
   }
   async setIncidentEmbedding(_incidentId: string, _embedding: number[]) {}
+  async exceptionFirstSeen(_userId: string, fingerprints: string[]) {
+    const seen = new Map<string, string>();
+    const consider = (metadata: Record<string, unknown> | undefined, timestamp: string) => {
+      const fingerprint = (metadata?.exception as { fingerprint?: string } | undefined)?.fingerprint;
+      if (fingerprint && fingerprints.includes(fingerprint) && (!seen.has(fingerprint) || timestamp < seen.get(fingerprint)!)) seen.set(fingerprint, timestamp);
+    };
+    for (const incident of this.incidents) for (const event of incident.events) consider(event.metadata, event.timestamp);
+    for (const signal of this.bufferedSignals) consider(signal.metadata, signal.timestamp);
+    return seen;
+  }
+  async impactPreview(_userId: string, threshold: number) {
+    const scores = this.incidents.flatMap((incident) => incident.events.map((event) => event.impactScore));
+    return { atOrAbove: scores.filter((score) => score >= threshold).length, below: scores.filter((score) => score < threshold).length };
+  }
 }
 
 const headline = (incident: Pick<Incident, "id" | "code" | "title" | "summary" | "service" | "environment" | "severity" | "status">): IncidentHeadline => ({
@@ -314,6 +332,12 @@ const signalToEvent = (incidentId: string, signal: NormalizedSignal): IncidentEv
 });
 
 type Row = Record<string, unknown>;
+const SUMMARY_EVENTS = 3;
+const summarize = (incident: Incident): Incident => ({
+  ...incident, eventCount: incident.events.length,
+  eventKinds: [...new Set(incident.events.filter((event) => event.evidenceState !== "excluded").map((event) => event.kind))],
+  events: [...incident.events].sort((a, b) => a.timestamp.localeCompare(b.timestamp)).slice(-SUMMARY_EVENTS)
+});
 const mapEvent = (row: Row): IncidentEvent => ({
   id: String(row.id), incidentId: String(row.incident_id), timestamp: new Date(String(row.timestamp)).toISOString(),
   service: String(row.service), kind: row.kind as IncidentEvent["kind"], title: String(row.title), detail: String(row.detail),
@@ -455,7 +479,7 @@ class PostgresRepository implements Repository {
     const incidentResult = await this.pool.query(
       `select i.* from incidents i
        where exists (
-         select 1 from organization_members m
+         select 1 from ${MEMBERSHIPS} m
          where m.organization_id = i.organization_id and m.user_id = $1
        ) ${where}
        order by i.started_at desc`,
@@ -476,27 +500,27 @@ class PostgresRepository implements Repository {
       this.listIncidents(userId),
       this.pool.query(
         `select a.* from incident_activities a
-         where exists (select 1 from organization_members m where m.organization_id = a.organization_id and m.user_id = $1)
+         where exists (select 1 from ${MEMBERSHIPS} m where m.organization_id = a.organization_id and m.user_id = $1)
          order by a.timestamp desc limit 20`,
         [userId]
       ),
       this.pool.query(
         `select r.* from replay_runs r
-         where exists (select 1 from organization_members m where m.organization_id = r.organization_id and m.user_id = $1)
+         where exists (select 1 from ${MEMBERSHIPS} m where m.organization_id = r.organization_id and m.user_id = $1)
          order by r.created_at desc limit 20`,
         [userId]
       ),
       this.pool.query(
         `select * from (
            select distinct on (s.service) s.* from service_health_snapshots s
-           where exists (select 1 from organization_members m where m.organization_id = s.organization_id and m.user_id = $1)
+           where exists (select 1 from ${MEMBERSHIPS} m where m.organization_id = s.organization_id and m.user_id = $1)
            order by s.service, s.observed_at desc
          ) latest order by case latest.state when 'critical' then 1 when 'degraded' then 2 else 3 end, latest.service`,
         [userId]
       ),
       this.pool.query(
         `select v.* from event_volume_samples v
-         where exists (select 1 from organization_members m where m.organization_id = v.organization_id and m.user_id = $1)
+         where exists (select 1 from ${MEMBERSHIPS} m where m.organization_id = v.organization_id and m.user_id = $1)
          order by v.sampled_at asc limit 48`,
         [userId]
       )
@@ -516,13 +540,34 @@ class PostgresRepository implements Repository {
       }))
     };
   }
-  listIncidents(userId: string) { return this.hydrated(userId); }
+  /** List views get summaries: counts and kinds over all evidence, but only the latest few events. */
+  async listIncidents(userId: string) {
+    const result = await this.pool.query(
+      `select i.*, coalesce(stats.event_count, 0) as event_count, coalesce(stats.event_kinds, '{}') as event_kinds, coalesce(latest.events, '[]'::jsonb) as latest_events
+       from incidents i
+       left join lateral (
+         select count(*) as event_count, array_agg(distinct e.kind) filter (where coalesce(e.evidence_state, 'active') <> 'excluded') as event_kinds
+         from incident_events e where e.incident_id = i.id
+       ) stats on true
+       left join lateral (
+         select jsonb_agg(to_jsonb(recent) order by recent.timestamp) as events
+         from (select * from incident_events e where e.incident_id = i.id order by e.timestamp desc limit ${SUMMARY_EVENTS}) recent
+       ) latest on true
+       where exists (select 1 from ${MEMBERSHIPS} m where m.organization_id = i.organization_id and m.user_id = $1)
+       order by i.started_at desc`,
+      [userId]
+    );
+    return (result.rows as Row[]).map((row) => ({
+      ...mapIncident(row, (row.latest_events as Row[]).map(mapEvent)),
+      eventCount: Number(row.event_count), eventKinds: (row.event_kinds as Incident["events"][number]["kind"][]) ?? []
+    }));
+  }
   async getIncident(userId: string, id: string) { return (await this.hydrated(userId, "and i.id = $2", [id]))[0] ?? null; }
   async createIncident(userId: string, input: IncidentInput, embedding?: number[]) {
     const result = await this.pool.query(
       `insert into incidents (organization_id,code,title,summary,service,environment,customer_impact,severity,status,owner,started_at,resolved_at,embedding)
        select m.organization_id,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::vector
-       from organization_members m where m.user_id = $1
+       from ${MEMBERSHIPS} m where m.user_id = $1
        order by m.created_at desc limit 1 returning *`,
       [userId, `ROP-${Math.floor(2000 + Math.random() * 7000)}`, input.title, input.summary, input.service, input.environment ?? "unknown", input.customerImpact ?? "Unknown until measured", input.severity, input.status, input.owner, input.startedAt, input.resolvedAt ?? null, embedding ? `[${embedding.join(",")}]` : null]
     );
@@ -542,7 +587,7 @@ class PostgresRepository implements Repository {
     await this.pool.query(
       `update incidents i set ${sets.join(", ")}, updated_at = now()
        where i.id = $${values.length}
-       and exists (select 1 from organization_members m where m.organization_id = i.organization_id and m.user_id = $1)`,
+       and exists (select 1 from ${MEMBERSHIPS} m where m.organization_id = i.organization_id and m.user_id = $1)`,
       values
     );
     return this.getIncident(userId, id);
@@ -550,7 +595,7 @@ class PostgresRepository implements Repository {
   async deleteIncident(userId: string, id: string) {
     return (await this.pool.query(
       `delete from incidents i where i.id = $2
-       and exists (select 1 from organization_members m where m.organization_id = i.organization_id and m.user_id = $1 and m.role = 'admin')`,
+       and exists (select 1 from ${MEMBERSHIPS} m where m.organization_id = i.organization_id and m.user_id = $1 and m.role = 'admin')`,
       [userId, id]
     )).rowCount === 1;
   }
@@ -571,7 +616,7 @@ class PostgresRepository implements Repository {
       `update incident_events e set ${sets.join(", ")}
        where e.incident_id = $${values.length - 1} and e.id = $${values.length}
        and exists (
-         select 1 from incidents i join organization_members m on m.organization_id = i.organization_id
+         select 1 from incidents i join ${MEMBERSHIPS} m on m.organization_id = i.organization_id
          where i.id = e.incident_id and m.user_id = $1
        ) returning e.*`,
       values
@@ -584,7 +629,7 @@ class PostgresRepository implements Repository {
     const result = await this.pool.query(
       `delete from incident_events e where e.incident_id = $2 and e.id = $3
        and exists (
-         select 1 from incidents i join organization_members m on m.organization_id = i.organization_id
+         select 1 from incidents i join ${MEMBERSHIPS} m on m.organization_id = i.organization_id
          where i.id = e.incident_id and m.user_id = $1
        )`,
       [userId, incidentId, eventId]
@@ -596,8 +641,8 @@ class PostgresRepository implements Repository {
     const client = await this.pool.connect();
     try { await client.query("begin"); const result = await client.query(
       `update incident_events e set incident_id=$4 where e.id=$3 and e.incident_id=$2
-       and exists(select 1 from incidents s join organization_members m on m.organization_id=s.organization_id where s.id=$2 and m.user_id=$1)
-       and exists(select 1 from incidents t join organization_members m on m.organization_id=t.organization_id where t.id=$4 and m.user_id=$1 and t.organization_id=(select organization_id from incidents where id=$2)) returning e.*`,
+       and exists(select 1 from incidents s join ${MEMBERSHIPS} m on m.organization_id=s.organization_id where s.id=$2 and m.user_id=$1)
+       and exists(select 1 from incidents t join ${MEMBERSHIPS} m on m.organization_id=t.organization_id where t.id=$4 and m.user_id=$1 and t.organization_id=(select organization_id from incidents where id=$2)) returning e.*`,
       [userId, incidentId, eventId, targetIncidentId]
     ); const row=result.rows[0] as Row|undefined; if (!row) { await client.query("rollback"); return null; }
       await client.query(`update ingestion_signals set incident_id=$2 where incident_id=$1 and external_id=$3`, [incidentId,targetIncidentId,(row.metadata as Record<string,unknown>|undefined)?.sourceExternalId ?? ""]);
@@ -609,7 +654,7 @@ class PostgresRepository implements Repository {
       `select a.* from incident_activities a
        where a.incident_id = $2 and a.action like '[decision:%'
        and exists (
-         select 1 from incidents i join organization_members m on m.organization_id = i.organization_id
+         select 1 from incidents i join ${MEMBERSHIPS} m on m.organization_id = i.organization_id
          where i.id = a.incident_id and m.user_id = $1
        )
        order by a.timestamp desc`,
@@ -622,7 +667,7 @@ class PostgresRepository implements Repository {
     const result = await this.pool.query(
       `insert into incident_activities (organization_id, incident_id, actor, action, detail, timestamp)
        select i.organization_id, i.id, i.owner, $3, $4, now()
-       from incidents i join organization_members m on m.organization_id = i.organization_id
+       from incidents i join ${MEMBERSHIPS} m on m.organization_id = i.organization_id
        where i.id = $2 and m.user_id = $1
        returning *`,
       [userId, incidentId, action, input.detail]
@@ -634,7 +679,7 @@ class PostgresRepository implements Repository {
     const result = await this.pool.query(
       `select r.* from replay_runs r
        where r.incident_id=$2 and r.config is not null and r.projection is not null
-       and exists (select 1 from organization_members m where m.organization_id=r.organization_id and m.user_id=$1)
+       and exists (select 1 from ${MEMBERSHIPS} m where m.organization_id=r.organization_id and m.user_id=$1)
        order by r.created_at desc limit 30`,
       [userId, incidentId]
     );
@@ -649,7 +694,7 @@ class PostgresRepository implements Repository {
     const result = await this.pool.query(
       `insert into replay_runs (organization_id, incident_id, name, status, progress, config, projection, evidence_version, event_count)
        select i.organization_id, i.id, $3, $4, 100, $5, $6, i.evidence_revision, $7
-       from incidents i join organization_members m on m.organization_id = i.organization_id
+       from incidents i join ${MEMBERSHIPS} m on m.organization_id = i.organization_id
        where i.id = $2 and m.user_id = $1
        returning *`,
       [userId, incidentId, name, status, config, projection, incident.events.length]
@@ -658,6 +703,34 @@ class PostgresRepository implements Repository {
     if (!row) return null;
     return { ...mapReplayRun(row), config, projection, evidenceVersion: incident.evidenceRevision ?? incident.updatedAt, eventCount: incident.events.length } satisfies ReplayResult;
   }
+  async exceptionFirstSeen(userId: string, fingerprints: string[]) {
+    if (!fingerprints.length) return new Map<string, string>();
+    const result = await this.pool.query(
+      `select fingerprint, min(seen_at) as first_seen from (
+         select e.metadata->'exception'->>'fingerprint' as fingerprint, e.timestamp as seen_at
+         from incident_events e join incidents i on i.id = e.incident_id
+         where e.metadata->'exception'->>'fingerprint' = any($2::text[])
+           and exists (select 1 from ${MEMBERSHIPS} m where m.organization_id = i.organization_id and m.user_id = $1)
+         union all
+         select s.metadata->'exception'->>'fingerprint', s.occurred_at
+         from ingestion_signals s join integrations x on x.id = s.integration_id
+         where s.metadata->'exception'->>'fingerprint' = any($2::text[])
+           and exists (select 1 from ${MEMBERSHIPS} m where m.organization_id = x.organization_id and m.user_id = $1)
+       ) sightings group by fingerprint`,
+      [userId, fingerprints]
+    );
+    return new Map((result.rows as Row[]).map((row) => [String(row.fingerprint), new Date(String(row.first_seen)).toISOString()]));
+  }
+  async impactPreview(userId: string, threshold: number) {
+    const result = await this.pool.query(
+      `select count(*) filter (where e.impact_score >= $2) as at_or_above, count(*) filter (where e.impact_score < $2) as below
+       from incident_events e join incidents i on i.id = e.incident_id
+       where exists (select 1 from ${MEMBERSHIPS} m where m.organization_id = i.organization_id and m.user_id = $1)`,
+      [userId, threshold]
+    );
+    const row = result.rows[0] as Row;
+    return { atOrAbove: Number(row.at_or_above ?? 0), below: Number(row.below ?? 0) };
+  }
   async setIncidentEmbedding(incidentId: string, embedding: number[]) {
     await this.pool.query(`update incidents set embedding = $2::vector where id = $1`, [incidentId, `[${embedding.join(",")}]`]);
   }
@@ -665,7 +738,7 @@ class PostgresRepository implements Repository {
     const exactResult = await this.pool.query(
       `select distinct on (i.id) i.*, e.id as matched_event_id
        from incidents i
-       join organization_members m on m.organization_id=i.organization_id and m.user_id=$1
+       join ${MEMBERSHIPS} m on m.organization_id=i.organization_id and m.user_id=$1
        left join incident_events e on e.incident_id=i.id and (
          lower(e.id::text)=lower($2) or lower(coalesce(e.metadata->>'traceId',''))=lower($2)
          or lower(coalesce(e.metadata->>'sourceExternalId',''))=lower($2)
@@ -682,7 +755,7 @@ class PostgresRepository implements Repository {
       ? await this.pool.query(
         `select i.*, 1 - (i.embedding <=> $2::vector) as score from incidents i
          where i.embedding is not null
-         and exists (select 1 from organization_members m where m.organization_id = i.organization_id and m.user_id = $1)
+         and exists (select 1 from ${MEMBERSHIPS} m where m.organization_id = i.organization_id and m.user_id = $1)
          order by i.embedding <=> $2::vector limit 6`,
         [userId, `[${embedding.join(",")}]`]
       )
@@ -696,7 +769,7 @@ class PostgresRepository implements Repository {
         `select i.*,
            case when lower(concat_ws(' ',i.code,i.title,i.summary,i.service)) like any($2::text[]) then 0.68 else 0.52 end as score
          from incidents i
-         where exists (select 1 from organization_members m where m.organization_id=i.organization_id and m.user_id=$1)
+         where exists (select 1 from ${MEMBERSHIPS} m where m.organization_id=i.organization_id and m.user_id=$1)
          and (
            lower(concat_ws(' ',i.code,i.title,i.summary,i.service)) like any($2::text[])
            or exists (
@@ -717,7 +790,7 @@ class PostgresRepository implements Repository {
   async listIntegrations(userId: string) {
     const integrations = await this.pool.query(
       `select x.*,case when x.counter_date=current_date then x.accepted_today else 0 end as accepted_today,case when x.counter_date=current_date then x.dropped_today else 0 end as dropped_today from integrations x
-       where exists (select 1 from organization_members m where m.organization_id = x.organization_id and m.user_id = $1)
+       where exists (select 1 from ${MEMBERSHIPS} m where m.organization_id = x.organization_id and m.user_id = $1)
        order by x.created_at desc`,
       [userId]
     );
@@ -740,7 +813,7 @@ class PostgresRepository implements Repository {
   async createIntegration(userId: string, input: IntegrationInput) {
     const result = await this.pool.query(
       `insert into integrations (organization_id, created_by, name, provider, expected_cadence_minutes)
-       select m.organization_id, $1, $2, $3, case when $3='otel' then 15 when $3='github' then 10080 else 180 end from organization_members m
+       select m.organization_id, $1, $2, $3, case when $3='otel' then 15 when $3='github' then 10080 else 180 end from ${MEMBERSHIPS} m
        where m.user_id = $1 and m.role in ('admin', 'responder')
        order by m.created_at desc limit 1 returning *`,
       [userId, input.name, input.provider]
@@ -749,12 +822,12 @@ class PostgresRepository implements Repository {
     if (!row) throw forbidden("A responder workspace is required before a connector can be created.");
     return mapIntegration(row);
   }
-  async updateIntegrationConfig(userId:string,integrationId:string,input:IntegrationConfigInput){const result=await this.pool.query(`update integrations x set expected_cadence_minutes=$3,retention_days=$4,daily_quota=$5,healthy_sample_rate=$6,updated_at=now() where x.id=$2 and exists(select 1 from organization_members m where m.organization_id=x.organization_id and m.user_id=$1 and m.role in ('admin','responder')) returning *`,[userId,integrationId,input.expectedCadenceMinutes,input.retentionDays,input.dailyQuota,input.healthySampleRate]);return result.rows[0]?mapIntegration(result.rows[0] as Row):null;}
+  async updateIntegrationConfig(userId:string,integrationId:string,input:IntegrationConfigInput){const result=await this.pool.query(`update integrations x set expected_cadence_minutes=$3,retention_days=$4,daily_quota=$5,healthy_sample_rate=$6,updated_at=now() where x.id=$2 and exists(select 1 from ${MEMBERSHIPS} m where m.organization_id=x.organization_id and m.user_id=$1 and m.role in ('admin','responder')) returning *`,[userId,integrationId,input.expectedCadenceMinutes,input.retentionDays,input.dailyQuota,input.healthySampleRate]);return result.rows[0]?mapIntegration(result.rows[0] as Row):null;}
   async deleteIntegration(userId: string, integrationId: string) {
     return (await this.pool.query(
       `delete from integrations x where x.id = $2
        and exists (
-         select 1 from organization_members m
+         select 1 from ${MEMBERSHIPS} m
          where m.organization_id = x.organization_id and m.user_id = $1 and m.role = 'admin'
        )`,
       [userId, integrationId]

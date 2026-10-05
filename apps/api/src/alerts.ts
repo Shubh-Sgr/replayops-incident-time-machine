@@ -4,14 +4,16 @@ import { isIP } from "node:net";
 import { Pool } from "pg";
 import { config } from "./config.js";
 import { badRequest, notFound } from "./errors.js";
+import { sendAlertEmail } from "./mailer.js";
 import type { Severity } from "./types.js";
 import { workspaceService } from "./workspace.js";
 
 /**
  * Outbound alerting: tell people when an incident opens or changes state, in the tools they already
- * watch. Slack and Discord incoming webhooks and plain HTTPS webhooks are all free to use.
+ * watch. Email (Resend free tier), phone push (ntfy), Slack and Discord incoming webhooks, and plain
+ * HTTPS webhooks are all free to use.
  */
-export type AlertChannelKind = "slack" | "discord" | "webhook";
+export type AlertChannelKind = "email" | "ntfy" | "slack" | "discord" | "webhook";
 export type AlertEventType = "opened" | "monitoring" | "resolved" | "reopened";
 export const alertEventTypes: AlertEventType[] = ["opened", "monitoring", "resolved", "reopened"];
 
@@ -19,7 +21,7 @@ export interface AlertChannel {
   id: string;
   name: string;
   kind: AlertChannelKind;
-  /** Masked: the full URL is a credential and is never returned after creation. */
+  /** Masked: a webhook URL is a credential and is never returned after creation. For email, the recipients. */
   target: string;
   events: AlertEventType[];
   minSeverity: Severity;
@@ -62,6 +64,23 @@ export const isPrivateAddress = (address: string) => {
   return false;
 };
 
+const emailPattern = /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/;
+/** Email destinations are stored as `mailto:a@x.com,b@y.com`; returns the cleaned recipient list. */
+export function parseRecipients(raw: string) {
+  const recipients = [...new Set(raw.replace(/^mailto:/i, "").split(/[\s,;]+/).map((item) => item.trim().toLowerCase()).filter(Boolean))];
+  if (!recipients.length) throw badRequest("Enter at least one email address.");
+  if (recipients.length > 10) throw badRequest("Use at most 10 email addresses per destination.");
+  const invalid = recipients.find((item) => !emailPattern.test(item));
+  if (invalid) throw badRequest(`“${invalid}” is not a valid email address.`);
+  return recipients;
+}
+
+/** Normalizes what the user typed into the stored destination string, validating it for its kind. */
+export function normalizeDestination(kind: AlertChannelKind, raw: string) {
+  if (kind === "email") return `mailto:${parseRecipients(raw).join(",")}`;
+  return validateChannelUrl(kind, raw).toString();
+}
+
 /** Rejects destinations that would let a workspace member make the API call internal hosts (SSRF). */
 export function validateChannelUrl(kind: AlertChannelKind, raw: string) {
   let url: URL;
@@ -70,12 +89,14 @@ export function validateChannelUrl(kind: AlertChannelKind, raw: string) {
   if (url.username || url.password) throw badRequest("Put credentials in the URL path or query, not before the host.");
   const host = url.hostname.toLowerCase();
   if (kind === "slack" && host !== "hooks.slack.com") throw badRequest("Slack incoming webhooks start with https://hooks.slack.com/.");
+  if (kind === "ntfy" && !/^\/[A-Za-z0-9_-]{1,64}$/.test(url.pathname)) throw badRequest("ntfy destinations look like https://ntfy.sh/your-secret-topic.");
   if (kind === "discord" && (!["discord.com", "discordapp.com", "ptb.discord.com", "canary.discord.com"].includes(host) || !url.pathname.startsWith("/api/webhooks/"))) throw badRequest("Discord webhooks look like https://discord.com/api/webhooks/….");
   if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal") || isPrivateAddress(host)) throw badRequest("Alert destinations must be public internet hosts.");
   return url;
 }
 
 export const maskUrl = (raw: string) => {
+  if (raw.startsWith("mailto:")) return raw.slice(7).split(",").join(", ");
   // Webhook URLs carry their secret in the path, so only ever show the host and a short tail.
   try { const url = new URL(raw); return `${url.host}/…${url.pathname.length > 12 ? url.pathname.slice(-4) : ""}`; } catch { return "configured"; }
 };
@@ -85,10 +106,30 @@ const slackText = (value: string) => value.replace(/&/g, "&amp;").replace(/</g, 
 const discordText = (value: string) => value.replace(/([\\`*_~|[\]()>#@])/g, "\\$1");
 
 /** Builds the request body for one destination. Pure, so formatting is unit-tested without a network. */
+const alertContext = (incident: AlertIncident) => [incident.service, incident.environment && incident.environment !== "unknown" ? incident.environment : null, `severity ${incident.severity}`].filter(Boolean).join(" · ");
+
+/** Plain-text pieces shared by email and phone push. */
+export function plainAlert(event: AlertEvent) {
+  const { incident } = event;
+  const heading = `${headline[event.type]}: ${incident.code} ${incident.title}`;
+  const lines = [alertContext(incident), event.detail?.trim().slice(0, 600), event.actor ? `By ${event.actor}` : undefined].filter((line): line is string => Boolean(line));
+  return { subject: `${emoji[event.type]} ${heading}`, heading, lines, link: incidentUrl(incident), text: [heading, ...lines, `Open the investigation: ${incidentUrl(incident)}`].join("\n") };
+}
+
+/** ntfy push: plain-text body plus headers; critical incidents use urgent priority so the phone rings through. */
+export function ntfyRequest(event: AlertEvent) {
+  const plain = plainAlert(event);
+  const priority = event.type === "opened" || event.type === "reopened" ? (event.incident.severity === "critical" ? "urgent" : event.incident.severity === "high" ? "high" : "default") : "default";
+  // HTTP headers must be Latin-1; keep the title ASCII and leave emoji to the tags.
+  const title = plain.heading.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^\x20-\x7e]/g, "").replace(/\s+/g, " ").trim().slice(0, 200);
+  const tags = { opened: "rotating_light", monitoring: "stethoscope", resolved: "white_check_mark", reopened: "repeat", test: "bell" }[event.type];
+  return { body: plain.lines.join("\n") || plain.heading, headers: { Title: title, Priority: priority, Tags: tags, Click: plain.link, "Content-Type": "text/plain; charset=utf-8" } };
+}
+
 export function formatAlert(kind: AlertChannelKind, event: AlertEvent, occurredAt = new Date().toISOString()) {
   const { incident } = event;
   const link = incidentUrl(incident);
-  const context = [incident.service, incident.environment && incident.environment !== "unknown" ? incident.environment : null, `severity ${incident.severity}`].filter(Boolean).join(" · ");
+  const context = alertContext(incident);
   const detail = event.detail?.trim().slice(0, 600);
   if (kind === "slack") {
     const lines = [`${emoji[event.type]} *${headline[event.type]}: <${link}|${slackText(incident.code)} ${slackText(incident.title)}>*`, context, detail ? slackText(detail) : null, event.actor ? `_by ${slackText(event.actor)}_` : null].filter(Boolean);
@@ -127,12 +168,14 @@ class AlertService {
     await this.pool.query(`
       create table if not exists alert_channels (
         id uuid primary key default gen_random_uuid(), organization_id uuid not null references organizations(id) on delete cascade,
-        name text not null, kind text not null check (kind in ('slack','discord','webhook')), url text not null,
+        name text not null, kind text not null, url text not null,
         events text[] not null default '{opened,monitoring,resolved,reopened}', min_severity text not null default 'low' check (min_severity in ('low','medium','high','critical')),
         enabled boolean not null default true, last_status text, last_error text, last_sent_at timestamptz,
         created_by uuid, created_at timestamptz not null default now()
       );
       create index if not exists alert_channels_org_idx on alert_channels(organization_id);
+      alter table alert_channels drop constraint if exists alert_channels_kind_check;
+      alter table alert_channels add constraint alert_channels_kind_check check (kind in ('email','ntfy','slack','discord','webhook'));
       alter table alert_channels enable row level security;
     `);
   }
@@ -147,7 +190,7 @@ class AlertService {
 
   async create(userId: string, actor: string, input: AlertChannelInput) {
     const context = await workspaceService.assertRole(userId, ["admin"]);
-    const url = validateChannelUrl(input.kind, input.url).toString();
+    const url = normalizeDestination(input.kind, input.url);
     const events = [...new Set(input.events)];
     let stored: StoredChannel;
     if (!this.pool) {
@@ -216,26 +259,45 @@ class AlertService {
     return mapRow(result.rows[0] as Row);
   }
 
+  /** Sends one alert; throws with a human-readable reason when the destination did not accept it. */
+  private async send(channel: StoredChannel, event: AlertEvent, sentAt: string) {
+    if (channel.kind === "email") {
+      const plain = plainAlert(event);
+      const sent = await sendAlertEmail({ to: parseRecipients(channel.url), subject: plain.subject, text: plain.text, heading: plain.heading, lines: plain.lines, linkUrl: plain.link, linkLabel: "Open the investigation", idempotencyKey: `replayops-alert/${channel.id}/${event.incident.id}/${event.type}/${sentAt}` });
+      if (!sent.ok) throw new Error(sent.error);
+      return;
+    }
+    const url = validateChannelUrl(channel.kind, channel.url);
+    // Re-check DNS at send time so a public name can't be pointed at an internal address later.
+    const addresses = await lookup(url.hostname, { all: true });
+    if (addresses.some((item) => isPrivateAddress(item.address))) throw new Error("Destination resolves to a private network address.");
+    let body: string;
+    const headers: Record<string, string> = { "user-agent": "ReplayOps-Alerts/1" };
+    if (channel.kind === "ntfy") {
+      const push = ntfyRequest(event);
+      body = push.body;
+      Object.assign(headers, push.headers);
+    } else {
+      body = JSON.stringify(formatAlert(channel.kind, event, sentAt));
+      headers["content-type"] = "application/json";
+      if (channel.kind === "webhook") { headers["x-replayops-event"] = event.type; headers["x-replayops-signature"] = signAlertBody(channel.id, body); }
+    }
+    const response = await fetch(url, { method: "POST", headers, body, redirect: "error", signal: AbortSignal.timeout(5000) });
+    if (!response.ok) throw new Error(`${response.status} ${(await response.text().catch(() => "")).slice(0, 160) || response.statusText}`.trim());
+  }
+
   private async deliver(channel: StoredChannel, event: AlertEvent) {
     const sentAt = new Date().toISOString();
     let lastStatus: "delivered" | "failed" = "failed";
     let lastError: string | null = null;
     try {
-      const url = validateChannelUrl(channel.kind, channel.url);
-      // Re-check DNS at send time so a public name can't be pointed at an internal address later.
-      const addresses = await lookup(url.hostname, { all: true });
-      if (addresses.some((item) => isPrivateAddress(item.address))) throw new Error("Destination resolves to a private network address.");
-      const body = JSON.stringify(formatAlert(channel.kind, event, sentAt));
-      const headers: Record<string, string> = { "content-type": "application/json", "user-agent": "ReplayOps-Alerts/1" };
-      if (channel.kind === "webhook") { headers["x-replayops-event"] = event.type; headers["x-replayops-signature"] = signAlertBody(channel.id, body); }
-      const response = await fetch(url, { method: "POST", headers, body, redirect: "error", signal: AbortSignal.timeout(5000) });
-      if (response.ok) lastStatus = "delivered";
-      else lastError = `${response.status} ${(await response.text().catch(() => "")).slice(0, 160) || response.statusText}`.trim();
+      await this.send(channel, event, sentAt);
+      lastStatus = "delivered";
     } catch (error) {
       const code = (error as { code?: string }).code;
       lastError = !(error instanceof Error) ? "Delivery failed."
         : error.name === "TimeoutError" ? "Destination did not answer within 5 seconds."
-          : code === "ENOTFOUND" ? "Host not found. Check the webhook URL."
+          : code === "ENOTFOUND" ? "Host not found. Check the URL."
             : code === "ECONNREFUSED" ? "Connection refused by the destination."
               : error.message;
     }

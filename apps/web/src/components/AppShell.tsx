@@ -8,6 +8,7 @@ import { api } from "../lib/api";
 import { useAuth } from "../providers/AuthProvider";
 import { useTheme } from "../providers/ThemeProvider";
 import { CommandSearch } from "./CommandSearch";
+import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
 
 const navigation = [
   { to: "/", label: "Investigations", icon: Activity, end: true },
@@ -50,7 +51,9 @@ export function AppShell() {
         </div>
       </div>
 
-      <nav className={cn("mt-8 space-y-1", mobile && "mt-6")} aria-label="Primary navigation">
+      <WorkspaceSwitcher onSwitched={() => setMobileNav(false)} />
+
+      <nav className={cn("mt-6 space-y-1", mobile && "mt-5")} aria-label="Primary navigation">
         {navigation.map((item) => (
           <NavLink
             key={item.to}

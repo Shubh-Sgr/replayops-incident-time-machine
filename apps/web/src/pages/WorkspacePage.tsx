@@ -1,20 +1,22 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AnimatePresence, motion } from "framer-motion";
-import { Activity, BellRing, BookOpenCheck, Boxes, CheckCircle2, Copy, DatabaseZap, GitBranch, LoaderCircle, LockKeyhole, MailCheck, Plus, RotateCcw, Send, ShieldCheck, TriangleAlert, UserPlus, UsersRound, Wrench } from "lucide-react";
+import { Activity, BellRing, BookOpenCheck, KeyRound, Boxes, CheckCircle2, Copy, DatabaseZap, GitBranch, LoaderCircle, LockKeyhole, MailCheck, Plus, RotateCcw, Send, ShieldCheck, TriangleAlert, UserPlus, UsersRound, Wrench } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { api } from "../lib/api";
 import { AlertDestinations } from "../components/AlertDestinations";
+import { ApiTokens } from "../components/ApiTokens";
 import { presentAuditEntry } from "../lib/audit";
 import { cn, formatRelative } from "../lib/utils";
 import type { IncidentPolicy, PrivacySettings, ServiceDefinition, TeamInvitation, WorkspaceRole } from "../types";
 
-type Mode = "services" | "alerts" | "intake" | "privacy" | "team" | "audit" | "queue";
+type Mode = "services" | "alerts" | "tokens" | "intake" | "privacy" | "team" | "audit" | "queue";
 const modes = [
   { id: "services" as const, label: "Service map", icon: Boxes },
   { id: "alerts" as const, label: "Alerts", icon: BellRing },
   { id: "intake" as const, label: "Intake policy", icon: Wrench },
   { id: "privacy" as const, label: "Privacy & AI", icon: LockKeyhole },
   { id: "team" as const, label: "Team access", icon: UsersRound },
+  { id: "tokens" as const, label: "API tokens", icon: KeyRound },
   { id: "audit" as const, label: "Audit trail", icon: BookOpenCheck },
   { id: "queue" as const, label: "Delivery queue", icon: DatabaseZap }
 ];
@@ -58,9 +60,11 @@ function ServiceMap() {
 function IntakePolicyPanel() {
   const queryClient = useQueryClient();
   const policy = useQuery({ queryKey: ["incident-policy"], queryFn: api.incidentPolicy });
-  const incidents=useQuery({queryKey:["incidents"],queryFn:api.incidents});
   const [draft, setDraft] = useState<Omit<IncidentPolicy, "updatedAt">>({ incidentThreshold: 65, groupingWindowMinutes: 120, suppressLowSeverity: true, maintenanceMode: false });
   useEffect(() => { if (policy.data) setDraft(policy.data); }, [policy.data]);
+  const [previewThreshold, setPreviewThreshold] = useState(65);
+  useEffect(() => { const timer = window.setTimeout(() => setPreviewThreshold(draft.incidentThreshold), 250); return () => window.clearTimeout(timer); }, [draft.incidentThreshold]);
+  const preview = useQuery({ queryKey: ["incident-policy-preview", previewThreshold], queryFn: () => api.incidentPolicyPreview(previewThreshold), placeholderData: (previous) => previous });
   const save = useMutation({ mutationFn: () => api.updateIncidentPolicy(draft), onSuccess: (value) => queryClient.setQueryData(["incident-policy"], value) });
   return <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(280px,0.55fr)]">
     <section className="surface-lined p-5 sm:p-6"><h2 className="section-title">Decide when evidence becomes an incident</h2><p className="mt-2 max-w-2xl text-sm leading-6 text-muted">These deterministic controls run before AI. They prevent noisy signals from creating low-value investigations and group related evidence into one response window.</p>
@@ -73,7 +77,7 @@ function IntakePolicyPanel() {
       {save.error && <p role="alert" className="mt-4 text-sm text-danger">{save.error.message}</p>}
       <button className="control-primary mt-5" onClick={() => save.mutate()} disabled={save.isPending}>{save.isPending ? "Saving policy…" : "Save intake policy"}</button>
     </section>
-    <aside className="surface-lined p-5 sm:p-6"><ShieldCheck className="h-6 w-6 text-success" /><h2 className="mt-4 section-title">Policy dry run</h2><p className="mt-3 text-sm leading-6 text-muted">Across retained investigation evidence, <strong className="text-ink">{incidents.data?.flatMap((item)=>item.events).filter((event)=>event.impactScore>=draft.incidentThreshold).length??0} events</strong> meet the proposed opening threshold and <strong className="text-ink">{incidents.data?.flatMap((item)=>item.events).filter((event)=>event.impactScore<draft.incidentThreshold).length??0}</strong> would remain buffered or supporting-only.</p><p className="mt-4 text-sm leading-6 text-muted">Related evidence may join an open incident within <strong className="text-ink">{draft.groupingWindowMinutes} minutes</strong>, but only within the same environment and related service identity.</p><p className="mt-5 border-t border-line pt-4 text-xs leading-5 text-muted">Historical preview only. Saving affects future ingestion and never silently rewrites existing investigations.</p></aside>
+    <aside className="surface-lined p-5 sm:p-6"><ShieldCheck className="h-6 w-6 text-success" /><h2 className="mt-4 section-title">Policy dry run</h2><p className="mt-3 text-sm leading-6 text-muted">Across retained investigation evidence, <strong className="text-ink">{preview.data?.atOrAbove ?? 0} events</strong> meet the proposed opening threshold and <strong className="text-ink">{preview.data?.below ?? 0}</strong> would remain buffered or supporting-only.</p><p className="mt-4 text-sm leading-6 text-muted">Related evidence may join an open incident within <strong className="text-ink">{draft.groupingWindowMinutes} minutes</strong>, but only within the same environment and related service identity.</p><p className="mt-5 border-t border-line pt-4 text-xs leading-5 text-muted">Historical preview only. Saving affects future ingestion and never silently rewrites existing investigations.</p></aside>
   </div>;
 }
 
@@ -201,6 +205,6 @@ export function WorkspacePage() {
   return <div className="space-y-6"><header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between"><div><h1 className="font-heading text-3xl font-semibold tracking-[-0.03em] sm:text-4xl">Operational workspace</h1><p className="mt-2 max-w-3xl text-sm leading-6 text-muted">Define what ReplayOps observes, how it groups evidence, who can act, and how every change is reviewed.</p></div><span className="measurement-number w-fit rounded-full bg-elevated px-3 py-1.5 text-xs text-muted">{workspace.data?.organizationName ?? "Loading workspace"} · {workspace.data?.role ?? "member"}</span></header>
     <div className="overflow-x-auto"><div className="inline-flex min-w-full gap-1 rounded-panel bg-rail p-1 sm:min-w-0" role="tablist" aria-label="Workspace controls">{modes.map((item) => <button key={item.id} role="tab" aria-selected={mode === item.id} className={cn("flex min-h-11 items-center gap-2 whitespace-nowrap rounded-control px-3 text-sm font-semibold transition-colors", mode === item.id ? "bg-ink text-panel" : "text-muted hover:bg-elevated hover:text-ink")} onClick={() => setMode(item.id)}><item.icon className="h-4 w-4" />{item.label}</button>)}</div></div>
     {workspace.error && <p role="alert" className="rounded-control bg-danger/10 p-3 text-sm text-danger"><TriangleAlert className="mr-2 inline h-4 w-4" />{workspace.error.message}</p>}
-    <AnimatePresence mode="wait"><motion.div key={mode} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.18 }}>{mode === "services" ? <ServiceMap /> : mode === "alerts" ? <AlertDestinations /> : mode === "intake" ? <IntakePolicyPanel /> : mode === "privacy" ? <PrivacyPanel/> : mode === "team" ? <TeamAccess /> : mode === "audit" ? <AuditTrail /> : <QueueHealth />}</motion.div></AnimatePresence>
+    <AnimatePresence mode="wait"><motion.div key={mode} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.18 }}>{mode === "services" ? <ServiceMap /> : mode === "alerts" ? <AlertDestinations /> : mode === "tokens" ? <ApiTokens /> : mode === "intake" ? <IntakePolicyPanel /> : mode === "privacy" ? <PrivacyPanel/> : mode === "team" ? <TeamAccess /> : mode === "audit" ? <AuditTrail /> : <QueueHealth />}</motion.div></AnimatePresence>
   </div>;
 }

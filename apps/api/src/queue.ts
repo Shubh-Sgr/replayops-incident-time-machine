@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import { config } from "./config.js";
+import { MEMBERSHIPS } from "./scope.js";
 import { repository } from "./repository.js";
 import { alertService } from "./alerts.js";
 import { embedText } from "./ai.js";
@@ -141,13 +142,13 @@ class DurableIngestionQueue {
 
   async list(userId: string) {
     if (!this.pool) return structuredClone(this.jobs.map(publicJob).slice(0, 50));
-    const result = await this.pool.query(`select q.*, i.name as integration_name from ingestion_queue q join integrations i on i.id=q.integration_id where exists(select 1 from organization_members m where m.organization_id=i.organization_id and m.user_id=$1) order by q.created_at desc limit 50`, [userId]);
+    const result = await this.pool.query(`select q.*, i.name as integration_name from ingestion_queue q join integrations i on i.id=q.integration_id where exists(select 1 from ${MEMBERSHIPS} m where m.organization_id=i.organization_id and m.user_id=$1) order by q.created_at desc limit 50`, [userId]);
     return result.rows.map((row) => mapJob(row as Row));
   }
 
   async retry(userId: string, jobId: string) {
     if (!this.pool) { const job = this.jobs.find((item) => item.id === jobId); if (!job) throw notFound("Queue job not found."); job.status = "retrying"; job.nextAttemptAt = new Date().toISOString(); job.updatedAt = new Date().toISOString(); return structuredClone(publicJob(job)); }
-    const result = await this.pool.query(`update ingestion_queue q set status='retrying',next_attempt_at=now(),updated_at=now() from integrations i where q.id=$2 and i.id=q.integration_id and exists(select 1 from organization_members m where m.organization_id=i.organization_id and m.user_id=$1 and m.role in ('admin','responder')) returning q.*, i.name as integration_name`, [userId, jobId]);
+    const result = await this.pool.query(`update ingestion_queue q set status='retrying',next_attempt_at=now(),updated_at=now() from integrations i where q.id=$2 and i.id=q.integration_id and exists(select 1 from ${MEMBERSHIPS} m where m.organization_id=i.organization_id and m.user_id=$1 and m.role in ('admin','responder')) returning q.*, i.name as integration_name`, [userId, jobId]);
     if (!result.rows[0]) throw notFound("Queue job not found or your role cannot retry it.");
     return mapJob(result.rows[0] as Row);
   }

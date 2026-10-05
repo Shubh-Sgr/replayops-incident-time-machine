@@ -1,7 +1,7 @@
 import { supabase } from "./supabase";
 import { encodeDemoSessionToken } from "./demoSession";
 import { ApiError, describeApiError } from "./apiErrors";
-import type { ActionNotification, AlertChannel, AssistantResponse, AuditEntry, CaseworkSnapshot, ChangeProposal, DashboardData, EvidenceBundle, HttpReplayExecution, HttpReplaySpec, HypothesisTest, HypothesisTestStatus, Incident, IncidentComment, IncidentDecision, IncidentDiagnosis, IncidentEvent, IncidentPolicy, IncidentPostmortem, IngestionResult, Integration, IntegrationProvider, InvestigationCheck, InvestigationCheckStatus, InvestigationIntelligence, MitigationRequest, PrivacySettings, ProposalReview, QueueJob, RecoveryCriterion, RecoveryVerification, ReplayConfig, ReplayResult, SearchResult, ServiceDefinition, TeamInvitation, TeamMember, TypedMeasurement, ValidationArtifact, WorkspaceContext, WorkspaceRole } from "../types";
+import type { ActionNotification, AlertChannel, ApiToken, ErrorGroup, AssistantResponse, AuditEntry, CaseworkSnapshot, ChangeProposal, DashboardData, EvidenceBundle, HttpReplayExecution, HttpReplaySpec, HypothesisTest, HypothesisTestStatus, Incident, IncidentComment, IncidentDecision, IncidentDiagnosis, IncidentEvent, IncidentPolicy, IncidentPostmortem, IngestionResult, Integration, IntegrationProvider, InvestigationCheck, InvestigationCheckStatus, InvestigationIntelligence, MitigationRequest, PrivacySettings, ProposalReview, QueueJob, RecoveryCriterion, RecoveryVerification, ReplayConfig, ReplayResult, SearchResult, ServiceDefinition, TeamInvitation, TeamMember, TypedMeasurement, ValidationArtifact, WorkspaceContext, WorkspaceRole } from "../types";
 
 const API_URL = (import.meta.env.VITE_API_URL ?? "http://localhost:8787/api").replace(/\/$/, "");
 
@@ -46,6 +46,7 @@ export const api = {
   incidents: () => request<Incident[]>("/incidents"),
   incident: (id: string) => request<Incident>(`/incidents/${id}`),
   diagnosis: (id: string) => request<IncidentDiagnosis>(`/incidents/${id}/diagnosis`),
+  incidentErrors: (id: string) => request<ErrorGroup[]>(`/incidents/${id}/errors`),
   intelligence: (id: string) => request<InvestigationIntelligence>(`/incidents/${id}/intelligence`),
   casework:(id:string)=>request<CaseworkSnapshot>(`/incidents/${id}/casework`),
   acknowledgeEvidence:(id:string)=>request<{evidenceRevision:string;reviewedAt:string}>(`/incidents/${id}/evidence-review`,{method:"POST"}),
@@ -82,7 +83,14 @@ export const api = {
   deleteIntegration: (id: string) => request<void>(`/integrations/${id}`, { method: "DELETE" }),
   testIntegration: (id: string) => request<IngestionResult>(`/integrations/${id}/test`, { method: "POST" }),
   workspace: () => request<WorkspaceContext>("/workspace"),
+  workspaces: () => request<Array<WorkspaceContext & { active: boolean }>>("/workspaces"),
+  switchWorkspace: (organizationId: string) => request<WorkspaceContext>("/workspaces/active", { method: "POST", body: JSON.stringify({ organizationId }) }),
+  createWorkspace: (name: string) => request<WorkspaceContext>("/workspaces", { method: "POST", body: JSON.stringify({ name }) }),
+  apiTokens: () => request<ApiToken[]>("/api-tokens"),
+  createApiToken: (input: { name: string; role: ApiToken["role"]; expiresInDays: number | null }) => request<ApiToken & { token: string }>("/api-tokens", { method: "POST", body: JSON.stringify(input) }),
+  revokeApiToken: (id: string) => request<void>(`/api-tokens/${id}`, { method: "DELETE" }),
   alertChannels: () => request<AlertChannel[]>("/alert-channels"),
+  alertChannelOptions: () => request<{ emailConfigured: boolean }>("/alert-channels/options"),
   createAlertChannel: (input: Pick<AlertChannel, "name" | "kind" | "events" | "minSeverity"> & { url: string }) => request<AlertChannel>("/alert-channels", { method: "POST", body: JSON.stringify(input) }),
   updateAlertChannel: (id: string, input: Partial<Pick<AlertChannel, "events" | "minSeverity" | "enabled">>) => request<AlertChannel>(`/alert-channels/${id}`, { method: "PATCH", body: JSON.stringify(input) }),
   deleteAlertChannel: (id: string) => request<void>(`/alert-channels/${id}`, { method: "DELETE" }),
@@ -94,6 +102,7 @@ export const api = {
   services: () => request<ServiceDefinition[]>("/services"),
   saveService: (input: Pick<ServiceDefinition, "name" | "ownerTeam" | "tier" | "repositoryUrl" | "runbookUrl" | "dependencies">) => request<ServiceDefinition>("/services", { method: "POST", body: JSON.stringify(input) }),
   incidentPolicy: () => request<IncidentPolicy>("/incident-policy"),
+  incidentPolicyPreview: (threshold: number) => request<{ atOrAbove: number; below: number }>(`/incident-policy/preview?threshold=${threshold}`),
   updateIncidentPolicy: (input: Omit<IncidentPolicy, "updatedAt">) => request<IncidentPolicy>("/incident-policy", { method: "PATCH", body: JSON.stringify(input) }),
   teamMembers: () => request<TeamMember[]>("/team/members"),
   updateMemberRole: (id: string, role: WorkspaceRole) => request<TeamMember>(`/team/members/${id}`, { method: "PATCH", body: JSON.stringify({ role }) }),

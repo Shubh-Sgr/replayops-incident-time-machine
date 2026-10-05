@@ -5,6 +5,7 @@ import { repository } from "./repository.js";
 import { workspaceService } from "./workspace.js";
 import type { Incident, WorkspaceRole } from "./types.js";
 import { badRequest, conflict, forbidden, notFound } from "./errors.js";
+import { MEMBERSHIPS } from "./scope.js";
 
 export type CheckStatus = "planned" | "running" | "supported" | "disproved" | "inconclusive";
 export type ValidationKind = "ci" | "manual" | "isolated_http";
@@ -140,7 +141,7 @@ export class CaseworkService {
       alter table incident_resolutions enable row level security;
     `);
   }
-  private async org(userId:string, client:Pool | PoolClient = this.pool!) { const result=await client.query("select organization_id from organization_members where user_id=$1 order by created_at desc limit 1",[userId]); if(!result.rows[0])throw new Error("No workspace membership found."); return String(result.rows[0].organization_id); }
+  private async org(userId:string, client:Pool | PoolClient = this.pool!) { const result=await client.query(`select organization_id from ${MEMBERSHIPS} where user_id=$1 limit 1`,[userId]); if(!result.rows[0])throw new Error("No workspace membership found."); return String(result.rows[0].organization_id); }
   private mapCheck(row:Record<string,unknown>):InvestigationCheck{return {id:String(row.id),incidentId:String(row.incident_id),templateId:String(row.template_id),title:String(row.title),question:String(row.question),method:String(row.method),expectedSignal:String(row.expected_signal),conditions:String(row.conditions),result:String(row.result??""),status:row.status as CheckStatus,assignee:String(row.assignee),evidenceIds:Array.isArray(row.evidence_ids)?row.evidence_ids.map(String):[],evidenceRevision:iso(row.evidence_revision),conclusionState:row.conclusion_state as InvestigationCheck["conclusionState"],createdAt:iso(row.created_at),updatedAt:iso(row.updated_at)};}
   private mapProposal(row:Record<string,unknown>):ChangeProposal{return {id:String(row.id),incidentId:String(row.incident_id),version:Number(row.version),supersedesId:row.supersedes_id?String(row.supersedes_id):null,title:String(row.title),change:String(row.change_text),rollbackPlan:String(row.rollback_plan),target:(row.target??{}) as Record<string,unknown>,evidenceRevision:iso(row.evidence_revision),createdBy:String(row.created_by),createdAt:iso(row.created_at)};}
   private mapValidation(row:Record<string,unknown>):ValidationArtifact{return {id:String(row.id),incidentId:String(row.incident_id),proposalId:String(row.proposal_id),proposalVersion:Number(row.proposal_version),kind:row.kind as ValidationKind,status:row.status as ValidationStatus,summary:String(row.summary),provenance:(row.provenance??{}) as Record<string,unknown>,evidenceRevision:iso(row.evidence_revision),createdBy:String(row.created_by),createdAt:iso(row.created_at)};}

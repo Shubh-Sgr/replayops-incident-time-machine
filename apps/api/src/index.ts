@@ -12,6 +12,8 @@ import { httpReplayService } from "./httpReplay.js";
 import { caseworkService } from "./casework.js";
 import { statusForError } from "./errors.js";
 import { alertService } from "./alerts.js";
+import { runMigrations } from "./migrations.js";
+import { Pool } from "pg";
 
 const app = express();
 
@@ -71,6 +73,10 @@ await httpReplayService.initialize();
 await caseworkService.initialize();
 await ingestionQueue.initialize();
 await alertService.initialize();
+if (config.databaseUrl) {
+  const migrationPool = new Pool({ connectionString: config.databaseUrl, ssl: config.databaseUrl.includes("localhost") ? false : { rejectUnauthorized: false }, max: 1 });
+  try { await runMigrations(migrationPool); } finally { await migrationPool.end(); }
+}
 if (config.demoMode && config.databaseUrl) console.warn("ENABLE_DEMO_MODE is ignored for sign-in because DATABASE_URL is set; demo tokens only work with the in-memory API.");
 app.listen(config.port, "0.0.0.0", () => {
   console.log(`ReplayOps API listening on http://localhost:${config.port}`);

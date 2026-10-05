@@ -4,7 +4,8 @@ vi.mock("node:dns/promises", () => ({
   lookup: vi.fn(async (host: string) => [{ address: host === "rebind.example.com" ? "10.0.0.5" : "93.184.216.34", family: 4 }])
 }));
 
-const { alertService, signAlertBody } = await import("./alerts.js");
+const { alertService, ntfyRequest, parseRecipients, signAlertBody } = await import("./alerts.js");
+const { sendAlertEmail } = await import("./mailer.js");
 const admin = "00000000-0000-4000-8000-000000000001";
 const incident = { id: "inc-7", code: "AUTO-7", title: "Payments failing", service: "payments-api", environment: "production", severity: "critical" as const, status: "investigating" };
 
@@ -51,5 +52,48 @@ describe("alert delivery", () => {
     await expect(alertService.dispatch("demo-organization", { type: "opened", incident })).resolves.toBeUndefined();
     expect((await alertService.list(admin)).find((item) => item.id === channel.id)).toMatchObject({ lastStatus: "failed", lastError: "connection reset" });
     await alertService.remove(admin, "operator@replayops.dev", channel.id);
+  });
+
+  it("sends phone push to ntfy with an urgent priority for critical incidents", async () => {
+    const calls: Array<{ url: string; headers: Record<string, string>; body: string }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: URL, init: RequestInit) => { calls.push({ url: String(url), headers: init.headers as Record<string, string>, body: String(init.body) }); return new Response("{}", { status: 200 }); }));
+    const channel = await alertService.create(admin, "operator@replayops.dev", { name: "My phone", kind: "ntfy", url: "https://ntfy.sh/replayops-team-x7k2", events: ["opened"], minSeverity: "low" });
+    expect(channel.target).toBe("ntfy.sh/…x7k2");
+    await alertService.dispatch("demo-organization", { type: "opened", incident });
+    expect(calls[0]).toMatchObject({ url: "https://ntfy.sh/replayops-team-x7k2", headers: { Priority: "urgent", Title: "Incident opened: AUTO-7 Payments failing" } });
+    expect(calls[0]!.headers.Click).toMatch(/\/incidents\/inc-7$/);
+    expect(calls[0]!.body).toContain("payments-api · production · severity critical");
+    await alertService.remove(admin, "operator@replayops.dev", channel.id);
+  });
+
+  it("explains clearly when email is not configured on the server", async () => {
+    const channel = await alertService.create(admin, "operator@replayops.dev", { name: "On-call email", kind: "email", url: "oncall@example.com, Lead@Example.com", events: ["opened"], minSeverity: "low" });
+    expect(channel.target).toBe("oncall@example.com, lead@example.com");
+    const result = await alertService.test(admin, "operator@replayops.dev", channel.id);
+    expect(result.lastError).toMatch(/RESEND_API_KEY/);
+    await alertService.remove(admin, "operator@replayops.dev", channel.id);
+  });
+});
+
+describe("email and push formatting", () => {
+  it("validates recipient lists", () => {
+    expect(parseRecipients("a@x.io; b@y.io a@x.io")).toEqual(["a@x.io", "b@y.io"]);
+    expect(() => parseRecipients("not-an-email")).toThrow(/not a valid email/);
+    expect(() => parseRecipients("")).toThrow(/at least one/);
+  });
+
+  it("keeps ntfy titles header-safe", () => {
+    const push = ntfyRequest({ type: "resolved", incident: { ...incident, title: "Paiements échoués 💥" } });
+    expect(push.headers.Title).toBe("Incident resolved: AUTO-7 Paiements echoues");
+    expect(push.headers.Priority).toBe("default");
+  });
+
+  it("sends alert email through Resend with an idempotency key", async () => {
+    const fetchImpl = vi.fn(async () => new Response("{}", { status: 200 }));
+    const sent = await sendAlertEmail({ to: ["a@x.io"], subject: "s", text: "t", heading: "<b>h</b>", lines: ["l"], linkUrl: "https://app/x", linkLabel: "Open", idempotencyKey: "k1" }, { apiKey: "re_test", from: "alerts@x.io", fetchImpl: fetchImpl as unknown as typeof fetch });
+    expect(sent.ok).toBe(true);
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect((init.headers as Record<string, string>)["Idempotency-Key"]).toBe("k1");
+    expect(JSON.parse(String(init.body)).html).toContain("&lt;b&gt;h&lt;/b&gt;");
   });
 });

@@ -9,6 +9,7 @@ import { IncidentEditor, type IncidentDraft } from "../components/IncidentEditor
 import { Linkified } from "../components/Linkified";
 import { ResponseConsole } from "../components/ResponseConsole";
 import { DebuggingInsights } from "../components/DebuggingInsights";
+import { ErrorGroups } from "../components/ErrorGroups";
 import { Skeleton } from "../components/Skeleton";
 import { SeverityMark, StatusMark } from "../components/StatusMark";
 import { api } from "../lib/api";
@@ -102,6 +103,7 @@ export function IncidentWorkbenchPage() {
 
     <EvidenceLedger incident={value} selectedEventId={selectedEventId} visibleWindow={timelineWindow} updating={updateEvidenceState.isPending} onSelect={(eventId) => selectEvent(eventId, true)} onEdit={(event) => setEditingEvent(event)} onMove={(event) => setMovingEvent(event)} onEvidenceState={(event, state) => updateEvidenceState.mutate({ event, state })} />
 
+    <div id="error-groups" className="scroll-mt-28 empty:hidden"><ErrorGroups incident={value} onSelectEvent={(eventId) => selectEvent(eventId, true)} /></div>
     <div id="debugging-insights" className="scroll-mt-28"><DebuggingInsights incident={value} onSelectEvent={(eventId) => selectEvent(eventId, true)} /></div>
     <ResponseConsole incident={value} />
     {editingEvent !== undefined && <EventEditor incidentId={id} event={editingEvent} saving={saveEvent.isPending} error={saveEvent.error instanceof Error ? saveEvent.error.message : undefined} onCancel={() => setEditingEvent(undefined)} onSave={(draft) => saveEvent.mutate(draft)} />}

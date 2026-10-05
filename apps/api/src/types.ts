@@ -38,6 +38,9 @@ export interface Incident {
   createdAt: string;
   updatedAt: string;
   evidenceRevision?: string;
+  /** In list views `events` holds only the latest few; these describe the full evidence set. */
+  eventCount?: number;
+  eventKinds?: EventKind[];
   events: IncidentEvent[];
 }
 

@@ -16,6 +16,9 @@ import { httpReplayService } from "./httpReplay.js";
 import { caseworkService } from "./casework.js";
 import { HttpError } from "./errors.js";
 import { alertEventTypes, alertService } from "./alerts.js";
+import { groupIncidentErrors } from "./exceptions.js";
+import { alertEmailConfigured } from "./mailer.js";
+import { apiTokenService, tokenMayWrite } from "./apiTokens.js";
 
 const severity = z.enum(["critical", "high", "medium", "low"]);
 const status = z.enum(["investigating", "identified", "monitoring", "resolved"]);
@@ -127,7 +130,12 @@ const userId = (req: AuthenticatedRequest) => {
 const actor = (req: AuthenticatedRequest) => req.user?.email ?? req.user?.id ?? "Unknown operator";
 
 apiRouter.use(async (req: AuthenticatedRequest, res, next) => {
-  if (req.method === "GET" || ["/assistant", "/search", "/team/invitations/accept"].includes(req.path)) { next(); return; }
+  const token = req.user?.token;
+  if (token && req.method !== "GET" && (token.role === "viewer" || !tokenMayWrite(req.method, req.path))) {
+    res.status(403).json({ error: token.role === "viewer" ? "This API token is read-only." : "API tokens can update incidents, evidence, checks, and comments only. Use the app for this action." });
+    return;
+  }
+  if (req.method === "GET" || ["/assistant", "/search", "/team/invitations/accept", "/workspaces", "/workspaces/active"].includes(req.path)) { next(); return; }
   try {
     await workspaceService.assertRole(userId(req), ["admin", "responder"]);
     res.once("finish", () => {
@@ -188,6 +196,12 @@ apiRouter.get("/incidents/:id/intelligence", async (req, res) => {
   res.json(buildInvestigationIntelligence(incident, await repository.listIncidents(userId(req))));
 });
 
+apiRouter.get("/incidents/:id/errors", async (req, res) => {
+  const incident = await repository.getIncident(userId(req), String(req.params.id));
+  if (!incident) { res.status(404).json({ error: "Incident not found." }); return; }
+  const fingerprints = [...new Set(incident.events.map((event) => (event.metadata?.exception as { fingerprint?: string } | undefined)?.fingerprint).filter((value): value is string => Boolean(value)))];
+  res.json(groupIncidentErrors(incident, await repository.exceptionFirstSeen(userId(req), fingerprints)));
+});
 apiRouter.get("/incidents/:id/casework", async (req, res) => {
   const incident=await repository.getIncident(userId(req),String(req.params.id));
   if(!incident){res.status(404).json({error:"Incident not found."});return;}
@@ -381,8 +395,7 @@ apiRouter.post("/incidents/:id/http-replays", async (req:AuthenticatedRequest,re
 });
 
 apiRouter.post("/http-replays/:id/execute",async(req:AuthenticatedRequest,res)=>{
-  const all=await repository.listIncidents(userId(req));let spec;
-  for(const incident of all){const found=(await httpReplayService.list(userId(req),incident.id)).specs.find((item)=>item.id===String(req.params.id));if(found){spec=found;break;}}
+  const spec=await httpReplayService.findSpec(userId(req),String(req.params.id));
   if(!spec){res.status(404).json({error:"Replay specification not found."});return;}
   const incident=await repository.getIncident(userId(req),spec.incidentId);if(!incident){res.status(404).json({error:"Incident not found."});return;}
   if((incident.evidenceRevision??incident.updatedAt)!==spec.evidenceRevision){res.status(409).json({error:"Evidence changed after this replay was captured. Create a new immutable replay specification."});return;}
@@ -508,10 +521,11 @@ apiRouter.delete("/integrations/:id", async (req: AuthenticatedRequest, res) => 
 });
 
 const alertChannelSchema = z.object({
-  name: z.string().min(2).max(80), kind: z.enum(["slack", "discord", "webhook"]), url: z.string().url().max(2000),
+  name: z.string().min(2).max(80), kind: z.enum(["email", "ntfy", "slack", "discord", "webhook"]), url: z.string().min(3).max(2000),
   events: z.array(z.enum(alertEventTypes as [string, ...string[]])).min(1).max(4).default(alertEventTypes), minSeverity: severity.default("low"), enabled: z.boolean().optional()
 });
 const alertChannelUpdateSchema = alertChannelSchema.pick({ events: true, minSeverity: true, enabled: true }).partial();
+apiRouter.get("/alert-channels/options", (_req, res) => { res.json({ emailConfigured: alertEmailConfigured() }); });
 apiRouter.get("/alert-channels", async (req, res) => res.json(await alertService.list(userId(req))));
 apiRouter.post("/alert-channels", async (req: AuthenticatedRequest, res) => {
   const parsed = parseOrReply(alertChannelSchema, req.body); if ("error" in parsed) { res.status(400).json(parsed); return; }
@@ -552,6 +566,22 @@ apiRouter.post("/integrations/:id/test", async (req, res) => {
   res.status(202).json(result);
 });
 
+apiRouter.get("/api-tokens", async (req, res) => res.json(await apiTokenService.list(userId(req))));
+apiRouter.post("/api-tokens", async (req: AuthenticatedRequest, res) => {
+  const parsed = parseOrReply(z.object({ name: z.string().trim().min(2).max(80), role: z.enum(["viewer", "responder"]), expiresInDays: z.number().int().min(1).max(365).nullable() }), req.body); if ("error" in parsed) { res.status(400).json(parsed); return; }
+  if (req.user?.token) { res.status(403).json({ error: "API tokens cannot create other tokens." }); return; }
+  res.status(201).json(await apiTokenService.create(userId(req), actor(req), parsed.data));
+});
+apiRouter.delete("/api-tokens/:id", async (req: AuthenticatedRequest, res) => { await apiTokenService.revoke(userId(req), actor(req), String(req.params.id)); res.status(204).send(); });
+apiRouter.get("/workspaces", async (req, res) => res.json(await workspaceService.listWorkspaces(userId(req))));
+apiRouter.post("/workspaces/active", async (req: AuthenticatedRequest, res) => {
+  const parsed = parseOrReply(z.object({ organizationId: z.string().min(1).max(80) }), req.body); if ("error" in parsed) { res.status(400).json(parsed); return; }
+  res.json(await workspaceService.switchWorkspace(userId(req), parsed.data.organizationId));
+});
+apiRouter.post("/workspaces", async (req: AuthenticatedRequest, res) => {
+  const parsed = parseOrReply(z.object({ name: z.string().trim().min(2).max(80) }), req.body); if ("error" in parsed) { res.status(400).json(parsed); return; }
+  res.status(201).json(await workspaceService.createWorkspace(userId(req), actor(req), parsed.data.name));
+});
 apiRouter.get("/workspace", async (req, res) => {
   res.json(await workspaceService.context(userId(req)));
 });
@@ -570,6 +600,10 @@ apiRouter.post("/services", async (req: AuthenticatedRequest, res) => {
   res.status(201).json(await workspaceService.upsertService(userId(req), actor(req), parsed.data));
 });
 
+apiRouter.get("/incident-policy/preview", async (req, res) => {
+  const threshold = Math.min(100, Math.max(1, Math.round(Number(req.query.threshold ?? 65)) || 65));
+  res.json(await repository.impactPreview(userId(req), threshold));
+});
 apiRouter.get("/incident-policy", async (req, res) => {
   res.json(await workspaceService.getPolicy(userId(req)));
 });

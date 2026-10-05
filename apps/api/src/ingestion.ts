@@ -4,6 +4,7 @@ import { config } from "./config.js";
 import { repository } from "./repository.js";
 import { ingestionQueue } from "./queue.js";
 import { workspaceService } from "./workspace.js";
+import { exceptionFromAttributes, exceptionFromGeneric } from "./exceptions.js";
 import type { EventKind, IngestionBatch, IntegrationProvider, NormalizedSignal, Severity } from "./types.js";
 
 type JsonRecord = Record<string, unknown>;
@@ -190,12 +191,14 @@ function normalizeOtelTraces(payload: JsonRecord, deliveryId: string, healthySam
         const healthySample = !failed && !slow && Number.parseInt(createHash("sha256").update(traceId || spanId).digest("hex").slice(0, 8), 16) % sampleBuckets < sampleThreshold;
         if (!failed && !slow && !healthySample) continue;
         const impact = failed ? Math.min(96, 76 + Math.round(Math.min(20, durationMs / 500))) : Math.min(72, 48 + Math.round(durationMs / 500));
+        const exceptionEvent = array(span.events).map(object).find((item) => textValue(item.name) === "exception");
+        const exception = exceptionEvent ? exceptionFromAttributes(service, attributes(exceptionEvent.attributes)) : failed ? exceptionFromAttributes(service, spanAttributes) : null;
         signals.push(normalized({
           externalId: `${deliveryId}:span:${spanId}`, timestamp: nanoTime(span.startTimeUnixNano), service,
           kind: failed ? "alert" : "metric", title: `${failed ? "Failed" : slow ? "Slow" : "Healthy sampled"} span: ${textValue(span.name, "unnamed operation")}`,
           detail: `${durationMs}ms span${httpStatus ? ` returned HTTP ${httpStatus}` : ""}${object(span.status).message ? ` — ${String(object(span.status).message)}` : ""}.`,
           impactScore: healthySample ? 8 : impact, severity: healthySample ? "low" : undefined, traceId, correlationKey: traceId || `${service}:${spanId}`, environment,
-          metadata: { provider: "opentelemetry", signal: "trace", traceCompleteness: "retained-span-only", traceId, spanId, parentSpanId: textValue(span.parentSpanId), spanKind: span.kind, operation: span.name, method: spanAttributes["http.request.method"] ?? spanAttributes["http.method"], durationMs, httpStatus, route: spanAttributes["http.route"] ?? spanAttributes["url.path"] ?? span.name, release: resourceAttributes["service.version"], region: resourceAttributes["cloud.region"], environment, scopeName: object(scopeSpanValue).scope ? object(object(scopeSpanValue).scope).name : undefined, cohortRole: healthySample ? "healthy" : failed ? "failing" : "slow", sampleRate: healthySample ? healthySampleRate : 1, attributes: spanAttributes }
+          metadata: { provider: "opentelemetry", signal: "trace", traceCompleteness: "retained-span-only", traceId, spanId, parentSpanId: textValue(span.parentSpanId), spanKind: span.kind, operation: span.name, method: spanAttributes["http.request.method"] ?? spanAttributes["http.method"], durationMs, httpStatus, route: spanAttributes["http.route"] ?? spanAttributes["url.path"] ?? span.name, release: resourceAttributes["service.version"], region: resourceAttributes["cloud.region"], environment, scopeName: object(scopeSpanValue).scope ? object(object(scopeSpanValue).scope).name : undefined, cohortRole: healthySample ? "healthy" : failed ? "failing" : "slow", sampleRate: healthySample ? healthySampleRate : 1, attributes: spanAttributes, ...(exception ? { exception } : {}) }
         }));
       }
     }
@@ -220,13 +223,14 @@ function normalizeOtelLogs(payload: JsonRecord, deliveryId: string): NormalizedS
         const body = object(log.body);
         const message = textValue(body.stringValue, textValue(log.severityText, "Operational log signal"));
         const failed = severityNumber >= 17;
+        const exception = exceptionFromAttributes(service, logAttributes);
         const external = textValue(log.spanId, createHash("sha256").update(`${message}:${String(log.timeUnixNano)}`).digest("hex").slice(0, 16));
         signals.push(normalized({
           externalId: `${deliveryId}:log:${external}`, timestamp: nanoTime(log.timeUnixNano ?? log.observedTimeUnixNano), service,
           kind: failed ? "alert" : "metric", title: `${textValue(log.severityText, failed ? "Error" : "Warning")} log from ${service}`,
           detail: message.slice(0, 1200), impactScore: failed ? 78 : 54, traceId,
           correlationKey: traceId || `${service}:${Math.floor(new Date(nanoTime(log.timeUnixNano)).getTime() / 300_000)}`,
-          environment, metadata: { provider: "opentelemetry", signal: "log", severityNumber, attributes: logAttributes }
+          environment, metadata: { provider: "opentelemetry", signal: "log", severityNumber, attributes: logAttributes, ...(exception ? { exception } : {}) }
         }));
       }
     }
@@ -304,7 +308,8 @@ function normalizeGenericEvent(inputValue: unknown, index: number, deliveryId: s
   // `kind: "change" | "deploy" | "feature_flag" | …` or an explicit `changeType` marks a change; an alert that merely mentions a changeType stays an alert.
   const changeType = changeTypeOf(textValue(input.changeType ?? input.change_type)) ?? (rawKind === "change" ? "deploy" : changeTypeOf(rawKind));
   const isChange = Boolean(changeType) && (!rawKind || rawKind === "change" || Boolean(changeTypeOf(rawKind)));
-  const title = textValue(input.title, textValue(input.name, textValue(input.message, isChange ? changeTitle(changeType!, service, input) : "External operational signal")));
+  const exception = isChange ? null : exceptionFromGeneric(service, input);
+  const title = textValue(input.title, textValue(input.name, textValue(input.message, isChange ? changeTitle(changeType!, service, input) : exception ? `${exception.type}: ${exception.message}`.slice(0, 140) : "External operational signal")));
   const detail = textValue(input.detail, textValue(input.description, textValue(input.message, title)));
   const kindCandidate = (isChange ? "deploy" : rawKind || "metric") as EventKind;
   const kind: EventKind = ["alert", "deploy", "dependency", "metric", "action", "recovery"].includes(kindCandidate) ? kindCandidate : "metric";
@@ -318,12 +323,15 @@ function normalizeGenericEvent(inputValue: unknown, index: number, deliveryId: s
     previousValue: input.previousValue ?? input.from, newValue: input.newValue ?? input.to ?? input.value,
     branch: textValue(input.branch) || undefined
   } : {};
+  // A sender that omits the time means "now"; a malformed time stays unknown rather than looking fresh.
+  const rawTime = input.timestamp ?? input.occurredAt ?? input.startsAt;
+  const timestampMissing = rawTime === undefined || rawTime === null || rawTime === "";
   return normalized({
-    externalId, timestamp: isoTime(input.timestamp ?? input.occurredAt ?? input.startsAt), service, kind, title, detail,
+    externalId, timestamp: timestampMissing ? new Date().toISOString() : isoTime(rawTime), service, kind, title, detail,
     impactScore, severity: severityValue(input.severity, severityForImpact(impactScore)),
     correlationKey: textValue(input.correlationKey ?? input.incidentKey ?? input.groupKey),
     traceId: textValue(input.traceId ?? input.trace_id), sourceUrl: textValue(input.sourceUrl ?? input.url ?? input.generatorURL),
-    environment: textValue(input.environment), metadata: { provider: "generic", ...object(input.metadata), ...change, labels: input.labels, tags: input.tags }
+    environment: textValue(input.environment), metadata: { provider: "generic", ...object(input.metadata), ...change, ...(exception ? { exception } : {}), ...(timestampMissing ? { timestampSource: "received" } : {}), labels: input.labels, tags: input.tags }
   });
 }
 

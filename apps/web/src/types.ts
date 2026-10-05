@@ -37,6 +37,9 @@ export interface Incident {
   createdAt: string;
   updatedAt: string;
   evidenceRevision?: string;
+  /** In list views `events` holds only the latest few; these describe the full evidence set. */
+  eventCount?: number;
+  eventKinds?: EventKind[];
   events: IncidentEvent[];
 }
 
@@ -207,7 +210,13 @@ export interface IngestionResult {
 
 export type WorkspaceRole = "admin" | "responder" | "viewer";
 export interface WorkspaceContext { organizationId: string; organizationName: string; role: WorkspaceRole }
-export type AlertChannelKind = "slack" | "discord" | "webhook";
+export interface ErrorGroup {
+  fingerprint: string; type: string; message: string; topFrame: string | null; stack: string | null; services: string[];
+  count: number; firstSeen: string; lastSeen: string; sampleEventId: string; firstSeenInWorkspace: string;
+  newSince: { eventId: string; title: string; timestamp: string } | null;
+}
+export interface ApiToken { id: string; name: string; role: "viewer" | "responder"; prefix: string; createdByEmail: string | null; createdAt: string; expiresAt: string | null; lastUsedAt: string | null }
+export type AlertChannelKind = "email" | "ntfy" | "slack" | "discord" | "webhook";
 export type AlertEventType = "opened" | "monitoring" | "resolved" | "reopened";
 export interface AlertChannel {
   id: string; name: string; kind: AlertChannelKind; target: string; events: AlertEventType[]; minSeverity: Severity; enabled: boolean;

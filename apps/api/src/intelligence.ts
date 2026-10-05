@@ -60,7 +60,7 @@ export function buildInvestigationIntelligence(incident: Incident, history: Inci
 
   const comparisons = history.filter((item) => item.id !== incident.id && item.service === incident.service).map((item) => {
     const currentKinds = new Set(events.map((event) => event.kind));
-    const otherKinds = new Set(activeEvents(item).map((event) => event.kind));
+    const otherKinds = new Set(item.eventKinds ?? activeEvents(item).map((event) => event.kind));
     const similarities = [...currentKinds].filter((kind) => otherKinds.has(kind)).map((kind) => `Both contain ${kind} evidence`);
     const differences = [...new Set([...currentKinds, ...otherKinds])].filter((kind) => currentKinds.has(kind) !== otherKinds.has(kind)).map((kind) => `${kind} evidence appears in only one investigation`);
     if ((incident.environment ?? "unknown") !== (item.environment ?? "unknown")) differences.unshift(`Environment differs: ${incident.environment ?? "unknown"} vs ${item.environment ?? "unknown"}`);

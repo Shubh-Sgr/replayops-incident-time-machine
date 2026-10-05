@@ -46,7 +46,19 @@ Every authenticated delivery is now persisted to a Supabase-backed `ingestion_qu
 
 ## Real-user controls
 
-- **Alerts:** Settings → Alerts posts to Slack, Discord, or any HTTPS webhook when an incident opens, moves to monitoring, resolves, or reopens, with per-destination event and minimum-severity filters. Webhook bodies are signed (`x-replayops-signature: sha256=HMAC(secret, body)`). Destinations must be public HTTPS hosts, and DNS is re-checked at send time, so alerts can't be aimed at internal addresses.
+- **Alerts:** Settings → Alerts notifies you when an incident opens, moves to monitoring, resolves, or reopens. Destinations: **email** (through the API's Resend account; free tier 100/day, needs `RESEND_API_KEY` and `INVITE_FROM_EMAIL`), **phone push** via the free [ntfy](https://ntfy.sh) app (critical incidents arrive as urgent), Discord, Slack, or any HTTPS webhook. Each destination has event and minimum-severity filters and a send-test button. Webhook bodies are signed (`x-replayops-signature: sha256=HMAC(secret, body)`). Webhook-style destinations must be public HTTPS hosts, and DNS is re-checked at send time.
+- **Errors:** exceptions from OpenTelemetry (`exception.*` span events and log attributes) or generic JSON (`"error": {"type", "message", "stack"}`) are fingerprinted by type and first application stack frame, ignoring line numbers and per-request values. Each incident lists its error groups with counts, and flags errors that **never happened before a recent change**. That change then ranks higher as a suspect.
+- **Workspaces:** one account can belong to several workspaces (for example, by accepting an invitation) and switch between them from the sidebar, or create a new empty one. Every request is scoped to the active workspace only.
+- **API tokens and CLI:** admins create workspace tokens in Settings → API tokens (viewer or responder; never admin, optional expiry; only a hash is stored). Tokens can read everything and update incidents, evidence, checks, comments, and lifecycle, but not connectors, team, alerts, or settings. The `replayops` CLI uses them:
+
+  ```bash
+  export REPLAYOPS_API=https://replayops-incident-api.onrender.com REPLAYOPS_TOKEN=rpo_…
+  npm run replayops -- incidents              # open incidents with their next step
+  npm run replayops -- show AUTO-1234         # facts, leading explanation, errors, latest evidence
+  npm run replayops -- note AUTO-1234 "Rolled back canary"
+  npm run replayops -- status AUTO-1234 monitoring --reason "Rolled back to v1.4.1"
+  npm run replayops -- change --service checkout-api --version v1.4.2 --previous v1.4.1   # needs a Generic connector URL/token
+  ```
 - **Destructive actions:** only admins can delete an incident or a connector; the audit entry keeps the code, title, and evidence count of what was removed.
 - **Request bodies:** unless an admin enables *Capture request bodies*, body/payload fields are stripped from incoming telemetry, replays cannot include a body, and replay response bodies are not stored.
 - **Service map:** records owner, criticality, repository, runbook, and dependencies for architecture-aware grouping.
@@ -162,6 +174,10 @@ Add these GitHub repository secrets:
 - `RENDER_DEPLOY_HOOK`
 
 Pushes to `main` verify, build, and deploy services for which secrets are present. Pull requests only run verification.
+
+## Schema migrations
+
+New schema changes live in `apps/api/db/migrations/NNN_name.sql`. On startup the API applies any file it has not run yet, in name order, in one transaction under an advisory lock, and records each in `replayops_schema_migrations` with a checksum. Files that existed before the runner (002–006 and `20260925_*`) are recorded as a baseline on first run instead of being executed again. Never edit a migration after it has run; add a new one.
 
 ## Production controls
 

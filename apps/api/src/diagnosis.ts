@@ -163,12 +163,23 @@ export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = [
     ?? events.reduce((highest, event) => event.impactScore > highest.impactScore ? event : highest, events[0]!);
   const eligibleCandidates = events.filter((event) => event.timestamp <= symptom.timestamp && event.kind !== "alert" && event.kind !== "action" && event.kind !== "recovery");
   const sourceCandidates = eligibleCandidates.length ? eligibleCandidates : [events[0]!];
+  // An exception type that first appears right after a change (and before any later change) points at it.
+  const firstExceptions = new Map<string, { timestamp: string; type: string }>();
+  for (const event of events) {
+    const exception = event.metadata?.exception as { fingerprint?: string; type?: string } | undefined;
+    if (exception?.fingerprint && !firstExceptions.has(exception.fingerprint)) firstExceptions.set(exception.fingerprint, { timestamp: event.timestamp, type: exception.type ?? "Error" });
+  }
+  const changeTimes = events.filter((event) => event.kind === "deploy").map((event) => event.timestamp);
+  const newErrorsAfter = (change: IncidentEvent) => change.kind !== "deploy" ? [] : [...firstExceptions.values()].filter((item) =>
+    item.timestamp >= change.timestamp && !changeTimes.some((time) => time > change.timestamp && time <= item.timestamp));
   const changeCandidates = sourceCandidates.map((event) => {
     const leadTimeSeconds = secondsBetween(event.timestamp, symptom.timestamp);
     const kindWeight = event.kind === "dependency" ? 30 : event.kind === "deploy" ? 27 : 15;
     const proximity = Math.max(0, 28 - leadTimeSeconds / 30);
     const progression = Math.max(0, symptom.impactScore - event.impactScore) * 0.22;
-    const score = clamp(34 + kindWeight + proximity + progression, 28, 96);
+    const newErrors = newErrorsAfter(event);
+    const score = clamp(34 + kindWeight + proximity + progression + Math.min(12, newErrors.length * 6), 28, 96);
+    const newErrorNote = newErrors.length ? ` ${newErrors.length} error type${newErrors.length === 1 ? "" : "s"} (${[...new Set(newErrors.map((item) => item.type))].slice(0, 3).join(", ")}) first appeared after it.` : "";
     return {
       eventId: event.id,
       title: event.title,
@@ -178,7 +189,7 @@ export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = [
       score,
       reason: leadTimeSeconds === 0
         ? `This ${event.kind} is the first high-impact symptom in the recorded sequence.`
-        : `This ${event.kind} preceded the first high-impact symptom by ${Math.max(1, Math.round(leadTimeSeconds / 60))} minute${leadTimeSeconds >= 90 ? "s" : ""}.`
+        : `This ${event.kind} preceded the first high-impact symptom by ${Math.max(1, Math.round(leadTimeSeconds / 60))} minute${leadTimeSeconds >= 90 ? "s" : ""}.${newErrorNote}`
     };
   }).sort((left, right) => right.score - left.score).slice(0, 4);
 

@@ -51,6 +51,13 @@ describe("automated ingestion", () => {
     expect(signal.metadata).toMatchObject({ metricType:"gauge", value:0, recoveryEligibility:"requires-configured-evaluator" });
   });
 
+  it("uses the receipt time when a sender omits the timestamp", () => {
+    const before = Date.now();
+    const signal = normalizePayload("generic", { title:"No clock", detail:"timestamp omitted" }, "delivery-no-time")[0]!;
+    expect(Date.parse(signal.timestamp)).toBeGreaterThanOrEqual(before);
+    expect(signal.metadata.timestampSource).toBe("received");
+  });
+
   it("does not turn malformed timestamps into fresh evidence", () => {
     const signal = normalizePayload("generic", { title:"Bad clock", detail:"invalid timestamp", timestamp:"not-a-date" }, "delivery-bad-time")[0]!;
     expect(signal.timestamp).toBe("1970-01-01T00:00:00.000Z");

@@ -5,11 +5,15 @@ import { api } from "../lib/api";
 import { cn, formatRelative } from "../lib/utils";
 import type { AlertChannel, AlertChannelKind, AlertEventType, Severity } from "../types";
 
-const kinds: Array<{ id: AlertChannelKind; label: string; placeholder: string; help: string }> = [
-  { id: "slack", label: "Slack", placeholder: "https://hooks.slack.com/services/…", help: "Slack → Apps → Incoming Webhooks → Add to a channel, then paste the webhook URL." },
-  { id: "discord", label: "Discord", placeholder: "https://discord.com/api/webhooks/…", help: "Channel settings → Integrations → Webhooks → New webhook → Copy URL." },
-  { id: "webhook", label: "Webhook", placeholder: "https://ops.example.com/replayops", help: "Any HTTPS endpoint. Each POST is signed with x-replayops-signature (HMAC-SHA256 of the body)." }
+const kinds: Array<{ id: AlertChannelKind; label: string; field: string; placeholder: string; help: string }> = [
+  { id: "email", label: "Email", field: "Email addresses", placeholder: "you@example.com, oncall@example.com", help: "Up to 10 addresses, separated by commas. Sent through the API's Resend account (free tier: 100 emails a day)." },
+  { id: "ntfy", label: "Phone push", field: "ntfy topic URL", placeholder: "https://ntfy.sh/your-secret-topic", help: "Free, no account: install the ntfy app (iOS/Android), subscribe to the topic below, and keep the topic name secret. Critical incidents ring through as urgent." },
+  { id: "discord", label: "Discord", field: "Webhook URL", placeholder: "https://discord.com/api/webhooks/…", help: "Channel settings → Integrations → Webhooks → New webhook → Copy URL." },
+  { id: "slack", label: "Slack", field: "Webhook URL", placeholder: "https://hooks.slack.com/services/…", help: "Slack → Apps → Incoming Webhooks → Add to a channel, then paste the webhook URL." },
+  { id: "webhook", label: "Webhook", field: "Webhook URL", placeholder: "https://ops.example.com/replayops", help: "Any HTTPS endpoint. Each POST is signed with x-replayops-signature (HMAC-SHA256 of the body)." }
 ];
+const defaultName: Record<AlertChannelKind, string> = { email: "On-call email", ntfy: "My phone", discord: "#incidents", slack: "#incidents", webhook: "Ops webhook" };
+const randomTopic = () => `replayops-${Array.from(crypto.getRandomValues(new Uint8Array(9)), (byte) => byte.toString(36).padStart(2, "0")).join("").slice(0, 16)}`;
 const eventLabels: Record<AlertEventType, string> = { opened: "Incident opened", monitoring: "Monitoring recovery", resolved: "Resolved", reopened: "Reopened" };
 const allEvents = Object.keys(eventLabels) as AlertEventType[];
 const severities: Severity[] = ["low", "medium", "high", "critical"];
@@ -55,8 +59,9 @@ export function AlertDestinations() {
   const workspace = useQuery({ queryKey: ["workspace"], queryFn: api.workspace });
   const channels = useQuery({ queryKey: ["alert-channels"], queryFn: api.alertChannels });
   const isAdmin = workspace.data?.role === "admin";
-  const [kind, setKind] = useState<AlertChannelKind>("slack");
-  const [name, setName] = useState("#incidents");
+  const options = useQuery({ queryKey: ["alert-channel-options"], queryFn: api.alertChannelOptions, staleTime: 300_000 });
+  const [kind, setKind] = useState<AlertChannelKind>("email");
+  const [name, setName] = useState(defaultName.email);
   const [url, setUrl] = useState("");
   const [minSeverity, setMinSeverity] = useState<Severity>("low");
   const selected = kinds.find((item) => item.id === kind)!;
@@ -71,16 +76,18 @@ export function AlertDestinations() {
       <div className="px-5 py-5 sm:px-6"><h2 className="section-title">Where incident alerts go</h2><p className="mt-1 max-w-2xl text-sm leading-6 text-muted">ReplayOps posts here when an incident opens automatically, when a fix moves it to monitoring, when it is resolved, and if it is reopened. Each message links straight to the investigation.</p></div>
       {channels.isLoading ? <p className="border-t border-line px-6 py-5 text-sm text-muted">Loading destinations…</p>
         : channels.data?.length ? <ul className="divide-y divide-line border-t border-line">{channels.data.map((channel) => <ChannelRow key={channel.id} channel={channel} isAdmin={isAdmin} />)}</ul>
-          : <div className="border-t border-line px-6 py-8 text-sm text-muted"><BellRing className="mb-3 h-6 w-6 text-warning" />No destinations yet, so a new incident is only visible to someone who has ReplayOps open. Add a Slack or Discord channel. Both are free.</div>}
+          : <div className="border-t border-line px-6 py-8 text-sm text-muted"><BellRing className="mb-3 h-6 w-6 text-warning" />No destinations yet, so a new incident is only visible to someone who has ReplayOps open. Add an email address or your phone. Both are free.</div>}
       {channels.error && <p role="alert" className="border-t border-line px-6 py-4 text-sm text-danger">{channels.error.message}</p>}
     </section>
     <form className="surface-lined h-fit p-5 sm:p-6" onSubmit={submit}>
       <BellRing className="h-6 w-6 text-accent" />
       <h2 className="mt-4 section-title">Add a destination</h2>
-      <div className="mt-4 inline-flex gap-1 rounded-control bg-rail p-1" role="radiogroup" aria-label="Destination type">{kinds.map((item) => <button key={item.id} type="button" role="radio" aria-checked={kind === item.id} onClick={() => { setKind(item.id); setName(item.id === "webhook" ? "Ops webhook" : "#incidents"); }} className={cn("min-h-9 rounded-control px-3 text-sm font-semibold", kind === item.id ? "bg-ink text-panel" : "text-muted hover:text-ink")}>{item.label}</button>)}</div>
+      <div className="mt-4 flex flex-wrap gap-1 rounded-control bg-rail p-1" role="radiogroup" aria-label="Destination type">{kinds.map((item) => <button key={item.id} type="button" role="radio" aria-checked={kind === item.id} onClick={() => { setKind(item.id); setName(defaultName[item.id]); setUrl(item.id === "ntfy" ? `https://ntfy.sh/${randomTopic()}` : ""); }} className={cn("min-h-9 rounded-control px-3 text-sm font-semibold", kind === item.id ? "bg-ink text-panel" : "text-muted hover:text-ink")}>{item.label}</button>)}</div>
       <p className="mt-3 text-xs leading-5 text-muted">{selected.help}</p>
       <label className="mt-4 block text-sm font-semibold">Name<input className="field mt-2" value={name} onChange={(e) => setName(e.target.value)} minLength={2} maxLength={80} required /></label>
-      <label className="mt-4 block text-sm font-semibold">Webhook URL<input type="url" className="field mt-2" value={url} onChange={(e) => setUrl(e.target.value)} placeholder={selected.placeholder} autoComplete="off" required /></label>
+      <label className="mt-4 block text-sm font-semibold">{selected.field}<input type={kind === "email" ? "text" : "url"} inputMode={kind === "email" ? "email" : "url"} className="field mt-2" value={url} onChange={(e) => setUrl(e.target.value)} placeholder={selected.placeholder} autoComplete="off" required /></label>
+      {kind === "ntfy" && url && <p className="mt-2 text-xs leading-5 text-muted">In the ntfy app, tap <strong className="text-ink">+</strong> and subscribe to <code className="measurement-number break-all text-ink">{url.replace(/^https:\/\/ntfy\.sh\//, "")}</code>.</p>}
+      {kind === "email" && options.data && !options.data.emailConfigured && <p className="mt-2 rounded-control bg-warning/12 p-3 text-xs leading-5 text-warning">Email isn't configured on the API yet. Add RESEND_API_KEY and INVITE_FROM_EMAIL in Render (free Resend account), or use Phone push.</p>}
       <label className="mt-4 block text-sm font-semibold">Only alert at or above<select className="field mt-2" value={minSeverity} onChange={(e) => setMinSeverity(e.target.value as Severity)}>{severities.map((item) => <option key={item} value={item}>{item === "low" ? "low (everything)" : item}</option>)}</select></label>
       <button className="control-primary mt-5 inline-flex w-full items-center justify-center gap-2" disabled={create.isPending || !isAdmin}>{create.isPending ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <BellRing className="h-4 w-4" />}{create.isPending ? "Saving…" : "Save and send a test"}</button>
       {!isAdmin && workspace.data && <p className="mt-3 text-xs text-muted">Only workspace admins can add destinations.</p>}

@@ -49,6 +49,12 @@ class HttpReplayService {
     const result=await this.pool.query(`insert into http_replay_specs(organization_id,incident_id,name,evidence_revision,application_version,request,assertions,dependencies) select $1,i.id,$3,$4,$5,$6,$7,$8 from incidents i where i.id=$2 and i.organization_id=$1 returning *`,[context.organizationId,incidentId,safe.name,evidenceRevision,safe.applicationVersion,safe.request,safe.assertions,safe.dependencies]);
     if(!result.rows[0]) throw notFound("Incident not found in this workspace."); return mapSpec(result.rows[0] as Row);
   }
+  async findSpec(userId:string,specId:string):Promise<HttpReplaySpec|null> {
+    const context=await workspaceService.context(userId);
+    if(!this.pool) return structuredClone(this.specs.find((item)=>item.id===specId)??null);
+    const result=await this.pool.query(`select * from http_replay_specs where organization_id=$1 and id::text=$2`,[context.organizationId,specId]);
+    return result.rows[0]?mapSpec(result.rows[0] as Row):null;
+  }
   async list(userId:string,incidentId:string) {
     const context=await workspaceService.context(userId);
     if(!this.pool) return {specs:structuredClone(this.specs.filter((item)=>item.incidentId===incidentId)),executions:structuredClone(this.executions.filter((item)=>item.incidentId===incidentId))};

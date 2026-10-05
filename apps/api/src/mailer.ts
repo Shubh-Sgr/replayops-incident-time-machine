@@ -71,3 +71,28 @@ export async function sendInvitationEmail(input: InvitationEmailInput, options: 
     return { status: "failed", error: `Email provider ${reason}. Copy and share the invitation link instead.` };
   }
 }
+
+export interface AlertEmailInput { to: string[]; subject: string; text: string; heading: string; lines: string[]; linkUrl: string; linkLabel: string; idempotencyKey: string }
+
+export const alertEmailConfigured = () => Boolean(config.resendApiKey && config.inviteFromEmail);
+
+/** Incident alert email through the same free Resend account used for invitations. */
+export async function sendAlertEmail(input: AlertEmailInput, options: MailerOptions = {}): Promise<{ ok: boolean; error?: string }> {
+  const apiKey = options.apiKey ?? config.resendApiKey;
+  const from = options.from ?? config.inviteFromEmail;
+  if (!apiKey || !from) return { ok: false, error: "Email isn't configured on the API. Set RESEND_API_KEY and INVITE_FROM_EMAIL." };
+  const html = `<!doctype html><html><body style="margin:0;background:#eef2f5;color:#25313d;font-family:Arial,sans-serif"><div style="max-width:560px;margin:0 auto;padding:28px 20px"><div style="background:#f9fbfc;border:1px solid #c9d4dc;border-radius:14px;padding:24px"><p style="margin:0 0 14px;color:#647584;font-size:13px">REPLAYOPS · INCIDENT ALERT</p><h1 style="margin:0;font-size:22px;line-height:1.3">${escapeHtml(input.heading)}</h1>${input.lines.map((line) => `<p style="margin:12px 0 0;line-height:1.55">${escapeHtml(line)}</p>`).join("")}<a href="${escapeHtml(input.linkUrl)}" style="display:inline-block;margin-top:20px;padding:11px 16px;border-radius:10px;background:#e66b32;color:#251c18;text-decoration:none;font-weight:700">${escapeHtml(input.linkLabel)}</a></div></div></body></html>`;
+  try {
+    const response = await (options.fetchImpl ?? fetch)("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json", "Idempotency-Key": input.idempotencyKey },
+      body: JSON.stringify({ from, to: input.to, subject: input.subject, text: input.text, html, tags: [{ name: "category", value: "incident_alert" }] }),
+      signal: AbortSignal.timeout(10_000)
+    });
+    if (response.ok) return { ok: true };
+    const detail = await response.text().catch(() => "");
+    return { ok: false, error: `Email provider rejected the alert (HTTP ${response.status})${detail ? `: ${detail.slice(0, 160)}` : ""}` };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error && error.name === "TimeoutError" ? "Email provider timed out." : "Email provider could not be reached." };
+  }
+}

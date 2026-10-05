@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import { config } from "./config.js";
+import { MEMBERSHIPS } from "./scope.js";
 import { sendInvitationEmail } from "./mailer.js";
 import { conflict, forbidden, HttpError, notFound } from "./errors.js";
 import type { ActionNotification, AuditEntry, HypothesisTest, HypothesisTestStatus, IncidentComment, IncidentPolicy, IncidentPostmortem, MitigationRequest, PrivacySettings, RecoveryVerification, ReplayResult, ServiceDefinition, TeamInvitation, TeamMember, WorkspaceContext, WorkspaceRole } from "./types.js";
@@ -196,10 +197,47 @@ class WorkspaceService {
 
   async context(userId: string): Promise<WorkspaceContext> {
     if (!this.pool) return { organizationId: "demo-organization", organizationName: "ReplayOps demonstration", role: this.memoryMembers.find((item) => item.userId === userId)?.role ?? "responder" };
-    const result = await this.pool.query(`select m.organization_id,m.role,o.name from organization_members m join organizations o on o.id=m.organization_id where m.user_id=$1 order by m.created_at desc limit 1`, [userId]);
+    const result = await this.pool.query(`select m.organization_id,m.role,o.name from ${MEMBERSHIPS} m join organizations o on o.id=m.organization_id where m.user_id=$1 limit 1`, [userId]);
     const row = result.rows[0] as Row | undefined;
     if (!row) throw forbidden("No workspace membership exists for this account.");
     return { organizationId: String(row.organization_id), organizationName: String(row.name), role: row.role as WorkspaceRole };
+  }
+
+  /** Every workspace this user belongs to, with the one requests are currently scoped to marked active. */
+  async listWorkspaces(userId: string): Promise<Array<WorkspaceContext & { active: boolean }>> {
+    if (!this.pool) return [{ ...(await this.context(userId)), active: true }];
+    const active = await this.context(userId);
+    const result = await this.pool.query(`select m.organization_id,m.role,o.name from organization_members m join organizations o on o.id=m.organization_id where m.user_id=$1 order by o.name`, [userId]);
+    return (result.rows as Row[]).map((row) => ({ organizationId: String(row.organization_id), organizationName: String(row.name), role: row.role as WorkspaceRole, active: String(row.organization_id) === active.organizationId }));
+  }
+
+  async switchWorkspace(userId: string, organizationId: string) {
+    if (!this.pool) { if (organizationId !== "demo-organization") throw notFound("Workspace not found."); return this.context(userId); }
+    const member = await this.pool.query(`select 1 from organization_members where user_id=$1 and organization_id=$2`, [userId, organizationId]);
+    if (!member.rowCount) throw notFound("You are not a member of that workspace.");
+    await this.pool.query(`insert into replayops_internal.active_workspaces(user_id,organization_id) values($1,$2) on conflict(user_id) do update set organization_id=excluded.organization_id,updated_at=now()`, [userId, organizationId]);
+    return this.context(userId);
+  }
+
+  /** A fresh, empty workspace owned by the caller, who becomes its admin and is switched into it. */
+  async createWorkspace(userId: string, email: string, name: string) {
+    if (!this.pool) throw new HttpError(400, "The demo API has a single workspace. Connect a database to create more.");
+    const client = await this.pool.connect();
+    try {
+      await client.query("begin");
+      const org = await client.query(`insert into organizations(name,slug) values($1,'workspace-'||gen_random_uuid()::text) returning id`, [name]);
+      const organizationId = String((org.rows[0] as Row).id);
+      await client.query(`insert into organization_members(organization_id,user_id,role,email,display_name) values($1,$2,'admin',$3,split_part($3,'@',1))`, [organizationId, userId, email]);
+      await client.query(`insert into replayops_internal.active_workspaces(user_id,organization_id) values($1,$2) on conflict(user_id) do update set organization_id=excluded.organization_id,updated_at=now()`, [userId, organizationId]);
+      await client.query(`insert into workspace_audit_log(organization_id,actor,action,target_type,target_id,detail) values($1,$2,'created workspace','workspace',$3,$4)`, [organizationId, email, organizationId, { name }]);
+      await client.query("commit");
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
+    return this.context(userId);
   }
 
   async assertRole(userId: string, roles: WorkspaceRole[]) {
@@ -344,6 +382,7 @@ class WorkspaceService {
       const row = found.rows[0] as Row | undefined;
       if (!row) throw new HttpError(410, "This invitation is invalid, expired, or belongs to another email address.");
       await client.query(`insert into organization_members(organization_id,user_id,role,email,display_name) values($1,$2,$3,$4,$5) on conflict(organization_id,user_id) do update set role=excluded.role,email=excluded.email`, [row.organization_id, userId, row.role, email, email.split("@")[0] ?? "Responder"]);
+      await client.query(`insert into replayops_internal.active_workspaces(user_id,organization_id) values($1,$2) on conflict(user_id) do update set organization_id=excluded.organization_id,updated_at=now()`, [userId, row.organization_id]);
       await client.query(`update organization_invitations set status='accepted' where id=$1`, [row.id]);
       await client.query(`insert into workspace_audit_log(organization_id,actor,action,target_type,target_id,detail) values($1,$2,'accepted invitation','member',$3,$4)`, [row.organization_id, email, userId, { role: row.role }]);
       await client.query("commit");

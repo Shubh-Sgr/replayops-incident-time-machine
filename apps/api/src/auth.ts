@@ -1,9 +1,10 @@
 import { createClient } from "@supabase/supabase-js";
 import type { NextFunction, Request, Response } from "express";
 import { config } from "./config.js";
+import { apiTokenService, isApiToken, type ApiTokenPrincipal } from "./apiTokens.js";
 
 export interface AuthenticatedRequest extends Request {
-  user?: { id: string; email?: string; demo?: boolean };
+  user?: { id: string; email?: string; demo?: boolean; token?: ApiTokenPrincipal };
 }
 
 const supabase = config.supabaseUrl && config.supabaseAnonKey
@@ -28,6 +29,13 @@ export function decodeDemoSessionToken(token: string | undefined) {
 
 export async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextFunction) {
   const token = req.headers.authorization?.replace(/^Bearer\s+/i, "");
+  if (isApiToken(token)) {
+    const principal = await apiTokenService.verify(token!).catch(() => null);
+    if (!principal) { res.status(401).json({ error: "This API token is invalid, revoked, or expired." }); return; }
+    req.user = { id: principal.id, email: `${principal.name} (API token)`, token: principal };
+    next();
+    return;
+  }
   // Demo tokens are unsigned, so they are only honoured by the in-memory demo API. With a real database
   // they would let anyone who knows a member's user ID act as that member.
   const demoUser = config.demoMode && !config.databaseUrl ? decodeDemoSessionToken(token) : null;

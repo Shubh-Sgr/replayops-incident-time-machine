@@ -89,7 +89,7 @@ export function IncidentsPage() {
                 <span className="measurement-number text-xs text-muted">{incident.environment ?? "unknown"}</span>
                 <StatusMark value={incident.status} />
                 <span className="text-sm text-muted lg:text-ink">{ownerName(incident.owner)}</span>
-                <span className="text-xs text-muted">{formatRelative(incident.evidenceRevision ?? incident.updatedAt)}<span className="mt-1 block font-semibold text-info">{incident.status==="monitoring"?"Verify recovery":incident.events.length<2?"Acquire evidence":"Run next test"}</span></span>
+                <span className="text-xs text-muted">{formatRelative(incident.evidenceRevision ?? incident.updatedAt)}<span className="mt-1 block font-semibold text-info">{incident.status==="monitoring"?"Verify recovery":(incident.eventCount ?? incident.events.length)<2?"Acquire evidence":"Run next test"}</span></span>
                 <div className="flex gap-1 lg:justify-end"><button className="control-quiet !min-h-9 !px-2.5" onClick={() => setEditing(incident)} aria-label={`Edit ${incident.code}`}>Edit</button>{isAdmin && <button className="control-quiet !min-h-9 !px-2.5 text-danger hover:text-danger" onClick={() => { if (window.prompt(`This permanently deletes ${incident.code} and all of its evidence. Type ${incident.code} to confirm.`)?.trim() === incident.code) remove.mutate(incident.id); }} aria-label={`Delete ${incident.code}`}><Trash2 className="h-4 w-4" /></button>}</div>
               </div>
             ))}
