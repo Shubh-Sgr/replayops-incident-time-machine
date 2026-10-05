@@ -25,6 +25,19 @@ Open **Connectors** in the application and create one of three free receivers:
 - **OpenTelemetry:** accepts OTLP HTTP/JSON at `/v1/traces`, `/v1/logs`, and `/v1/metrics`, retaining incident-shaped signals and trace context.
 - **Generic/Grafana:** accepts a small normalized JSON contract or Grafana's standard alert webhook payload.
 
+### Change events from any tool
+
+Most incidents follow a change. Besides GitHub, any CI/CD step, flag tool, or script can record one through a **Generic** connector, and it becomes a ranked suspect when an incident opens nearby:
+
+```bash
+curl -X POST "$REPLAYOPS_ENDPOINT" -H "Authorization: Bearer $REPLAYOPS_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"kind":"change","changeType":"deploy","service":"checkout-api","environment":"production","version":"v1.4.2","previousVersion":"v1.4.1","sha":"abc1234"}'
+```
+
+`changeType` is one of `deploy`, `feature_flag` (with `flag`, `from`, `to`), `config` (with `key`, `previousValue`, `newValue`), `migration`, `infra`, or `rollback`. The diagnosis tailors its advice: flip the flag back, restore the setting, or roll back to `previousVersion`.
+
+The public receiver is rate limited per connector (`INGEST_RATE_LIMIT_PER_MINUTE`, default 300) and per client address (`INGEST_RATE_LIMIT_PER_IP_PER_MINUTE`, default 600), and answers `429` with `Retry-After`.
+
 Normal deployments and low-impact metrics remain in a 30-minute evidence buffer. An alert or signal at the incident threshold automatically creates an incident, backfills matching precursor evidence, and updates diagnosis as later evidence arrives. Provider retries are idempotent.
 
 No paid queue or connector platform is required. The receiver runs inside the existing Render API, and connector metadata is stored in the existing Supabase PostgreSQL database.
@@ -33,11 +46,14 @@ Every authenticated delivery is now persisted to a Supabase-backed `ingestion_qu
 
 ## Real-user controls
 
+- **Alerts:** Settings → Alerts posts to Slack, Discord, or any HTTPS webhook when an incident opens, moves to monitoring, resolves, or reopens, with per-destination event and minimum-severity filters. Webhook bodies are signed (`x-replayops-signature: sha256=HMAC(secret, body)`). Destinations must be public HTTPS hosts, and DNS is re-checked at send time, so alerts can't be aimed at internal addresses.
+- **Destructive actions:** only admins can delete an incident or a connector; the audit entry keeps the code, title, and evidence count of what was removed.
+- **Request bodies:** unless an admin enables *Capture request bodies*, body/payload fields are stripped from incoming telemetry, replays cannot include a body, and replay response bodies are not stored.
 - **Service map:** records owner, criticality, repository, runbook, and dependencies for architecture-aware grouping.
 - **Intake policy:** configures incident threshold, grouping window, low-severity suppression, and maintenance mode.
 - **Team access:** admin, responder, and viewer roles are enforced at the API; admins can email expiring, email-bound invitation links with a copy-link fallback.
 - **Audit trail:** successful mutations and governed actions retain actor, target, detail, and timestamp.
-- **Grounded AI:** chat and embedding input are redacted before provider calls; responses expose incident/event citations, evidence boundary, model mode, and unknowns.
+- **Grounded AI:** chat and embedding input are redacted before provider calls; automatically opened incidents are embedded too, so similar-incident search finds them; responses expose incident/event citations, evidence boundary, model mode, and unknowns.
 - **Hypothesis tests:** responders assign a falsification test, record the observation, and mark it supported, disproved, or inconclusive.
 - **Scenario estimates:** transparent arithmetic is saved against an evidence revision and never labeled as execution or predicted recovery.
 - **Bounded HTTP replay:** immutable request/version/assertions/fixtures execute only against a loopback candidate target, run twice for nondeterminism, and can be downloaded as a CI manifest.

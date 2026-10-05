@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import { config } from "./config.js";
 import { seedActivities, seedDashboardSeries, seedIncidents, seedReplayRuns } from "./seed.js";
-import type { Activity, DashboardData, Incident, IncidentDecision, IncidentEvent, IngestionBatch, IngestionResult, Integration, IntegrationDelivery, IntegrationProvider, IntegrationTarget, NormalizedSignal, ReplayConfig, ReplayProjection, ReplayResult, ReplayRun, SearchResult } from "./types.js";
+import type { Activity, DashboardData, Incident, IncidentDecision, IncidentEvent, IncidentHeadline, IngestionBatch, IngestionResult, Integration, IntegrationDelivery, IntegrationProvider, IntegrationTarget, NormalizedSignal, ReplayConfig, ReplayProjection, ReplayResult, ReplayRun, SearchResult, Severity } from "./types.js";
 import { forbidden } from "./errors.js";
 import { workspaceService } from "./workspace.js";
 
@@ -29,6 +29,7 @@ export interface Repository {
   listReplays(userId: string, incidentId: string): Promise<ReplayResult[]>;
   runReplay(userId: string, incidentId: string, config: ReplayConfig): Promise<ReplayResult | null>;
   search(userId: string, query: string, embedding?: number[]): Promise<SearchResult[]>;
+  setIncidentEmbedding(incidentId: string, embedding: number[]): Promise<void>;
   listIntegrations(userId: string): Promise<Integration[]>;
   createIntegration(userId: string, input: IntegrationInput): Promise<Integration>;
   updateIntegrationConfig(userId: string, integrationId: string, input: IntegrationConfigInput): Promise<Integration | null>;
@@ -234,6 +235,8 @@ export class MemoryRepository implements Repository {
       return {status:"rejected",acceptedSignals:0,incidentIds:[],reason:`Daily quota ${storedIntegration.dailyQuota} would be exceeded.`} satisfies IngestionResult;
     }
     const incidentIds = new Set<string>();
+    const opened: IncidentHeadline[] = [];
+    const movedToMonitoring: IncidentHeadline[] = [];
     let acceptedSignals = 0;
     for (const signal of batch.signals) {
       const relatedServices = await workspaceService.relatedServicesForOrganization(integration.organizationId, signal.service);
@@ -255,6 +258,7 @@ export class MemoryRepository implements Repository {
           startedAt: signal.timestamp, resolvedAt: null, createdAt: now, updatedAt: now, evidenceRevision: now, events: []
         };
         this.incidents.unshift(incident);
+        opened.push(headline(incident));
         const triggerTime = new Date(signal.timestamp).getTime();
         for (const precursor of this.bufferedSignals.filter((item) => !item.incidentId && compatibleBranch(branchOf(item), branchOf(signal)) && relatedServices.includes(item.service) && new Date(item.timestamp).getTime() >= triggerTime - 1_800_000 && new Date(item.timestamp).getTime() <= triggerTime)) {
           precursor.incidentId = incident.id;
@@ -268,7 +272,7 @@ export class MemoryRepository implements Repository {
       if (incident) {
         incident.events.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
         incident.updatedAt = new Date().toISOString(); incident.evidenceRevision = incident.updatedAt;
-        if (signal.kind === "recovery") incident.status = "monitoring";
+        if (signal.kind === "recovery" && incident.status !== "monitoring") { incident.status = "monitoring"; movedToMonitoring.push(headline(incident)); }
         incidentIds.add(incident.id);
       }
     }
@@ -282,9 +286,14 @@ export class MemoryRepository implements Repository {
       storedIntegration.deliveries.unshift(delivery);
       storedIntegration.deliveries = storedIntegration.deliveries.slice(0, 8);
     }
-    return { status: "accepted", acceptedSignals, incidentIds: [...incidentIds] } satisfies IngestionResult;
+    return { status: "accepted", acceptedSignals, incidentIds: [...incidentIds], opened, movedToMonitoring } satisfies IngestionResult;
   }
+  async setIncidentEmbedding(_incidentId: string, _embedding: number[]) {}
 }
+
+const headline = (incident: Pick<Incident, "id" | "code" | "title" | "summary" | "service" | "environment" | "severity" | "status">): IncidentHeadline => ({
+  id: incident.id, code: incident.code, title: incident.title, summary: incident.summary, service: incident.service, environment: incident.environment, severity: incident.severity, status: incident.status
+});
 
 // GitHub evidence is grouped per branch, so a failure on one branch doesn't absorb pushes and CI runs from others.
 const branchOf = (item: { metadata?: Record<string, unknown> }) => typeof item.metadata?.branch === "string" && item.metadata.branch ? item.metadata.branch : undefined;
@@ -541,7 +550,7 @@ class PostgresRepository implements Repository {
   async deleteIncident(userId: string, id: string) {
     return (await this.pool.query(
       `delete from incidents i where i.id = $2
-       and exists (select 1 from organization_members m where m.organization_id = i.organization_id and m.user_id = $1)`,
+       and exists (select 1 from organization_members m where m.organization_id = i.organization_id and m.user_id = $1 and m.role = 'admin')`,
       [userId, id]
     )).rowCount === 1;
   }
@@ -649,6 +658,9 @@ class PostgresRepository implements Repository {
     if (!row) return null;
     return { ...mapReplayRun(row), config, projection, evidenceVersion: incident.evidenceRevision ?? incident.updatedAt, eventCount: incident.events.length } satisfies ReplayResult;
   }
+  async setIncidentEmbedding(incidentId: string, embedding: number[]) {
+    await this.pool.query(`update incidents set embedding = $2::vector where id = $1`, [incidentId, `[${embedding.join(",")}]`]);
+  }
   async search(userId: string, query: string, embedding?: number[]) {
     const exactResult = await this.pool.query(
       `select distinct on (i.id) i.*, e.id as matched_event_id
@@ -743,7 +755,7 @@ class PostgresRepository implements Repository {
       `delete from integrations x where x.id = $2
        and exists (
          select 1 from organization_members m
-         where m.organization_id = x.organization_id and m.user_id = $1 and m.role in ('admin', 'responder')
+         where m.organization_id = x.organization_id and m.user_id = $1 and m.role = 'admin'
        )`,
       [userId, integrationId]
     )).rowCount === 1;
@@ -783,6 +795,8 @@ class PostgresRepository implements Repository {
       }
 
       const incidentIds = new Set<string>();
+      const opened: IncidentHeadline[] = [];
+      const movedToMonitoring: IncidentHeadline[] = [];
       let acceptedSignals = 0;
       for (const signal of batch.signals) {
         const relatedServices = await workspaceService.relatedServicesForOrganization(integration.organizationId, signal.service);
@@ -833,6 +847,7 @@ class PostgresRepository implements Repository {
               signal.service, signal.environment ?? "unknown", signal.severity, signal.timestamp]
           );
           incidentId = String((created.rows[0] as Row).id);
+          opened.push({ id: incidentId, code, title: signal.title, summary: `Automatically opened from ${integration.name} after ${signal.service} crossed the incident threshold.`, service: signal.service, environment: signal.environment ?? "unknown", severity: signal.severity, status: "investigating" });
           await client.query(
             `update ingestion_signals s set incident_id = $1
              where s.incident_id is null and s.occurred_at between $2::timestamptz - interval '30 minutes' and $2::timestamptz + interval '5 minutes'
@@ -869,10 +884,16 @@ class PostgresRepository implements Repository {
 
         if (incidentId) {
           incidentIds.add(incidentId);
-          await client.query(
-            `update incidents set updated_at = now(), evidence_revision=now(), status = case when $2 = 'recovery' then 'monitoring' else status end where id = $1`,
+          const touched = await client.query(
+            `with previous as (select status from incidents where id = $1)
+             update incidents set updated_at = now(), evidence_revision=now(), status = case when $2 = 'recovery' then 'monitoring' else status end where id = $1
+             returning id, code, title, summary, service, environment, severity, status, (select status from previous) as previous_status`,
             [incidentId, signal.kind]
           );
+          const row = touched.rows[0] as Row | undefined;
+          if (row && row.status === "monitoring" && row.previous_status !== "monitoring" && !opened.some((item) => item.id === incidentId)) {
+            movedToMonitoring.push({ id: String(row.id), code: String(row.code), title: String(row.title), summary: String(row.summary), service: String(row.service), environment: row.environment ? String(row.environment) : undefined, severity: row.severity as Severity, status: "monitoring" });
+          }
         }
       }
 
@@ -895,7 +916,7 @@ class PostgresRepository implements Repository {
         );
       }
       await client.query("commit");
-      return { status: "accepted", acceptedSignals, incidentIds: incidentIdList } satisfies IngestionResult;
+      return { status: "accepted", acceptedSignals, incidentIds: incidentIdList, opened, movedToMonitoring } satisfies IngestionResult;
     } catch (error) {
       await client.query("rollback");
       throw error;

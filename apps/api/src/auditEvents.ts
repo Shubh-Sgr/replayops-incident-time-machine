@@ -14,7 +14,6 @@ export function semanticAuditForRequest(method: string, path: string, bodyValue:
 
   if (method === "POST" && path === "/incidents") return { action: "created investigation", targetType: "incident", detail: { title: text(body.title), service: text(body.service), environment: text(body.environment) } };
   if (method === "PATCH" && (found = match(/^\/incidents\/([^/]+)$/))) return { action: "updated investigation details", targetType: "incident", targetId: found[1], detail: { title: text(body.title), status: text(body.status), owner: text(body.owner) } };
-  if (method === "DELETE" && (found = match(/^\/incidents\/([^/]+)$/))) return { action: "deleted investigation", targetType: "incident", targetId: found[1], detail: {} };
   if (method === "POST" && (found = match(/^\/incidents\/([^/]+)\/decisions$/))) return { action: "recorded investigation decision", targetType: "incident", targetId: found[1], detail: { title: text(body.title), kind: text(body.kind), status: text(body.status) } };
   if (method === "POST" && (found = match(/^\/incidents\/([^/]+)\/replays$/))) return { action: "calculated mitigation scenario", targetType: "incident", targetId: found[1], detail: {} };
   if (method === "POST" && (found = match(/^\/incidents\/([^/]+)\/events$/))) return { action: "added evidence observation", targetType: "incident", targetId: found[1], detail: { title: text(body.title), service: text(body.service), kind: text(body.kind) } };
@@ -33,11 +32,12 @@ export function semanticAuditForRequest(method: string, path: string, bodyValue:
 
   if (method === "POST" && path === "/integrations") return { action: "created evidence source", targetType: "integration", detail: { name: text(body.name), provider: text(body.provider) } };
   if (method === "PATCH" && (found = match(/^\/integrations\/([^/]+)\/config$/))) return { action: "updated evidence source policy", targetType: "integration", targetId: found[1], detail: {} };
-  if (method === "DELETE" && (found = match(/^\/integrations\/([^/]+)$/))) return { action: "removed evidence source", targetType: "integration", targetId: found[1], detail: {} };
   if (method === "POST" && (found = match(/^\/integrations\/([^/]+)\/test$/))) return { action: "verified evidence source with synthetic test", targetType: "integration", targetId: found[1], detail: { synthetic: true } };
   if (method === "POST" && (found = match(/^\/ingestion-queue\/([^/]+)\/retry$/))) return { action: "requeued failed evidence delivery", targetType: "ingestion-delivery", targetId: found[1], detail: {} };
 
   // These routes already write richer domain-specific audit records, or are personal UI state.
+  // Deletes and alert destinations write their own audit entries with a snapshot of what changed.
+  if ((method === "DELETE" && (/^\/incidents\/[^/]+$/.test(path) || /^\/integrations\/[^/]+$/.test(path))) || /^\/alert-channels/.test(path)) return null;
   if (/^\/notifications\//.test(path) || path === "/privacy-settings" || path === "/product-outcomes" || path === "/services" || path === "/incident-policy" || /^\/team\//.test(path) || /\/mitigations$/.test(path) || /^\/mitigations\//.test(path) || /\/hypothesis-tests$/.test(path) || /^\/hypothesis-tests\//.test(path) || /\/recovery$/.test(path) || /\/postmortem$/.test(path) || /\/comments$/.test(path) || /\/evidence-bundle$/.test(path) || /\/http-replays$/.test(path) || /^\/http-replays\//.test(path) || /\/events\/[^/]+\/move$/.test(path)) return null;
 
   return { action: "changed workspace data", targetType: "workspace", detail: {} };

@@ -28,7 +28,9 @@ export function decodeDemoSessionToken(token: string | undefined) {
 
 export async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextFunction) {
   const token = req.headers.authorization?.replace(/^Bearer\s+/i, "");
-  const demoUser = config.demoMode ? decodeDemoSessionToken(token) : null;
+  // Demo tokens are unsigned, so they are only honoured by the in-memory demo API. With a real database
+  // they would let anyone who knows a member's user ID act as that member.
+  const demoUser = config.demoMode && !config.databaseUrl ? decodeDemoSessionToken(token) : null;
   if (demoUser && (!supabase || token?.startsWith("demo-session"))) {
     req.user = demoUser;
     next();

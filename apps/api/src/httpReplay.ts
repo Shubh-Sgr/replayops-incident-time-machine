@@ -56,7 +56,9 @@ class HttpReplayService {
     return {specs:(specs.rows as Row[]).map(mapSpec),executions:(executions.rows as Row[]).map(mapExecution)};
   }
   private async saveExecution(userId:string, value:HttpReplayExecution) {
-    const context=await workspaceService.context(userId); if(!this.pool){this.executions.unshift(value);return value;}
+    const context=await workspaceService.context(userId);
+    // Response bodies are only kept when the workspace opted in to body capture; assertions already ran in memory.
+    if(value.responseBody!==undefined&&!(await workspaceService.getPrivacy(userId)).captureRequestBodies) value={...value,responseBody:undefined}; if(!this.pool){this.executions.unshift(value);return value;}
     const result=await this.pool.query(`insert into http_replay_executions(id,organization_id,incident_id,spec_id,evidence_revision,status,assertion_results,response_status,response_body,duration_ms,nondeterministic,limitation,created_at) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) returning *`,[value.id,context.organizationId,value.incidentId,value.specId,value.evidenceRevision,value.status,value.assertionResults,value.responseStatus??null,value.responseBody??null,value.durationMs??null,value.nondeterministic,value.limitation??null,value.createdAt]);return mapExecution(result.rows[0] as Row);
   }
   async execute(userId:string, spec:HttpReplaySpec):Promise<HttpReplayExecution> {

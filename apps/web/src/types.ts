@@ -207,6 +207,12 @@ export interface IngestionResult {
 
 export type WorkspaceRole = "admin" | "responder" | "viewer";
 export interface WorkspaceContext { organizationId: string; organizationName: string; role: WorkspaceRole }
+export type AlertChannelKind = "slack" | "discord" | "webhook";
+export type AlertEventType = "opened" | "monitoring" | "resolved" | "reopened";
+export interface AlertChannel {
+  id: string; name: string; kind: AlertChannelKind; target: string; events: AlertEventType[]; minSeverity: Severity; enabled: boolean;
+  lastStatus: "delivered" | "failed" | null; lastError: string | null; lastSentAt: string | null; createdAt: string; signingSecret?: string;
+}
 export interface PrivacySettings { externalAiEnabled: boolean; captureRequestBodies: boolean; productAnalyticsEnabled: boolean; updatedAt: string }
 export interface ServiceDefinition { id: string; name: string; ownerTeam: string; tier: "critical" | "standard" | "internal"; repositoryUrl?: string | null; runbookUrl?: string | null; dependencies: string[]; createdAt: string; updatedAt: string }
 export interface IncidentPolicy { incidentThreshold: number; groupingWindowMinutes: number; suppressLowSeverity: boolean; maintenanceMode: boolean; updatedAt: string }

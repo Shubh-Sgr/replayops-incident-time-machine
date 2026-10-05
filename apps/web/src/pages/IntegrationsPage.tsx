@@ -6,6 +6,7 @@ import {
 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { api } from "../lib/api";
+import { useIsAdmin } from "../lib/useIsAdmin";
 import { cn } from "../lib/utils";
 import type { Integration, IntegrationProvider, QueueJob } from "../types";
 
@@ -79,12 +80,18 @@ function ConnectorInstructions({ integration }: { integration: Integration }) {
     if (integration.provider === "github") {
       return `Payload URL: ${integration.connector.endpoint}\nContent type: application/json\nSecret: use the generated secret below\nEvents: Deployments, Deployment statuses, Workflow runs, Pushes`;
     }
-    return [
+    const send = (comment: string, body: string) => [
+      `# ${comment}`,
       `curl -X POST '${integration.connector.endpoint}' \\`,
       `  -H 'Authorization: Bearer ${integration.connector.token}' \\`,
       `  -H 'Content-Type: application/json' \\`,
-      `  -d '{"eventId":"alert-1042","service":"checkout-api","kind":"alert","title":"Checkout errors exceeded SLO","detail":"Five-minute error rate reached 7.8 percent.","impactScore":82,"correlationKey":"trace-or-release-id","timestamp":"${new Date().toISOString()}"}'`
+      `  -d '${body}'`
     ].join("\n");
+    return [
+      send("Record a deploy from any CI/CD step (Vercel, Render, Jenkins, Argo…) so it becomes a suspect. Fill version/sha from your CI variables.", `{"kind":"change","changeType":"deploy","service":"checkout-api","environment":"production","version":"v1.4.2","previousVersion":"v1.4.1","sha":"abc1234","author":"ci-bot"}`),
+      send("Record a feature flag flip or config edit", `{"kind":"change","changeType":"feature_flag","service":"checkout-api","environment":"production","flag":"new-checkout","from":false,"to":true}`),
+      send("Send an alert", `{"eventId":"alert-1042","service":"checkout-api","environment":"production","kind":"alert","title":"Checkout errors exceeded SLO","detail":"Five-minute error rate reached 7.8 percent.","impactScore":82}`)
+    ].join("\n\n");
   }, [integration]);
 
   return (
@@ -98,7 +105,7 @@ function ConnectorInstructions({ integration }: { integration: Integration }) {
                 ? "Add one repository webhook. ReplayOps verifies GitHub’s SHA-256 signature before accepting a delivery."
                 : integration.provider === "otel"
                   ? "Point an OTLP HTTP/JSON exporter here. Only failed or slow spans, warning/error logs, and incident-shaped metrics are retained."
-                  : "Use the normalized JSON contract directly, or send Grafana’s standard alert webhook payload."}
+                  : "Send alerts and change events (deploys, feature flags, config edits) as JSON from any tool, or point Grafana’s alert webhook here. Changes become ranked suspects when an incident opens."}
             </p>
           </div>
           <span className="inline-flex min-h-8 items-center gap-2 rounded-full bg-success/10 px-3 text-xs font-semibold text-success">
@@ -131,6 +138,7 @@ function ConnectorInstructions({ integration }: { integration: Integration }) {
 
 export function IntegrationsPage() {
   const queryClient = useQueryClient();
+  const isAdmin = useIsAdmin();
   const [provider, setProvider] = useState<IntegrationProvider>("github");
   const [name, setName] = useState("Production delivery stream");
   const [selectedId, setSelectedId] = useState<string>();
@@ -314,7 +322,7 @@ export function IntegrationsPage() {
               {testMutation.isPending ? "Sending test…" : "Run labeled end-to-end test"}
             </button>
             <p className="mr-auto text-xs text-muted">Creates one synthetic incident so you can verify the complete pipeline.</p>
-            {deletePending === selected.id ? (
+            {!isAdmin ? null : deletePending === selected.id ? (
               <div className="flex items-center gap-2">
                 <button className="control-quiet !px-3" onClick={() => setDeletePending(undefined)}>Cancel</button>
                 <button className="control bg-danger text-panel hover:bg-danger/90" disabled={deleteMutation.isPending} onClick={() => deleteMutation.mutate(selected.id)}>Confirm removal</button>

@@ -3,6 +3,7 @@ import { Router, type Request, type Response } from "express";
 import { config } from "./config.js";
 import { repository } from "./repository.js";
 import { ingestionQueue } from "./queue.js";
+import { workspaceService } from "./workspace.js";
 import type { EventKind, IngestionBatch, IntegrationProvider, NormalizedSignal, Severity } from "./types.js";
 
 type JsonRecord = Record<string, unknown>;
@@ -272,24 +273,100 @@ function normalizeOtelMetrics(payload: JsonRecord, deliveryId: string): Normaliz
   return signals;
 }
 
+export type ChangeType = "deploy" | "feature_flag" | "config" | "migration" | "infra" | "rollback";
+const changeTypes: ChangeType[] = ["deploy", "feature_flag", "config", "migration", "infra", "rollback"];
+const changeAliases: Record<string, ChangeType> = { flag: "feature_flag", "feature-flag": "feature_flag", featureflag: "feature_flag", configuration: "config", "config-change": "config", schema: "migration", infrastructure: "infra", terraform: "infra", release: "deploy", deployment: "deploy", revert: "rollback" };
+const changeTypeOf = (value: string): ChangeType | undefined => {
+  const key = value.trim().toLowerCase().replace(/\s+/g, "_");
+  return changeTypes.includes(key as ChangeType) ? key as ChangeType : changeAliases[key];
+};
+
+/**
+ * Change events — deploys from any CD tool, feature-flag flips, config edits, migrations — are the most
+ * common incident cause, so they are first-class suspects even when they don't come from GitHub.
+ */
+function changeTitle(changeType: ChangeType, service: string, input: JsonRecord) {
+  const version = textValue(input.version ?? input.release);
+  const key = textValue(input.flag ?? input.flagKey ?? input.key ?? input.setting);
+  const to = input.newValue ?? input.to ?? input.value;
+  if (changeType === "feature_flag") return `Feature flag ${key || "changed"}${to !== undefined ? ` set to ${String(to)}` : ""} on ${service}`;
+  if (changeType === "config") return `Config ${key || "change"}${to !== undefined ? ` set to ${String(to)}` : ""} on ${service}`;
+  if (changeType === "migration") return `Database migration ${version || key || "applied"} on ${service}`;
+  if (changeType === "infra") return `Infrastructure change${key ? ` to ${key}` : ""} for ${service}`;
+  if (changeType === "rollback") return `Rolled back ${service}${version ? ` to ${version}` : ""}`;
+  return `Deployed ${service}${version ? ` ${version}` : ""}`;
+}
+
 function normalizeGenericEvent(inputValue: unknown, index: number, deliveryId: string): NormalizedSignal | null {
   const input = object(inputValue);
   const service = textValue(input.service, textValue(object(input.labels).service, textValue(input.source, "external-service")));
-  const title = textValue(input.title, textValue(input.name, textValue(input.message, "External operational signal")));
+  const rawKind = textValue(input.kind).toLowerCase();
+  // `kind: "change" | "deploy" | "feature_flag" | …` or an explicit `changeType` marks a change; an alert that merely mentions a changeType stays an alert.
+  const changeType = changeTypeOf(textValue(input.changeType ?? input.change_type)) ?? (rawKind === "change" ? "deploy" : changeTypeOf(rawKind));
+  const isChange = Boolean(changeType) && (!rawKind || rawKind === "change" || Boolean(changeTypeOf(rawKind)));
+  const title = textValue(input.title, textValue(input.name, textValue(input.message, isChange ? changeTitle(changeType!, service, input) : "External operational signal")));
   const detail = textValue(input.detail, textValue(input.description, textValue(input.message, title)));
-  const kindCandidate = textValue(input.kind, "metric") as EventKind;
+  const kindCandidate = (isChange ? "deploy" : rawKind || "metric") as EventKind;
   const kind: EventKind = ["alert", "deploy", "dependency", "metric", "action", "recovery"].includes(kindCandidate) ? kindCandidate : "metric";
-  const impactScore = boundedImpact(input.impactScore ?? input.impact_score, kind === "alert" ? 75 : kind === "recovery" ? 22 : 48);
+  const impactScore = boundedImpact(input.impactScore ?? input.impact_score, kind === "alert" ? 75 : kind === "recovery" ? 22 : isChange ? 40 : 48);
   const externalId = textValue(input.eventId ?? input.event_id ?? input.id, `${deliveryId}:event:${index}`);
   if (!title || !detail) return null;
+  const change = isChange ? {
+    changeType, version: textValue(input.version ?? input.release) || undefined, previousVersion: textValue(input.previousVersion ?? input.previous_version) || undefined,
+    sha: textValue(input.sha ?? input.commit) || undefined, author: textValue(input.author ?? input.actor ?? input.user) || undefined,
+    flagKey: textValue(input.flag ?? input.flagKey ?? input.key ?? input.setting) || undefined,
+    previousValue: input.previousValue ?? input.from, newValue: input.newValue ?? input.to ?? input.value,
+    branch: textValue(input.branch) || undefined
+  } : {};
   return normalized({
     externalId, timestamp: isoTime(input.timestamp ?? input.occurredAt ?? input.startsAt), service, kind, title, detail,
     impactScore, severity: severityValue(input.severity, severityForImpact(impactScore)),
     correlationKey: textValue(input.correlationKey ?? input.incidentKey ?? input.groupKey),
     traceId: textValue(input.traceId ?? input.trace_id), sourceUrl: textValue(input.sourceUrl ?? input.url ?? input.generatorURL),
-    environment: textValue(input.environment), metadata: { provider: "generic", ...object(input.metadata), labels: input.labels, tags: input.tags }
+    environment: textValue(input.environment), metadata: { provider: "generic", ...object(input.metadata), ...change, labels: input.labels, tags: input.tags }
   });
 }
+
+// Request and response bodies often hold customer data; drop them unless the workspace opted in.
+const BODY_KEY = (key: string) => /(^|[._-])(body|payload)$/i.test(key) || /(request|response)[._-]?body/i.test(key);
+function withoutBodies(value: unknown, depth = 0): { value: unknown; dropped: number } {
+  if (depth > 6 || !value || typeof value !== "object") return { value, dropped: 0 };
+  if (Array.isArray(value)) {
+    let dropped = 0;
+    const items = value.map((item) => { const next = withoutBodies(item, depth + 1); dropped += next.dropped; return next.value; });
+    return { value: items, dropped };
+  }
+  let dropped = 0;
+  const result: JsonRecord = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (BODY_KEY(key)) { dropped += 1; continue; }
+    const next = withoutBodies(item, depth + 1);
+    dropped += next.dropped;
+    result[key] = next.value;
+  }
+  return { value: result, dropped };
+}
+export function stripCapturedBodies(signals: NormalizedSignal[]) {
+  return signals.map((signal) => {
+    const { value, dropped } = withoutBodies(signal.metadata);
+    return dropped ? { ...signal, metadata: { ...(value as JsonRecord), bodiesDropped: dropped } } : signal;
+  });
+}
+
+/** Fixed-window limiter for the public receiver, so a leaked URL or noisy exporter can't flood the database. */
+const rateWindows = new Map<string, { start: number; count: number }>();
+export function allowIngestRequest(key: string, limit: number, now = Date.now(), windowMs = 60_000) {
+  const current = rateWindows.get(key);
+  if (!current || now - current.start >= windowMs) {
+    if (rateWindows.size > 20_000) for (const [entry, window] of rateWindows) if (now - window.start >= windowMs) rateWindows.delete(entry);
+    rateWindows.set(key, { start: now, count: 1 });
+    return { allowed: true, retryAfterSeconds: 0 };
+  }
+  current.count += 1;
+  return current.count <= limit ? { allowed: true, retryAfterSeconds: 0 } : { allowed: false, retryAfterSeconds: Math.max(1, Math.ceil((current.start + windowMs - now) / 1000)) };
+}
+const perConnectorLimit = () => Number(process.env.INGEST_RATE_LIMIT_PER_MINUTE ?? 300);
+const perAddressLimit = () => Number(process.env.INGEST_RATE_LIMIT_PER_IP_PER_MINUTE ?? 600);
 
 function normalizeGeneric(payload: JsonRecord, deliveryId: string): NormalizedSignal[] {
   if (Array.isArray(payload.alerts)) {
@@ -337,6 +414,14 @@ function requestToken(req: Request) {
 
 async function receive(req: RawRequest, res: Response) {
   const integrationId = textValue(req.params.integrationId);
+  for (const [key, limit] of [[`ip:${req.ip ?? "unknown"}`, perAddressLimit()], [`connector:${integrationId}`, perConnectorLimit()]] as const) {
+    const verdict = allowIngestRequest(key, limit);
+    if (!verdict.allowed) {
+      res.setHeader("retry-after", String(verdict.retryAfterSeconds));
+      res.status(429).json({ error: `Too many deliveries; retry in ${verdict.retryAfterSeconds}s. Batch events or raise INGEST_RATE_LIMIT_PER_MINUTE.` });
+      return;
+    }
+  }
   const integration = await repository.getIntegrationTarget(integrationId);
   if (!integration || integration.status !== "active") {
     res.status(404).json({ error: "Active connector not found." });
@@ -363,7 +448,9 @@ async function receive(req: RawRequest, res: Response) {
   const payload = object(req.body);
   const externalId = req.get("x-github-delivery") ?? req.get("x-request-id") ?? createHash("sha256").update(rawBody).digest("hex").slice(0, 32) ?? randomUUID();
   const eventName = req.get("x-github-event") ?? textValue(req.params.signal);
-  const batch: IngestionBatch = { externalId, signals: normalizePayload(integration.provider, payload, externalId, eventName, integration.healthySampleRate) };
+  const privacy = await workspaceService.privacyForOrganization(integration.organizationId);
+  const signals = normalizePayload(integration.provider, payload, externalId, eventName, integration.healthySampleRate);
+  const batch: IngestionBatch = { externalId, signals: privacy.captureRequestBodies ? signals : stripCapturedBodies(signals) };
   const queued = await ingestionQueue.enqueue(integration, batch);
   if (queued.duplicate && queued.job.status === "completed") {
     res.status(200).json({ status: "duplicate", acceptedSignals: 0, incidentIds: [], queueId: queued.job.id });

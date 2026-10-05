@@ -61,6 +61,35 @@ function testFor(event: IncidentEvent, symptom: IncidentEvent, events: IncidentE
         : range.before ? `Redeploy the last good commit ${range.before.slice(0, 7)} to ${environment} (or push a fix); the next successful deployment confirms recovery automatically.` : `Revert ${sha} and redeploy to ${environment}; the next successful deployment confirms recovery automatically.`
     };
   }
+  const change = event.metadata ?? {};
+  const changeType = typeof change.changeType === "string" ? change.changeType : undefined;
+  const key = typeof change.flagKey === "string" ? change.flagKey : undefined;
+  const previous = change.previousValue !== undefined && change.previousValue !== null ? String(change.previousValue) : undefined;
+  if (event.kind === "deploy" && changeType === "feature_flag") {
+    return {
+      nextTest: `Compare ${symptom.service} errors for requests with ${key ? `flag “${key}”` : "the flag"} on versus off since “${event.title}”.`,
+      safeAction: `Set ${key ? `“${key}”` : "the flag"} back to ${previous ?? "its previous value"}; no deploy is needed, so watch the error rate for a few minutes.`
+    };
+  }
+  if (event.kind === "deploy" && changeType === "config") {
+    return {
+      nextTest: `Check whether ${symptom.service} failures started right after ${key ? `“${key}”` : "the config"} changed${previous ? ` from ${previous}` : ""}, and whether only instances that reloaded config are failing.`,
+      safeAction: `Restore ${key ? `“${key}”` : "the setting"} to ${previous ?? "its previous value"} on one instance first, then everywhere if errors drop.`
+    };
+  }
+  if (event.kind === "deploy" && changeType === "migration") {
+    return {
+      nextTest: `Look for lock waits, slow queries, or missing columns in ${symptom.service} errors since “${event.title}”.`,
+      safeAction: "Pause any still-running migration and roll forward with a compatible fix; avoid an automatic schema rollback without a backup."
+    };
+  }
+  if (event.kind === "deploy" && typeof change.version === "string" && change.provider === "generic") {
+    const before = typeof change.previousVersion === "string" ? change.previousVersion : undefined;
+    return {
+      nextTest: `Split ${symptom.service} errors by version: is ${change.version} failing while ${before ?? "the previous version"} is healthy?`,
+      safeAction: `Roll ${symptom.service} back to ${before ?? "the previous version"} (or shift a small canary to it) and watch the error rate.`
+    };
+  }
   if (event.kind === "deploy") {
     return {
       nextTest: `Split ${symptom.service} failures by release version and compare the error distribution immediately before and after “${event.title}”.`,

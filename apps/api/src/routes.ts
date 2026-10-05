@@ -15,6 +15,7 @@ import { buildEvidenceBundle, buildInvestigationIntelligence } from "./intellige
 import { httpReplayService } from "./httpReplay.js";
 import { caseworkService } from "./casework.js";
 import { HttpError } from "./errors.js";
+import { alertEventTypes, alertService } from "./alerts.js";
 
 const severity = z.enum(["critical", "high", "medium", "low"]);
 const status = z.enum(["investigating", "identified", "monitoring", "resolved"]);
@@ -262,7 +263,10 @@ apiRouter.post("/incidents/:id/measurements",async(req,res)=>{
 
 apiRouter.post("/incidents/:id/lifecycle",async(req:AuthenticatedRequest,res)=>{
   const parsed=parseOrReply(lifecycleSchema,req.body);if("error" in parsed){res.status(400).json(parsed);return;}
-  try{const context=await workspaceService.context(userId(req));res.json(await caseworkService.transition(userId(req),String(req.params.id),actor(req),context.role,parsed.data));}
+  try{const context=await workspaceService.context(userId(req));const result=await caseworkService.transition(userId(req),String(req.params.id),actor(req),context.role,parsed.data);res.json(result);
+    const incident=await repository.getIncident(userId(req),String(req.params.id));
+    const type=parsed.data.action==="start_monitoring"?"monitoring":parsed.data.action==="resolve"?"resolved":"reopened";
+    if(incident)void alertService.dispatch(context.organizationId,{type,incident,detail:parsed.data.reason,actor:actor(req)});}
   catch(error){res.status(error instanceof HttpError?error.status:409).json({error:error instanceof Error?error.message:"Lifecycle transition failed."});}
 });
 
@@ -304,12 +308,17 @@ apiRouter.patch("/incidents/:id", async (req, res) => {
   res.json(incident);
 });
 
-apiRouter.delete("/incidents/:id", async (req, res) => {
-  const deleted = await repository.deleteIncident(userId(req), req.params.id);
-  if (!deleted) {
+// Deleting an incident destroys its evidence permanently, so only administrators can do it and the
+// audit entry keeps enough to know what was removed.
+apiRouter.delete("/incidents/:id", async (req: AuthenticatedRequest, res) => {
+  await workspaceService.assertRole(userId(req), ["admin"]);
+  const incident = await repository.getIncident(userId(req), String(req.params.id));
+  const deleted = incident ? await repository.deleteIncident(userId(req), incident.id) : false;
+  if (!incident || !deleted) {
     res.status(404).json({ error: "Incident not found." });
     return;
   }
+  await workspaceService.audit(userId(req), actor(req), "deleted investigation", "incident", incident.id, { code: incident.code, title: incident.title, service: incident.service, status: incident.status, eventCount: incident.events.length });
   res.status(204).send();
 });
 
@@ -365,6 +374,7 @@ apiRouter.get("/incidents/:id/http-replays", async (req, res) => {
 apiRouter.post("/incidents/:id/http-replays", async (req:AuthenticatedRequest,res)=>{
   const parsed=parseOrReply(httpReplaySchema,req.body);if("error" in parsed){res.status(400).json(parsed);return;}
   const incident=await repository.getIncident(userId(req),String(req.params.id));if(!incident){res.status(404).json({error:"Incident not found."});return;}
+  if(parsed.data.request.body&&!(await workspaceService.getPrivacy(userId(req))).captureRequestBodies){res.status(400).json({error:"Request body capture is off for this workspace. Remove the body, or ask an admin to enable “Capture request bodies” in Workspace → Privacy & AI."});return;}
   const value=await httpReplayService.create(userId(req),incident.id,incident.evidenceRevision??incident.updatedAt,{...parsed.data,request:{...parsed.data.request,headers:parsed.data.request.headers??{}}});
   await workspaceService.audit(userId(req),actor(req),"created bounded HTTP replay","http-replay",value.id,{incidentId:incident.id,evidenceRevision:value.evidenceRevision});
   res.status(201).json(value);
@@ -485,14 +495,34 @@ apiRouter.post("/integrations", async (req, res) => {
 
 apiRouter.patch("/integrations/:id/config",async(req,res)=>{const parsed=parseOrReply(integrationConfigSchema,req.body);if("error" in parsed){res.status(400).json(parsed);return;}const value=await repository.updateIntegrationConfig(userId(req),String(req.params.id),parsed.data);if(!value){res.status(404).json({error:"Connector not found."});return;}res.json(integrationView(req,value));});
 
-apiRouter.delete("/integrations/:id", async (req, res) => {
-  const deleted = await repository.deleteIntegration(userId(req), req.params.id);
-  if (!deleted) {
+apiRouter.delete("/integrations/:id", async (req: AuthenticatedRequest, res) => {
+  await workspaceService.assertRole(userId(req), ["admin"]);
+  const existing = (await repository.listIntegrations(userId(req))).find((item) => item.id === String(req.params.id));
+  const deleted = existing ? await repository.deleteIntegration(userId(req), existing.id) : false;
+  if (!existing || !deleted) {
     res.status(404).json({ error: "Connector not found." });
     return;
   }
+  await workspaceService.audit(userId(req), actor(req), "removed evidence source", "integration", existing.id, { name: existing.name, provider: existing.provider, signalCount: existing.signalCount });
   res.status(204).send();
 });
+
+const alertChannelSchema = z.object({
+  name: z.string().min(2).max(80), kind: z.enum(["slack", "discord", "webhook"]), url: z.string().url().max(2000),
+  events: z.array(z.enum(alertEventTypes as [string, ...string[]])).min(1).max(4).default(alertEventTypes), minSeverity: severity.default("low"), enabled: z.boolean().optional()
+});
+const alertChannelUpdateSchema = alertChannelSchema.pick({ events: true, minSeverity: true, enabled: true }).partial();
+apiRouter.get("/alert-channels", async (req, res) => res.json(await alertService.list(userId(req))));
+apiRouter.post("/alert-channels", async (req: AuthenticatedRequest, res) => {
+  const parsed = parseOrReply(alertChannelSchema, req.body); if ("error" in parsed) { res.status(400).json(parsed); return; }
+  res.status(201).json(await alertService.create(userId(req), actor(req), parsed.data as Parameters<typeof alertService.create>[2]));
+});
+apiRouter.patch("/alert-channels/:id", async (req: AuthenticatedRequest, res) => {
+  const parsed = parseOrReply(alertChannelUpdateSchema, req.body); if ("error" in parsed) { res.status(400).json(parsed); return; }
+  res.json(await alertService.update(userId(req), actor(req), String(req.params.id), parsed.data as Parameters<typeof alertService.update>[3]));
+});
+apiRouter.delete("/alert-channels/:id", async (req: AuthenticatedRequest, res) => { await alertService.remove(userId(req), actor(req), String(req.params.id)); res.status(204).send(); });
+apiRouter.post("/alert-channels/:id/test", async (req: AuthenticatedRequest, res) => res.json(await alertService.test(userId(req), actor(req), String(req.params.id))));
 
 apiRouter.post("/integrations/:id/test", async (req, res) => {
   const owned = (await repository.listIntegrations(userId(req))).find((integration) => integration.id === req.params.id);

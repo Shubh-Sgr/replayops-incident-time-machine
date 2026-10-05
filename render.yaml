@@ -10,7 +10,7 @@ services:
       - key: NODE_ENV
         value: production
       - key: ENABLE_DEMO_MODE
-        value: "true"
+        value: "false"
       - key: WEB_ORIGIN
         value: https://replayops-incident-time-machine.vercel.app
       - key: PUBLIC_API_URL

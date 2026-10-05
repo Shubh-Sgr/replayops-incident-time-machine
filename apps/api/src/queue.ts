@@ -2,7 +2,10 @@ import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import { config } from "./config.js";
 import { repository } from "./repository.js";
-import type { IngestionBatch, IngestionResult, IntegrationTarget, QueueJob } from "./types.js";
+import { alertService } from "./alerts.js";
+import { embedText } from "./ai.js";
+import { workspaceService } from "./workspace.js";
+import type { IncidentHeadline, IngestionBatch, IngestionResult, IntegrationTarget, QueueJob } from "./types.js";
 import { notFound } from "./errors.js";
 
 type Row = Record<string, unknown>;
@@ -27,6 +30,27 @@ const mapJob = (row: Row, integration?: IntegrationTarget): QueueJob => {
     nextAttemptAt: new Date(String(row.next_attempt_at)).toISOString(), createdAt: new Date(String(row.created_at)).toISOString(), updatedAt: new Date(String(row.updated_at)).toISOString()
   };
 };
+
+/**
+ * Work that follows a committed delivery but must never fail it: tell people about new or recovering
+ * incidents, and embed new incidents so "similar past incidents" search can find them later.
+ */
+export async function afterIngest(integration: IntegrationTarget, opened: IncidentHeadline[], movedToMonitoring: IncidentHeadline[]) {
+  if (!opened.length && !movedToMonitoring.length) return;
+  try {
+    const privacy = await workspaceService.privacyForOrganization(integration.organizationId);
+    await Promise.all([
+      ...opened.map((incident) => alertService.dispatch(integration.organizationId, { type: "opened", incident, detail: `Opened automatically from ${integration.name}.` })),
+      ...movedToMonitoring.map((incident) => alertService.dispatch(integration.organizationId, { type: "monitoring", incident, detail: `${integration.name} reported a recovery signal. Verify recovery, then resolve.` })),
+      ...opened.map(async (incident) => {
+        const embedding = await embedText(`${incident.title}\n${incident.summary}\n${incident.service}`, privacy.externalAiEnabled).catch(() => undefined);
+        if (embedding) await repository.setIncidentEmbedding(incident.id, embedding);
+      })
+    ]);
+  } catch (error) {
+    console.error("Post-ingest follow-up failed", error instanceof Error ? error.message : error);
+  }
+}
 
 const publicJob = ({ integration, batch, ...job }: StoredJob): QueueJob => ({
   ...job,
@@ -92,7 +116,9 @@ class DurableIngestionQueue {
       if (!this.pool) {
         const job = this.jobs.find((item) => item.id === jobId)!; job.status = "completed"; job.lastError = null; job.updatedAt = new Date().toISOString();
       } else await this.pool.query(`update ingestion_queue set status='completed',last_error=null,updated_at=now() where id=$1`, [jobId]);
-      return { ...result, queueId: jobId };
+      const { opened = [], movedToMonitoring = [], ...reply } = result;
+      void afterIngest(integration, opened, movedToMonitoring);
+      return { ...reply, queueId: jobId };
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown ingestion failure";
       if (!this.pool) {

@@ -229,12 +229,18 @@ export interface IngestionBatch {
   signals: NormalizedSignal[];
 }
 
+/** The fields an outbound alert or background job needs about an incident. */
+export interface IncidentHeadline { id: string; code: string; title: string; summary: string; service: string; environment?: string; severity: Severity; status: IncidentStatus }
+
 export interface IngestionResult {
   status: "accepted" | "queued" | "duplicate" | "rejected";
   acceptedSignals: number;
   incidentIds: string[];
   queueId?: string;
   reason?: string;
+  /** Internal only (stripped before the HTTP reply): incidents this delivery opened or moved to monitoring. */
+  opened?: IncidentHeadline[];
+  movedToMonitoring?: IncidentHeadline[];
 }
 
 export type WorkspaceRole = "admin" | "responder" | "viewer";

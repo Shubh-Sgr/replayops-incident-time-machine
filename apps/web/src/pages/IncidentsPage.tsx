@@ -6,6 +6,7 @@ import { IncidentEditor, type IncidentDraft } from "../components/IncidentEditor
 import { Skeleton } from "../components/Skeleton";
 import { SeverityMark, StatusMark } from "../components/StatusMark";
 import { api } from "../lib/api";
+import { useIsAdmin } from "../lib/useIsAdmin";
 import { formatRelative } from "../lib/utils";
 import type { Incident, IncidentStatus } from "../types";
 import { useAuth } from "../providers/AuthProvider";
@@ -21,6 +22,7 @@ export function IncidentsPage() {
   const [severity, setSeverity] = useState("all");
   const [editing, setEditing] = useState<Incident | null | undefined>(undefined);
   const queryClient = useQueryClient();
+  const isAdmin = useIsAdmin();
   const { user } = useAuth();
   const ownerName = useOwnerName();
   const incidents = useQuery({ queryKey: ["incidents"], queryFn: api.incidents });
@@ -88,7 +90,7 @@ export function IncidentsPage() {
                 <StatusMark value={incident.status} />
                 <span className="text-sm text-muted lg:text-ink">{ownerName(incident.owner)}</span>
                 <span className="text-xs text-muted">{formatRelative(incident.evidenceRevision ?? incident.updatedAt)}<span className="mt-1 block font-semibold text-info">{incident.status==="monitoring"?"Verify recovery":incident.events.length<2?"Acquire evidence":"Run next test"}</span></span>
-                <div className="flex gap-1 lg:justify-end"><button className="control-quiet !min-h-9 !px-2.5" onClick={() => setEditing(incident)} aria-label={`Edit ${incident.code}`}>Edit</button><button className="control-quiet !min-h-9 !px-2.5 text-danger hover:text-danger" onClick={() => { if (window.confirm(`Delete ${incident.code}? This also removes its timeline.`)) remove.mutate(incident.id); }} aria-label={`Delete ${incident.code}`}><Trash2 className="h-4 w-4" /></button></div>
+                <div className="flex gap-1 lg:justify-end"><button className="control-quiet !min-h-9 !px-2.5" onClick={() => setEditing(incident)} aria-label={`Edit ${incident.code}`}>Edit</button>{isAdmin && <button className="control-quiet !min-h-9 !px-2.5 text-danger hover:text-danger" onClick={() => { if (window.prompt(`This permanently deletes ${incident.code} and all of its evidence. Type ${incident.code} to confirm.`)?.trim() === incident.code) remove.mutate(incident.id); }} aria-label={`Delete ${incident.code}`}><Trash2 className="h-4 w-4" /></button>}</div>
               </div>
             ))}
             {!filtered.length && <div className="px-6 py-14 text-center"><p className="font-semibold">No incidents match this view</p><p className="mt-1 text-sm text-muted">Clear the filters or create a new incident record.</p></div>}

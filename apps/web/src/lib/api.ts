@@ -1,7 +1,7 @@
 import { supabase } from "./supabase";
 import { encodeDemoSessionToken } from "./demoSession";
 import { ApiError, describeApiError } from "./apiErrors";
-import type { ActionNotification, AssistantResponse, AuditEntry, CaseworkSnapshot, ChangeProposal, DashboardData, EvidenceBundle, HttpReplayExecution, HttpReplaySpec, HypothesisTest, HypothesisTestStatus, Incident, IncidentComment, IncidentDecision, IncidentDiagnosis, IncidentEvent, IncidentPolicy, IncidentPostmortem, IngestionResult, Integration, IntegrationProvider, InvestigationCheck, InvestigationCheckStatus, InvestigationIntelligence, MitigationRequest, PrivacySettings, ProposalReview, QueueJob, RecoveryCriterion, RecoveryVerification, ReplayConfig, ReplayResult, SearchResult, ServiceDefinition, TeamInvitation, TeamMember, TypedMeasurement, ValidationArtifact, WorkspaceContext, WorkspaceRole } from "../types";
+import type { ActionNotification, AlertChannel, AssistantResponse, AuditEntry, CaseworkSnapshot, ChangeProposal, DashboardData, EvidenceBundle, HttpReplayExecution, HttpReplaySpec, HypothesisTest, HypothesisTestStatus, Incident, IncidentComment, IncidentDecision, IncidentDiagnosis, IncidentEvent, IncidentPolicy, IncidentPostmortem, IngestionResult, Integration, IntegrationProvider, InvestigationCheck, InvestigationCheckStatus, InvestigationIntelligence, MitigationRequest, PrivacySettings, ProposalReview, QueueJob, RecoveryCriterion, RecoveryVerification, ReplayConfig, ReplayResult, SearchResult, ServiceDefinition, TeamInvitation, TeamMember, TypedMeasurement, ValidationArtifact, WorkspaceContext, WorkspaceRole } from "../types";
 
 const API_URL = (import.meta.env.VITE_API_URL ?? "http://localhost:8787/api").replace(/\/$/, "");
 
@@ -82,6 +82,11 @@ export const api = {
   deleteIntegration: (id: string) => request<void>(`/integrations/${id}`, { method: "DELETE" }),
   testIntegration: (id: string) => request<IngestionResult>(`/integrations/${id}/test`, { method: "POST" }),
   workspace: () => request<WorkspaceContext>("/workspace"),
+  alertChannels: () => request<AlertChannel[]>("/alert-channels"),
+  createAlertChannel: (input: Pick<AlertChannel, "name" | "kind" | "events" | "minSeverity"> & { url: string }) => request<AlertChannel>("/alert-channels", { method: "POST", body: JSON.stringify(input) }),
+  updateAlertChannel: (id: string, input: Partial<Pick<AlertChannel, "events" | "minSeverity" | "enabled">>) => request<AlertChannel>(`/alert-channels/${id}`, { method: "PATCH", body: JSON.stringify(input) }),
+  deleteAlertChannel: (id: string) => request<void>(`/alert-channels/${id}`, { method: "DELETE" }),
+  testAlertChannel: (id: string) => request<AlertChannel & { delivered: boolean }>(`/alert-channels/${id}/test`, { method: "POST" }),
   privacySettings:()=>request<PrivacySettings>("/privacy-settings"),
   updatePrivacySettings:(input:Omit<PrivacySettings,"updatedAt">)=>request<PrivacySettings>("/privacy-settings",{method:"PATCH",body:JSON.stringify(input)}),
   recordProductOutcome:(event:string,detail:Record<string,string|number|boolean|null>={})=>request<{recorded:boolean}>("/product-outcomes",{method:"POST",body:JSON.stringify({event,detail})}),
