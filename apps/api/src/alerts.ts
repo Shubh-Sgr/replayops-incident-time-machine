@@ -155,7 +155,32 @@ const publicView = ({ url, organizationId: _org, ...channel }: StoredChannel, re
   ...channel, target: maskUrl(url), ...(channel.kind === "webhook" && revealSecret ? { signingSecret: alertSigningSecret(channel.id) } : {})
 });
 
+/** A failed send; `retryable` marks network blips, timeouts, rate limits, and provider 5xx. */
+class DeliveryError extends Error {
+  constructor(message: string, readonly retryable: boolean) { super(message); this.name = "DeliveryError"; }
+}
+
+const networkCodes: Record<string, string> = {
+  ENOTFOUND: "Host not found. Check the URL.", EAI_AGAIN: "DNS lookup failed temporarily.", ECONNREFUSED: "Connection refused by the destination.",
+  ECONNRESET: "Connection reset by the destination.", ETIMEDOUT: "Connection timed out.", EPIPE: "Connection closed while sending.",
+  UND_ERR_CONNECT_TIMEOUT: "Connection timed out.", UND_ERR_SOCKET: "Connection closed unexpectedly.", CERT_HAS_EXPIRED: "The destination's TLS certificate has expired."
+};
+/** Turns undici's opaque "fetch failed" into the underlying reason, and says whether trying again could help. */
+export function describeDeliveryError(error: unknown): { message: string; retryable: boolean } {
+  if (error instanceof DeliveryError) return { message: error.message, retryable: error.retryable };
+  if (!(error instanceof Error)) return { message: "Delivery failed.", retryable: true };
+  if (error.name === "TimeoutError" || error.name === "AbortError") return { message: "Destination did not answer within 5 seconds.", retryable: true };
+  const cause = (error as { cause?: { code?: string; message?: string } }).cause;
+  const code = (error as { code?: string }).code ?? cause?.code;
+  if (code && networkCodes[code]) return { message: `${networkCodes[code]} (${code})`, retryable: code !== "ENOTFOUND" && code !== "CERT_HAS_EXPIRED" };
+  if (error.message === "fetch failed") return { message: `Network error: ${cause?.message ?? code ?? "the request did not complete"}.`, retryable: true };
+  return { message: error.message, retryable: false };
+}
+
 class AlertService {
+  /** Waits between attempts; a test can shorten them. */
+  retryDelaysMs = [1_000, 4_000];
+  private inFlight = new Set<Promise<unknown>>();
   private pool?: Pool;
   private memory: StoredChannel[] = [];
 
@@ -238,10 +263,22 @@ class AlertService {
       const channels = !this.pool
         ? this.memory.filter((item) => item.organizationId === organizationId)
         : ((await this.pool.query(`select * from alert_channels where organization_id=$1 and enabled`, [organizationId])).rows as Row[]).map(mapRow);
-      await Promise.all(channels.filter((channel) => channelWantsEvent(channel, event)).map((channel) => this.deliver(channel, event)));
+      await Promise.all(channels.filter((channel) => channelWantsEvent(channel, event)).map((channel) => this.track(this.deliver(channel, event))));
     } catch (error) {
       console.error("Alert dispatch failed", error instanceof Error ? error.message : error);
     }
+  }
+
+  /** Lets a shutting-down server finish sending alerts it has already started, up to a time limit. */
+  async drain(timeoutMs = 10_000) {
+    if (!this.inFlight.size) return;
+    await Promise.race([Promise.allSettled([...this.inFlight]), new Promise((resolve) => setTimeout(resolve, timeoutMs).unref())]);
+  }
+
+  private track<T>(promise: Promise<T>) {
+    this.inFlight.add(promise);
+    void promise.finally(() => this.inFlight.delete(promise)).catch(() => undefined);
+    return promise;
   }
 
   async dispatchForUser(userId: string, event: AlertEvent) {
@@ -264,13 +301,13 @@ class AlertService {
     if (channel.kind === "email") {
       const plain = plainAlert(event);
       const sent = await sendAlertEmail({ to: parseRecipients(channel.url), subject: plain.subject, text: plain.text, heading: plain.heading, lines: plain.lines, linkUrl: plain.link, linkLabel: "Open the investigation", idempotencyKey: `replayops-alert/${channel.id}/${event.incident.id}/${event.type}/${sentAt}` });
-      if (!sent.ok) throw new Error(sent.error);
+      if (!sent.ok) throw new DeliveryError(sent.error ?? "Email delivery failed.", /timed out|could not be reached|HTTP (429|5\d\d)/.test(sent.error ?? ""));
       return;
     }
     const url = validateChannelUrl(channel.kind, channel.url);
     // Re-check DNS at send time so a public name can't be pointed at an internal address later.
     const addresses = await lookup(url.hostname, { all: true });
-    if (addresses.some((item) => isPrivateAddress(item.address))) throw new Error("Destination resolves to a private network address.");
+    if (addresses.some((item) => isPrivateAddress(item.address))) throw new DeliveryError("Destination resolves to a private network address.", false);
     let body: string;
     const headers: Record<string, string> = { "user-agent": "ReplayOps-Alerts/1" };
     if (channel.kind === "ntfy") {
@@ -283,24 +320,27 @@ class AlertService {
       if (channel.kind === "webhook") { headers["x-replayops-event"] = event.type; headers["x-replayops-signature"] = signAlertBody(channel.id, body); }
     }
     const response = await fetch(url, { method: "POST", headers, body, redirect: "error", signal: AbortSignal.timeout(5000) });
-    if (!response.ok) throw new Error(`${response.status} ${(await response.text().catch(() => "")).slice(0, 160) || response.statusText}`.trim());
+    if (!response.ok) throw new DeliveryError(`${response.status} ${(await response.text().catch(() => "")).slice(0, 160) || response.statusText}`.trim(), response.status === 429 || response.status >= 500);
   }
 
   private async deliver(channel: StoredChannel, event: AlertEvent) {
     const sentAt = new Date().toISOString();
     let lastStatus: "delivered" | "failed" = "failed";
     let lastError: string | null = null;
-    try {
-      await this.send(channel, event, sentAt);
-      lastStatus = "delivered";
-    } catch (error) {
-      const code = (error as { code?: string }).code;
-      lastError = !(error instanceof Error) ? "Delivery failed."
-        : error.name === "TimeoutError" ? "Destination did not answer within 5 seconds."
-          : code === "ENOTFOUND" ? "Host not found. Check the URL."
-            : code === "ECONNREFUSED" ? "Connection refused by the destination."
-              : error.message;
+    for (let attempt = 0; attempt <= this.retryDelaysMs.length; attempt += 1) {
+      try {
+        await this.send(channel, event, sentAt);
+        lastStatus = "delivered";
+        lastError = null;
+        break;
+      } catch (error) {
+        const described = describeDeliveryError(error);
+        lastError = attempt ? `${described.message} (after ${attempt + 1} attempts)` : described.message;
+        if (!described.retryable || attempt === this.retryDelaysMs.length) break;
+        await new Promise((resolve) => setTimeout(resolve, this.retryDelaysMs[attempt]));
+      }
     }
+    if (lastStatus === "failed") console.warn(`Alert to ${channel.kind} destination ${channel.id} failed: ${lastError}`);
     if (!this.pool) Object.assign(channel, { lastStatus, lastError, lastSentAt: sentAt });
     else await this.pool.query(`update alert_channels set last_status=$2,last_error=$3,last_sent_at=$4 where id=$1`, [channel.id, lastStatus, lastError, sentAt]).catch(() => undefined);
     return { lastStatus, lastError, lastSentAt: sentAt };

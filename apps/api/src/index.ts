@@ -78,8 +78,14 @@ if (config.databaseUrl) {
   try { await runMigrations(migrationPool); } finally { await migrationPool.end(); }
 }
 if (config.demoMode && config.databaseUrl) console.warn("ENABLE_DEMO_MODE is ignored for sign-in because DATABASE_URL is set; demo tokens only work with the in-memory API.");
-app.listen(config.port, "0.0.0.0", () => {
+const server = app.listen(config.port, "0.0.0.0", () => {
   console.log(`ReplayOps API listening on http://localhost:${config.port}`);
+});
+
+// Deploys stop the old instance with SIGTERM; finish alerts already in flight before exiting.
+process.once("SIGTERM", () => {
+  server.close();
+  void alertService.drain(10_000).finally(() => process.exit(0));
 });
 
 const queueTimer = setInterval(() => void ingestionQueue.processReady(), 30_000);

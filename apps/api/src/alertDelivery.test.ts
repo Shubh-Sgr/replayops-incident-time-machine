@@ -4,7 +4,7 @@ vi.mock("node:dns/promises", () => ({
   lookup: vi.fn(async (host: string) => [{ address: host === "rebind.example.com" ? "10.0.0.5" : "93.184.216.34", family: 4 }])
 }));
 
-const { alertService, ntfyRequest, parseRecipients, signAlertBody } = await import("./alerts.js");
+const { alertService, describeDeliveryError, ntfyRequest, parseRecipients, signAlertBody } = await import("./alerts.js");
 const { sendAlertEmail } = await import("./mailer.js");
 const admin = "00000000-0000-4000-8000-000000000001";
 const incident = { id: "inc-7", code: "AUTO-7", title: "Payments failing", service: "payments-api", environment: "production", severity: "critical" as const, status: "investigating" };
@@ -71,6 +71,50 @@ describe("alert delivery", () => {
     expect(channel.target).toBe("oncall@example.com, lead@example.com");
     const result = await alertService.test(admin, "operator@replayops.dev", channel.id);
     expect(result.lastError).toMatch(/RESEND_API_KEY/);
+    await alertService.remove(admin, "operator@replayops.dev", channel.id);
+  });
+});
+
+describe("delivery retries", () => {
+  const networkError = (code: string) => Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("socket hang up"), { code }) });
+
+  it("explains undici's opaque fetch failures", () => {
+    expect(describeDeliveryError(networkError("ECONNRESET"))).toEqual({ message: "Connection reset by the destination. (ECONNRESET)", retryable: true });
+    expect(describeDeliveryError(new TypeError("fetch failed"))).toEqual({ message: "Network error: the request did not complete.", retryable: true });
+    expect(describeDeliveryError(networkError("ENOTFOUND")).retryable).toBe(false);
+  });
+
+  it("retries a network blip and records the delivery", async () => {
+    alertService.retryDelaysMs = [0, 0];
+    let calls = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => { calls += 1; if (calls < 3) throw networkError("ECONNRESET"); return new Response("{}", { status: 200 }); }));
+    const channel = await alertService.create(admin, "operator@replayops.dev", { name: "Flaky phone", kind: "ntfy", url: "https://ntfy.sh/replayops-flaky-1", events: ["resolved"], minSeverity: "low" });
+    await alertService.dispatch("demo-organization", { type: "resolved", incident });
+    expect(calls).toBe(3);
+    expect((await alertService.list(admin)).find((item) => item.id === channel.id)).toMatchObject({ lastStatus: "delivered", lastError: null });
+    await alertService.remove(admin, "operator@replayops.dev", channel.id);
+  });
+
+  it("does not retry a destination that rejects the request", async () => {
+    alertService.retryDelaysMs = [0, 0];
+    const fetchSpy = vi.fn(async () => new Response("bad topic", { status: 400 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const channel = await alertService.create(admin, "operator@replayops.dev", { name: "Bad", kind: "ntfy", url: "https://ntfy.sh/replayops-bad-1", events: ["resolved"], minSeverity: "low" });
+    await alertService.dispatch("demo-organization", { type: "resolved", incident });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect((await alertService.list(admin)).find((item) => item.id === channel.id)?.lastError).toBe("400 bad topic");
+    await alertService.remove(admin, "operator@replayops.dev", channel.id);
+  });
+
+  it("drains alerts already in flight before shutdown", async () => {
+    alertService.retryDelaysMs = [0, 0];
+    let finished = false;
+    vi.stubGlobal("fetch", vi.fn(async () => { await new Promise((resolve) => setTimeout(resolve, 30)); finished = true; return new Response("{}", { status: 200 }); }));
+    const channel = await alertService.create(admin, "operator@replayops.dev", { name: "Slow", kind: "ntfy", url: "https://ntfy.sh/replayops-slow-1", events: ["opened"], minSeverity: "low" });
+    void alertService.dispatch("demo-organization", { type: "opened", incident });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await alertService.drain(1_000);
+    expect(finished).toBe(true);
     await alertService.remove(admin, "operator@replayops.dev", channel.id);
   });
 });
