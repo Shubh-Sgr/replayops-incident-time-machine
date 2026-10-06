@@ -1,4 +1,4 @@
-import { evaluateGitHubDeliveryRecovery } from "./deliveryRecovery.js";
+import { evaluateAutomaticRecovery } from "./deliveryRecovery.js";
 import { frameIsFile, stackFiles } from "./exceptions.js";
 import type { DiagnosticHypothesis, HypothesisTest, Incident, IncidentDiagnosis, IncidentEvent, SignalDelta } from "./types.js";
 
@@ -402,11 +402,11 @@ export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = [
   const contested = orderedHypotheses.find((hypothesis) => hypothesis.state === "contested");
   const activeTest = tests.find((test) => ["planned", "running"].includes(test.status));
   const evidenceStatus: IncidentDiagnosis["evidenceStatus"] = evidenceCompleteness < 35 ? "insufficient" : evidenceCompleteness < 75 ? "partial" : "substantial";
-  const deliveryRecovery = incident.status === "resolved" ? null : evaluateGitHubDeliveryRecovery(incident);
-  const nextAction = deliveryRecovery?.state === "verified"
-    ? { label: "Recovered: resolve it", reason: deliveryRecovery.reason.replace(/ This verifies delivery, not runtime health\.$/, ""), href: "?area=validate" }
+  const automaticRecovery = incident.status === "resolved" ? null : evaluateAutomaticRecovery(incident);
+  const nextAction = automaticRecovery?.state === "verified"
+    ? { label: "Recovered: resolve it", reason: automaticRecovery.reason.replace(/ This verifies delivery, not runtime health\.$/, ""), href: "?area=validate" }
     : incident.status === "monitoring"
-    ? { label: "Verify recovery, then resolve", reason: "The incident is in Monitoring. Confirm the recovery check passes in Fix & verify, then resolve it.", href: "?area=validate" }
+    ? { label: "Verify recovery, then resolve", reason: automaticRecovery?.reason ?? "The incident is in Monitoring. Confirm the recovery check passes in Fix & verify, then resolve it.", href: "?area=validate" }
     : incident.status === "resolved"
       ? { label: "Write the learning record", reason: "The incident is resolved. Capture what was learned and any follow-ups in Activity & handoff.", href: "?area=handoff" }
     : activeTest

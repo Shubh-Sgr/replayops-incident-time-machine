@@ -64,6 +64,9 @@ export function FixAndVerify({ incident, advancedReplay }: { incident: Incident;
   const delivery = snapshot?.caseKind === "delivery";
   const recovery = snapshot?.recovery;
   const verified = recovery?.state === "verified";
+  // Grafana/Alertmanager alerts confirm recovery themselves unless someone set their own check.
+  const fromAlerts = !delivery && !criterion && recovery?.automatic === "alerts";
+  const [ownCheck, setOwnCheck] = useState(false);
   const canApprove = workspace.data?.role === "admin" && review?.status === "pending" && review.requestedBy.toLowerCase() !== user?.email.toLowerCase();
 
   const saveFix = useMutation({ mutationFn: () => api.createProposal(incident.id, { title: fix.value.title, change: fix.value.change, rollbackPlan: fix.value.rollbackPlan, target: { service: fix.value.targetService, environment: fix.value.targetEnvironment, versionIdentity: fix.value.versionIdentity } }), onSuccess: () => { fix.clear(); setEditingFix(false); setDescribingFix(false); refresh(); } });
@@ -108,7 +111,7 @@ export function FixAndVerify({ incident, advancedReplay }: { incident: Incident;
     : approvalBlocks && !review ? { text: "Ask a teammate to approve the fix.", tone: "info" }
     : approvalBlocks && review?.status === "pending" ? { text: canApprove ? "A teammate asked you to approve this fix. Review it below." : "Waiting for another admin to approve the fix. Share this page with them.", tone: "warning" }
     : approvalBlocks && review?.status === "rejected" ? { text: "The fix was rejected. Update it below; that creates a new version to approve.", tone: "warning" }
-    : !verified && delivery ? { text: recovery.reason, tone: "info" }
+    : !verified && (delivery || fromAlerts) ? { text: recovery.reason, tone: "info" }
     : !verified && !criterion ? { text: "Pick the one number that tells you it's fixed (for example error rate ≤ 1%).", tone: "info" }
     : !verified ? { text: `${recovery.reason} Record another reading below.`, tone: "info" }
     : !monitoring ? { text: "Recovery is confirmed. Add a one-line reason and resolve.", tone: "success" }
@@ -153,7 +156,7 @@ export function FixAndVerify({ incident, advancedReplay }: { incident: Incident;
       </form>}
     </Step>
 
-    <Step number={2} title="Confirm it's fixed" state={confirmState} summary={delivery ? "Checked automatically from GitHub: a successful deploy or workflow run after the failure confirms recovery. A newer failure cancels it." : "Pick the one number that shows users are OK again, then record a reading or two after the fix is live. Recovery is confirmed when enough recent readings meet the target."}>
+    <Step number={2} title="Confirm it's fixed" state={confirmState} summary={delivery ? "Checked automatically from GitHub: a successful deploy or workflow run after the failure confirms recovery. A newer failure cancels it." : fromAlerts ? "Checked automatically from your alerts: when every Grafana alert in this incident reports resolved and stays quiet for 5 minutes, recovery is confirmed. New errors or the alert firing again cancel it." : "Pick the one number that shows users are OK again, then record a reading or two after the fix is live. Recovery is confirmed when enough recent readings meet the target."}>
       <div className={cn("flex items-start gap-3 rounded-control p-4", verified ? "bg-success/10" : recovery.state === "failed" ? "bg-danger/10" : "bg-elevated")}>
         {verified ? <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-success" /> : recovery.state === "failed" ? <TriangleAlert className="mt-0.5 h-5 w-5 shrink-0 text-danger" /> : delivery ? <GitBranch className="mt-0.5 h-5 w-5 shrink-0 text-info" /> : <Clock3 className="mt-0.5 h-5 w-5 shrink-0 text-muted" />}
         <div><p className="text-sm font-semibold">{verified ? "Recovery confirmed" : recovery.state === "failed" ? "Still failing" : recovery.state === "stale" ? "Reading too old" : "Not confirmed yet"}</p><p className="mt-1 text-sm leading-6 text-muted">{recovery.reason}</p></div>
@@ -169,7 +172,8 @@ export function FixAndVerify({ incident, advancedReplay }: { incident: Incident;
         <Saving pending={saveReading.isPending} error={saveReading.error} />
         {snapshot.measurements.filter((item) => item.criterionId === criterion.id).length > 0 && <ol className="mt-3 divide-y divide-line rounded-control bg-elevated">{snapshot.measurements.filter((item) => item.criterionId === criterion.id).map((item) => <li key={item.id} className="flex items-center justify-between gap-3 px-4 py-2.5 text-sm"><span><strong className="measurement-number">{item.value ?? "—"} {item.unit}</strong>{item.note && <span className="text-muted"> · {item.note}</span>}</span><span className="flex items-center gap-2 text-xs text-faint">{formatRelative(item.observedAt)}<span className={cn("rounded-full px-2 py-0.5 font-semibold", passes(criterion, item.value) ? "bg-success/12 text-success" : "bg-danger/10 text-danger")}>{passes(criterion, item.value) ? "healthy" : "not yet"}</span></span></li>)}</ol>}
       </div>}
-      {!delivery && (!criterion || editingCheck) && !resolved && <form className="mt-4 grid gap-3 lg:max-w-3xl" onSubmit={(event) => { event.preventDefault(); saveCheck.mutate(); }}>
+      {fromAlerts && !resolved && !ownCheck && <button className="control-quiet mt-3 !px-0 text-xs" onClick={() => setOwnCheck(true)}>Track a number yourself instead</button>}
+      {!delivery && (!criterion || editingCheck) && !resolved && (!fromAlerts || ownCheck) && <form className="mt-4 grid gap-3 lg:max-w-3xl" onSubmit={(event) => { event.preventDefault(); saveCheck.mutate(); }}>
         <div><p className="text-sm font-semibold">What number shows it's fixed?</p><div className="mt-2 flex flex-wrap gap-2">{presets.map((preset) => <button type="button" key={preset.name} className={cn("rounded-full px-3 py-1.5 text-xs font-semibold", check.value.name === preset.name ? "bg-ink text-panel" : "bg-elevated text-muted hover:text-ink")} onClick={() => check.setValue((value) => ({ ...value, ...preset }))}>{preset.name}</button>)}</div></div>
         <div className="grid gap-3 sm:grid-cols-[1fr_120px_110px_100px]">
           <label className="text-sm font-semibold">Name<input className="field mt-1.5" value={check.value.name} onChange={(event) => check.setValue((value) => ({ ...value, name: event.target.value }))} required minLength={3} /></label>

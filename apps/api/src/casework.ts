@@ -46,6 +46,8 @@ export interface TypedMeasurement {
 export interface RecoveryEvaluation {
   state: "verified" | "failed" | "insufficient" | "stale";
   reason: string; criterionVersion: number | null; evaluatedAt: string; supportingMeasurementIds: string[];
+  /** Set when the source system itself confirms recovery: GitHub runs/deploys, or monitoring alerts resolving. */
+  automatic?: "github" | "alerts";
 }
 
 export interface CaseworkSnapshot {
@@ -92,7 +94,7 @@ export function evaluateDeliveryRecovery(criterion: RecoveryCriterion | undefine
 }
 
 export { evaluateGitHubDeliveryRecovery } from "./deliveryRecovery.js";
-import { evaluateGitHubDeliveryRecovery } from "./deliveryRecovery.js";
+import { evaluateAlertRecovery, evaluateGitHubDeliveryRecovery } from "./deliveryRecovery.js";
 
 const lifecycleAuditAction = { resolve:"resolved incident after fresh recovery verification", start_monitoring:"started recovery monitoring", reopen:"reopened incident" } as const;
 
@@ -154,7 +156,7 @@ export class CaseworkService {
     if(!this.pool){checks=clone(this.memory.checks.filter(x=>x.incidentId===incident.id));proposals=clone(this.memory.proposals.filter(x=>x.incidentId===incident.id));validations=clone(this.memory.validations.filter(x=>x.incidentId===incident.id));reviews=clone(this.memory.reviews.filter(x=>x.incidentId===incident.id));criteria=clone(this.memory.criteria.filter(x=>x.incidentId===incident.id));measurements=clone(this.memory.measurements.filter(x=>x.incidentId===incident.id));reviewedRevision=this.memory.cursors.get(`${userId}:${incident.id}`)??null;}
     else {const org=await this.org(userId);const [a,b,c,g,d,e,f]=await Promise.all([this.pool.query("select * from investigation_checks where organization_id=$1 and incident_id=$2 order by updated_at desc",[org,incident.id]),this.pool.query("select * from change_proposals where organization_id=$1 and incident_id=$2 order by version desc",[org,incident.id]),this.pool.query("select * from validation_artifacts where organization_id=$1 and incident_id=$2 order by created_at desc",[org,incident.id]),this.pool.query("select * from proposal_reviews where organization_id=$1 and incident_id=$2 order by created_at desc",[org,incident.id]),this.pool.query("select * from recovery_criteria where organization_id=$1 and incident_id=$2 order by version desc",[org,incident.id]),this.pool.query("select * from typed_measurements where organization_id=$1 and incident_id=$2 order by observed_at desc",[org,incident.id]),this.pool.query("select evidence_revision from evidence_review_cursors where organization_id=$1 and incident_id=$2 and user_id=$3",[org,incident.id,userId])]);checks=a.rows.map((x)=>this.mapCheck(x));proposals=b.rows.map((x)=>this.mapProposal(x));validations=c.rows.map((x)=>this.mapValidation(x));reviews=g.rows.map((x)=>this.mapReview(x));criteria=d.rows.map((x)=>this.mapCriterion(x));measurements=e.rows.map((x)=>this.mapMeasurement(x));reviewedRevision=f.rows[0]?iso(f.rows[0].evidence_revision):null;}
     const currentRevision=incident.evidenceRevision??incident.updatedAt;const changed=Boolean(reviewedRevision&&reviewedRevision!==currentRevision);const affectedCheckIds=changed?checks.filter((x)=>x.evidenceRevision!==currentRevision).map((x)=>x.id):[];for(const check of checks)if(affectedCheckIds.includes(check.id))check.conclusionState="needs_recheck";
-    const latestCriterion=criteria[0];const kind=latestCriterion?.kind??this.caseKind(incident);const recovery=kind==="delivery"?(latestCriterion?evaluateDeliveryRecovery(latestCriterion,validations):evaluateGitHubDeliveryRecovery(incident)??evaluateDeliveryRecovery(latestCriterion,validations)):evaluateRuntimeRecovery(latestCriterion,measurements);
+    const latestCriterion=criteria[0];const kind=latestCriterion?.kind??this.caseKind(incident);const recovery=kind==="delivery"?(latestCriterion?evaluateDeliveryRecovery(latestCriterion,validations):evaluateGitHubDeliveryRecovery(incident)??evaluateDeliveryRecovery(latestCriterion,validations)):latestCriterion?evaluateRuntimeRecovery(latestCriterion,measurements):evaluateAlertRecovery(incident)??evaluateRuntimeRecovery(latestCriterion,measurements);
     return {caseKind:this.caseKind(incident),checks,proposals,validations,reviews,criteria,measurements,recovery,evidenceReview:{reviewedRevision,currentRevision,changed,affectedCheckIds}};
   }
   suggestions(incident:Incident){if(this.caseKind(incident)==="delivery")return deliveryTemplates.map((item)=>({...item,applicable:true,blockedReason:null}));const missing=incident.events.length<2;return templates.map((item,index)=>({...item,applicable:index===1||index===3||(!missing&&index<3),blockedReason:missing&&index!==1&&index!==3?"More source evidence is required.":null}));}
