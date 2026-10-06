@@ -314,6 +314,8 @@ export class MemoryRepository implements Repository {
         : undefined;
       const lane = deliveryLaneOf(signal);
       if (lane) incident ??= this.incidents.find((item) => item.status !== "resolved" && item.events.some((event) => deliveryLaneOf(event) === lane));
+      const commit = githubCommitOf(signal);
+      if (!placement.laneOnly && commit && signal.kind === "alert") incident ??= this.incidents.find((item) => item.status !== "resolved" && item.events.some((event) => event.kind === "alert" && githubCommitOf(event) === commit));
       const fingerprint = exceptionFingerprintOf(signal);
       if (!placement.laneOnly && fingerprint) incident ??= this.incidents.find((item) => item.status !== "resolved" && (item.environment ?? "unknown") === (signal.environment ?? "unknown") && item.events.some((event) => exceptionFingerprintOf(event) === fingerprint));
       if (!placement.laneOnly) incident ??= this.incidents.find((item) => item.status !== "resolved" && sameBranchLane(item.events, signal) && relatedServices.includes(item.service) && (item.environment ?? "unknown") === (signal.environment ?? "unknown") && Math.abs(new Date(item.startedAt).getTime() - new Date(signal.timestamp).getTime()) <= policy.groupingWindowMinutes * 60_000);
@@ -415,6 +417,11 @@ const summarizeSightings = (rows: Array<{ fingerprint: string; environment: stri
     history.set(row.fingerprint, list);
   }
   return history;
+};
+/** One failed deploy emits a failed deployment and a failed workflow run for the same commit: they are one problem. */
+const githubCommitOf = (item: { metadata?: Record<string, unknown> }) => {
+  const meta = item.metadata ?? {};
+  return meta.provider === "github" && ["workflow_run", "deployment_status"].includes(String(meta.eventType)) && typeof meta.repository === "string" && typeof meta.sha === "string" && meta.sha ? `${meta.repository.toLowerCase()}@${meta.sha}` : undefined;
 };
 const exceptionFingerprintOf = (item: { metadata?: Record<string, unknown> }) => {
   const value = (item.metadata?.exception as { fingerprint?: unknown } | undefined)?.fingerprint;
@@ -1150,6 +1157,9 @@ class PostgresRepository implements Repository {
            where i.organization_id = $1 and i.status <> 'resolved'
            and (
              ($8::text is not null and exists (select 1 from ingestion_signals b where b.incident_id = i.id and b.metadata->>'provider' = 'github' and ${DELIVERY_LANE_SQL} = $8))
+             -- A failed deployment and the failed workflow run for the same commit are one problem.
+             or (not $9::boolean and $11::text is not null and exists (select 1 from ingestion_signals b where b.incident_id = i.id and b.kind = 'alert'
+               and b.metadata->>'provider' = 'github' and lower(b.metadata->>'repository') || '@' || (b.metadata->>'sha') = $11))
              -- The same error, wherever and whenever it shows up again, is the same problem while the incident is open.
              or (not $9::boolean and $10::text is not null and coalesce(i.environment,'unknown')=coalesce($6::text,'unknown')
                and exists (select 1 from ingestion_signals b where b.incident_id = i.id and b.metadata->'exception'->>'fingerprint' = $10))
@@ -1172,7 +1182,7 @@ class PostgresRepository implements Repository {
                select 1 from ingestion_signals prior where prior.incident_id = i.id and prior.correlation_key = $2
              ) then 1 else 2 end,
              i.started_at desc limit 1`,
-          [integration.organizationId, signal.correlationKey ?? null, relatedServices, signal.timestamp, policy.groupingWindowMinutes, signal.environment ?? "unknown", branchOf(signal) ?? null, deliveryLaneOf(signal) ?? null, Boolean(placement.laneOnly), exceptionFingerprintOf(signal) ?? null]
+          [integration.organizationId, signal.correlationKey ?? null, relatedServices, signal.timestamp, policy.groupingWindowMinutes, signal.environment ?? "unknown", branchOf(signal) ?? null, deliveryLaneOf(signal) ?? null, Boolean(placement.laneOnly), exceptionFingerprintOf(signal) ?? null, signal.kind === "alert" ? githubCommitOf(signal) ?? null : null]
         );
         let incidentId = match.rows[0] ? String((match.rows[0] as Row).id) : undefined;
 

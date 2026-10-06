@@ -213,6 +213,14 @@ describe("real-world scenarios", () => {
     expect(candidates.find((candidate) => candidate.title.startsWith("Feature flag"))!.reason).toContain("was already seen in staging before this change");
   });
 
+  it("15. a failed deploy job (failed deployment + failed workflow run, same commit) is one incident", async () => {
+    const w = world();
+    const deploy = await w.github.deploy("acme/ledger", "production", "e5", "failure", 20);
+    const run = await w.github.ci("acme/ledger", "main", "e5", "failure", 20.05);
+    expect(run.opened).toEqual([]);
+    expect(run.incidentIds).toEqual([deploy.opened![0]!.id]);
+  });
+
   it("12. with no change recorded, the diagnosis says to look at dependencies, traffic or data", async () => {
     const w = world();
     const incident = await w.incident((await w.alert("ledger-api", "production", 5)).opened![0]!.id);
