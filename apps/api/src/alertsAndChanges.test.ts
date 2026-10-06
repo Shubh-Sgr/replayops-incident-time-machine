@@ -3,6 +3,7 @@ import { channelWantsEvent, formatAlert, isPrivateAddress, signAlertBody, valida
 import { semanticAuditForRequest } from "./auditEvents.js";
 import { diagnoseIncident } from "./diagnosis.js";
 import { allowIngestRequest, normalizePayload, stripCapturedBodies } from "./ingestion.js";
+import { extractDelivery } from "./changes.js";
 import { MemoryRepository } from "./repository.js";
 import type { Incident, IntegrationTarget } from "./types.js";
 
@@ -55,15 +56,15 @@ describe("alert destinations", () => {
 });
 
 describe("change events", () => {
-  it("normalizes deploys, flag flips, and config edits from any tool as change suspects", () => {
-    const [deploy, flag, config] = normalizePayload("generic", { events: [
+  it("sends deploys, flag flips, and config edits to the change log instead of the signal stream", () => {
+    const payload = { events: [
       { kind: "change", changeType: "deploy", service: "checkout-api", version: "v1.4.2", previousVersion: "v1.4.1", sha: "abc1234", timestamp: "2026-10-05T10:00:00Z" },
       { kind: "feature_flag", service: "checkout-api", flag: "new-checkout", from: false, to: true, timestamp: "2026-10-05T10:01:00Z" },
       { changeType: "configuration", service: "checkout-api", key: "DB_POOL_SIZE", previousValue: 20, newValue: 5 }
-    ] }, "d1");
-    expect(deploy).toMatchObject({ kind: "deploy", title: "Deployed checkout-api v1.4.2", impactScore: 40, metadata: { changeType: "deploy", version: "v1.4.2", previousVersion: "v1.4.1", sha: "abc1234" } });
-    expect(flag).toMatchObject({ kind: "deploy", title: "Feature flag new-checkout set to true on checkout-api", metadata: { changeType: "feature_flag", flagKey: "new-checkout", previousValue: false, newValue: true } });
-    expect(config).toMatchObject({ kind: "deploy", metadata: { changeType: "config", flagKey: "DB_POOL_SIZE", previousValue: 20 } });
+    ] };
+    expect(normalizePayload("generic", payload, "d1")).toEqual([]);
+    const { changes } = extractDelivery("generic", payload, "", "d1");
+    expect(changes.map((change) => [change.kind, change.service, change.version ?? change.metadata.flagKey])).toEqual([["deploy", "checkout-api", "v1.4.2"], ["feature_flag", "checkout-api", "new-checkout"], ["config", "checkout-api", "DB_POOL_SIZE"]]);
   });
 
   it("keeps an alert an alert even when it mentions a change type", () => {

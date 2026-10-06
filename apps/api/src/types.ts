@@ -230,6 +230,8 @@ export interface NormalizedSignal {
 export interface IngestionBatch {
   externalId: string;
   signals: NormalizedSignal[];
+  /** Commits and changes in this delivery, recorded in the change log. */
+  delivery?: import("./changes.js").ExtractedDelivery;
 }
 
 /** The fields an outbound alert or background job needs about an incident. */
@@ -238,6 +240,8 @@ export interface IncidentHeadline { id: string; code: string; title: string; sum
 export interface IngestionResult {
   status: "accepted" | "queued" | "duplicate" | "rejected";
   acceptedSignals: number;
+  /** Deploys, flags, config and other changes recorded in the change log by this delivery. */
+  acceptedChanges?: number;
   incidentIds: string[];
   queueId?: string;
   reason?: string;
@@ -263,6 +267,10 @@ export interface ServiceDefinition {
   tier: "critical" | "standard" | "internal";
   repositoryUrl?: string | null;
   runbookUrl?: string | null;
+  /** GitHub repositories ("owner/name") whose changes belong to this service. */
+  repositories: string[];
+  /** Monorepo path prefixes owned by this service; empty means the whole repository. */
+  paths: string[];
   dependencies: string[];
   createdAt: string;
   updatedAt: string;
@@ -273,6 +281,10 @@ export interface IncidentPolicy {
   groupingWindowMinutes: number;
   suppressLowSeverity: boolean;
   maintenanceMode: boolean;
+  /** Workspace environments with aliases and tiers; only tiers that open incidents can page anyone. */
+  environments: import("./release.js").EnvironmentConfig[];
+  /** Branches whose CI or deploy failures are real delivery incidents (feature branches never page). */
+  releaseBranches: string[];
   updatedAt: string;
 }
 

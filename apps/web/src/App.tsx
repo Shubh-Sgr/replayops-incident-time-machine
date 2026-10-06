@@ -7,6 +7,7 @@ const DashboardPage = lazy(() => import("./pages/DashboardPage").then((module) =
 const IncidentWorkbenchPage = lazy(() => import("./pages/IncidentWorkbenchPage").then((module) => ({ default: module.IncidentWorkbenchPage })));
 const IncidentsPage = lazy(() => import("./pages/IncidentsPage").then((module) => ({ default: module.IncidentsPage })));
 const IntegrationsPage = lazy(() => import("./pages/IntegrationsPage").then((module) => ({ default: module.IntegrationsPage })));
+const ReleasesPage = lazy(() => import("./pages/ReleasesPage").then((module) => ({ default: module.ReleasesPage })));
 const WorkspacePage = lazy(() => import("./pages/WorkspacePage").then((module) => ({ default: module.WorkspacePage })));
 const AcceptInvitePage = lazy(() => import("./pages/AcceptInvitePage").then((module) => ({ default: module.AcceptInvitePage })));
 const LoginPage = lazy(() => import("./pages/LoginPage").then((module) => ({ default: module.LoginPage })));
@@ -33,6 +34,7 @@ export function App() {
           <Route path="incidents" element={<IncidentsPage />} />
           <Route path="incidents/:id" element={<IncidentWorkbenchPage />} />
           <Route path="integrations" element={<IntegrationsPage />} />
+          <Route path="releases" element={<ReleasesPage />} />
           <Route path="workspace" element={<WorkspacePage />} />
           <Route path="accept-invite" element={<AcceptInvitePage />} />
         </Route>

@@ -10,6 +10,7 @@ import { Linkified } from "../components/Linkified";
 import { ResponseConsole } from "../components/ResponseConsole";
 import { DebuggingInsights } from "../components/DebuggingInsights";
 import { ErrorGroups } from "../components/ErrorGroups";
+import { WhatChanged } from "../components/WhatChanged";
 import { Skeleton } from "../components/Skeleton";
 import { SeverityMark, StatusMark } from "../components/StatusMark";
 import { api } from "../lib/api";
@@ -103,6 +104,7 @@ export function IncidentWorkbenchPage() {
 
     <EvidenceLedger incident={value} selectedEventId={selectedEventId} visibleWindow={timelineWindow} updating={updateEvidenceState.isPending} onSelect={(eventId) => selectEvent(eventId, true)} onEdit={(event) => setEditingEvent(event)} onMove={(event) => setMovingEvent(event)} onEvidenceState={(event, state) => updateEvidenceState.mutate({ event, state })} />
 
+    <div id="what-changed" className="scroll-mt-28"><WhatChanged incident={value} /></div>
     <div id="error-groups" className="scroll-mt-28 empty:hidden"><ErrorGroups incident={value} onSelectEvent={(eventId) => selectEvent(eventId, true)} /></div>
     <div id="debugging-insights" className="scroll-mt-28"><DebuggingInsights incident={value} onSelectEvent={(eventId) => selectEvent(eventId, true)} /></div>
     <ResponseConsole incident={value} />

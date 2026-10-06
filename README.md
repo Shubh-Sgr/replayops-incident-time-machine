@@ -44,6 +44,19 @@ No paid queue or connector platform is required. The receiver runs inside the ex
 
 Every authenticated delivery is now persisted to a Supabase-backed `ingestion_queue` before normalization. Temporary failures use exponential backoff, five failed attempts enter dead-letter review, and operators can retry jobs from **Workspace → Delivery queue**. Connector setup is a three-stage source/configure/verify flow with delivery freshness and latest-outcome health.
 
+## How incidents are grouped and explained (the release model)
+
+Real teams ship feature branch → PR → main → staging → production, flip flags, and get paged days later. ReplayOps models that instead of grouping by "what happened near the alert":
+
+- **Environments** (Settings → Intake policy): aliases map tool names (`Production`, `prd`, `Preview`) to one name; tiers decide which environments open incidents. Staging, QA and previews never page; their errors are kept as early warnings.
+- **Release branches**: only CI or deploy failures on `main`, `release/*`, `hotfix/*` (configurable) open delivery incidents. Feature-branch failures never page.
+- **Services ↔ repositories** (Settings → Service map): map `owner/name` repos and monorepo paths to services, so GitHub events count as the app service and a monorepo deploy only affects the services whose files changed.
+- **Change log** (Releases page): GitHub deployment statuses (Vercel and GitHub Actions deployments report these), generic change events and CLI `change` record deploys, rollbacks, flags, config, migrations and infra per service and environment. Each deploy gets its **commit range** (previous deployed SHA → this SHA) from push webhooks, with files and authors, however many days the commits spent before shipping.
+- **Grouping**: signals join an open incident when they share an identity (same alert, same error fingerprint, same trace, or the same GitHub workflow/deploy lane), or the same service and environment within the grouping window. Changes are never grouped by time: when an incident opens, ReplayOps links **the release that was live** in that environment (however old) plus changes from the previous day; changes made during the incident (rollbacks, fixes) are linked as responses, not suspects.
+- **Diagnosis**: each linked change is scored on evidence: time decay over hours, live release, version attribution (errors only on the new version vs on both), error fingerprints that are new in that environment since the change, the **same error seen in staging on that release before promotion**, and whether the change touched the failing service's code. Changes that didn't touch the service, or whose errors pre-date them, are marked "likely unrelated". "Rule out" on a change removes it from the diagnosis.
+
+`apps/api/src/scenarios.test.ts` encodes 14 real-world scenarios (latent bugs found days after deploy, unrelated merges, staging noise, feature-branch CI, canaries, flags vs releases, rollbacks, late webhooks, failed deploys, staging early warning).
+
 ## Real-user controls
 
 - **Alerts:** Settings → Alerts notifies you when an incident opens, moves to monitoring, resolves, or reopens. Destinations: **email** (through the API's Resend account; free tier 100/day, needs `RESEND_API_KEY` and `INVITE_FROM_EMAIL`), **phone push** via the free [ntfy](https://ntfy.sh) app (critical incidents arrive as urgent), Discord, Slack, or any HTTPS webhook. Each destination has event and minimum-severity filters and a send-test button. Webhook bodies are signed (`x-replayops-signature: sha256=HMAC(secret, body)`). Webhook-style destinations must be public HTTPS hosts, and DNS is re-checked at send time.

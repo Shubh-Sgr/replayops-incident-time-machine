@@ -43,7 +43,9 @@ export function githubChangeRange(event: IncidentEvent, events: IncidentEvent[])
   const sha = typeof meta.sha === "string" ? meta.sha : undefined;
   if (!repository || !sha) return null;
   const push = events.find((candidate) => candidate.metadata?.eventType === "push" && candidate.metadata?.sha === sha);
-  const before = typeof push?.metadata?.beforeSha === "string" && !/^0+$/.test(push.metadata.beforeSha) ? push.metadata.beforeSha : undefined;
+  const pushedBefore = typeof push?.metadata?.beforeSha === "string" && !/^0+$/.test(push.metadata.beforeSha) ? push.metadata.beforeSha : undefined;
+  // A deploy from the change log knows the previously deployed SHA, which may be many pushes back.
+  const before = typeof meta.previousSha === "string" ? meta.previousSha : pushedBefore;
   return { repository, sha, before, compareUrl: before ? `https://github.com/${repository}/compare/${before}...${sha}` : `https://github.com/${repository}/commit/${sha}` };
 }
 
@@ -137,8 +139,17 @@ function hypothesisOutcome(hypothesisId: string, tests: HypothesisTest[]) {
   return { state, outcomeSummary, testCount: relevant.length };
 }
 
-export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = []): IncidentDiagnosis {
-  const events = [...incident.events].sort((left, right) => left.timestamp.localeCompare(right.timestamp));
+/** Workspace facts the incident alone does not contain: where and when each error has been seen before. */
+export interface DiagnosisContext { exceptionHistory?: Map<string, Array<{ environment: string; firstSeen: string; releases: string[] }>> }
+
+const humanLead = (seconds: number) => seconds < 5_400 ? `${Math.max(1, Math.round(seconds / 60))} minute${seconds >= 90 ? "s" : ""}` : seconds < 172_800 ? `${Math.round(seconds / 3_600)} hours` : `${Math.round(seconds / 86_400)} days`;
+const text = (value: unknown) => typeof value === "string" && value.trim() ? value.trim() : undefined;
+/** The release a failing event came from: generic `release`/`version`, OpenTelemetry `service.version`. */
+const releaseOf = (event: IncidentEvent) => event.kind === "deploy" ? undefined : text(event.metadata?.release) ?? text(event.metadata?.version) ?? text((event.metadata?.attributes as Record<string, unknown> | undefined)?.["service.version"]);
+
+export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = [], context: DiagnosisContext = {}): IncidentDiagnosis {
+  // Evidence a responder excluded (for example a change ruled out as unrelated) no longer counts.
+  const events = incident.events.filter((event) => event.evidenceState !== "excluded").sort((left, right) => left.timestamp.localeCompare(right.timestamp));
   if (!events.length) {
     return {
       incidentId: incident.id,
@@ -164,22 +175,70 @@ export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = [
   const eligibleCandidates = events.filter((event) => event.timestamp <= symptom.timestamp && event.kind !== "alert" && event.kind !== "action" && event.kind !== "recovery");
   const sourceCandidates = eligibleCandidates.length ? eligibleCandidates : [events[0]!];
   // An exception type that first appears right after a change (and before any later change) points at it.
-  const firstExceptions = new Map<string, { timestamp: string; type: string }>();
+  // "First appears" means first in this environment's history, so a chronic error never blames a release.
+  const environment = incident.environment && incident.environment !== "unknown" ? incident.environment : undefined;
+  const firstExceptions = new Map<string, { timestamp: string; type: string; fingerprint: string }>();
   for (const event of events) {
     const exception = event.metadata?.exception as { fingerprint?: string; type?: string } | undefined;
-    if (exception?.fingerprint && !firstExceptions.has(exception.fingerprint)) firstExceptions.set(exception.fingerprint, { timestamp: event.timestamp, type: exception.type ?? "Error" });
+    if (exception?.fingerprint && !firstExceptions.has(exception.fingerprint)) {
+      const known = context.exceptionHistory?.get(exception.fingerprint)?.find((item) => item.environment === (environment ?? "unknown"))?.firstSeen;
+      firstExceptions.set(exception.fingerprint, { timestamp: known && known < event.timestamp ? known : event.timestamp, type: exception.type ?? "Error", fingerprint: exception.fingerprint });
+    }
   }
-  const changeTimes = events.filter((event) => event.kind === "deploy").map((event) => event.timestamp);
-  const newErrorsAfter = (change: IncidentEvent) => change.kind !== "deploy" ? [] : [...firstExceptions.values()].filter((item) =>
-    item.timestamp >= change.timestamp && !changeTimes.some((time) => time > change.timestamp && time <= item.timestamp));
+  /** The same error in another (pre-production) environment on this release, before the release reached here. */
+  const earlyWarningFor = (version: string | undefined, changedAt: string) => version ? [...firstExceptions.values()].flatMap((item) => (context.exceptionHistory?.get(item.fingerprint) ?? [])
+    .filter((sighting) => sighting.environment !== (environment ?? "unknown") && sighting.environment !== "unknown" && sighting.firstSeen < changedAt && sighting.releases.includes(version))
+    .map((sighting) => ({ type: item.type, environment: sighting.environment }))) : [];
+  const failingReleases = [...new Set(events.filter((event) => event.timestamp >= symptom.timestamp && (event.kind === "alert" || event.metadata?.exception)).map(releaseOf).filter((value): value is string => Boolean(value)))];
+  const isCodeChange = (change: IncidentEvent) => !text(change.metadata?.changeType) || ["deploy", "rollback"].includes(String(change.metadata?.changeType));
+  const firstAnywhere = (item: { timestamp: string; fingerprint: string }) => [item.timestamp, ...(context.exceptionHistory?.get(item.fingerprint) ?? []).map((sighting) => sighting.firstSeen)].sort()[0]!;
+  const laterChanges = (change: IncidentEvent, code: boolean) => events.filter((event) => event.kind === "deploy" && event.timestamp > change.timestamp && (!code || isCodeChange(event))).map((event) => event.timestamp);
+  /**
+   * Which errors a change could have introduced. Code (a deploy) is judged against this environment's history, since
+   * staging sightings of the same release are expected before promotion; a runtime change (flag, config, infra) is
+   * judged against every environment, because an error seen anywhere before it started without it.
+   */
+  const errorEvidence = (change: IncidentEvent) => {
+    if (change.kind !== "deploy") return { introduced: [], preexisting: [] };
+    const code = isCodeChange(change);
+    const later = laterChanges(change, code);
+    const errors = [...firstExceptions.values()];
+    const since = (item: (typeof errors)[number]) => code ? item.timestamp : firstAnywhere(item);
+    return {
+      introduced: errors.filter((item) => since(item) >= change.timestamp && !later.some((time) => time <= item.timestamp && since(item) >= time)),
+      preexisting: errors.filter((item) => since(item) < change.timestamp)
+    };
+  };
   const changeCandidates = sourceCandidates.map((event) => {
+    const meta = event.metadata ?? {};
     const leadTimeSeconds = secondsBetween(event.timestamp, symptom.timestamp);
     const kindWeight = event.kind === "dependency" ? 30 : event.kind === "deploy" ? 27 : 15;
-    const proximity = Math.max(0, 28 - leadTimeSeconds / 30);
+    // Changes stay suspicious for hours, not minutes (a flag flipped 30 minutes ago still matters), and the
+    // release that was running keeps a floor however old it is. Observations keep the short, minute-scale window.
+    const proximity = event.kind === "deploy" ? 28 * Math.exp(-leadTimeSeconds / 7_200) + (meta.liveRelease === true ? 6 : 0) : Math.max(0, 28 - leadTimeSeconds / 30);
     const progression = Math.max(0, symptom.impactScore - event.impactScore) * 0.22;
-    const newErrors = newErrorsAfter(event);
-    const score = clamp(34 + kindWeight + proximity + progression + Math.min(12, newErrors.length * 6), 28, 96);
-    const newErrorNote = newErrors.length ? ` ${newErrors.length} error type${newErrors.length === 1 ? "" : "s"} (${[...new Set(newErrors.map((item) => item.type))].slice(0, 3).join(", ")}) first appeared after it.` : "";
+    const { introduced: newErrors, preexisting } = errorEvidence(event);
+    const notes: string[] = [];
+    let adjustment = Math.min(12, newErrors.length * 6);
+    if (newErrors.length) notes.push(`${newErrors.length} error type${newErrors.length === 1 ? "" : "s"} (${[...new Set(newErrors.map((item) => item.type))].slice(0, 3).join(", ")}) first appeared after it.`);
+    else if (preexisting.length) {
+      adjustment -= isCodeChange(event) ? 6 : 14;
+      const elsewhere = !isCodeChange(event) && preexisting.some((item) => firstAnywhere(item) < item.timestamp);
+      notes.push(elsewhere ? `${preexisting[0]!.type} was already seen ${((place) => place ? `in ${place}` : "elsewhere")((context.exceptionHistory?.get(preexisting[0]!.fingerprint) ?? []).find((sighting) => sighting.firstSeen < event.timestamp)?.environment)} before this change, so it didn't start with it.` : "Its errors were already happening before it.");
+    }
+    const version = text(meta.version);
+    const earlyWarnings = event.kind === "deploy" ? earlyWarningFor(version, event.timestamp) : [];
+    if (earlyWarnings.length) { adjustment += 15; notes.push(`The same ${earlyWarnings[0]!.type} appeared in ${earlyWarnings[0]!.environment} on ${version} before it reached ${environment ?? "this environment"}.`); }
+    if (event.kind === "deploy" && version && failingReleases.length) {
+      // Matching versions is weak evidence when only one version is running; mixed versions are strong evidence against.
+      if (failingReleases.every((release) => release === version)) { adjustment += 5; notes.push(`Every failing event reports version ${version}.`); }
+      else { adjustment -= 12; notes.push(`Failures also come from ${failingReleases.filter((release) => release !== version).slice(0, 2).join(", ")}, not only ${version}.`); }
+    }
+    if (meta.touchesService === false) { adjustment -= 22; notes.push(`None of its changed files are in ${incident.service}'s code: likely unrelated.`); }
+    else if (meta.touchesService === true) { adjustment += 6; notes.push(`It changed ${incident.service}'s code.`); }
+    if (meta.liveRelease === true) notes.unshift("It was the release running when the incident started.");
+    const score = clamp(24 + kindWeight + proximity + progression + adjustment, 10, 96);
+    const newErrorNote = notes.length ? ` ${notes.join(" ")}` : "";
     return {
       eventId: event.id,
       title: event.title,
@@ -189,7 +248,7 @@ export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = [
       score,
       reason: leadTimeSeconds === 0
         ? `This ${event.kind} is the first high-impact symptom in the recorded sequence.`
-        : `This ${event.kind} preceded the first high-impact symptom by ${Math.max(1, Math.round(leadTimeSeconds / 60))} minute${leadTimeSeconds >= 90 ? "s" : ""}.${newErrorNote}`
+        : `This ${event.kind === "deploy" ? "change" : event.kind} preceded the first high-impact symptom by ${humanLead(leadTimeSeconds)}.${newErrorNote}`
     };
   }).sort((left, right) => right.score - left.score).slice(0, 4);
 
@@ -227,7 +286,8 @@ export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = [
     claim: `“${topCandidate.title}” occurred before the first high-impact symptom in ${symptom.service}; the current evidence does not by itself establish cause.`,
     confidence: Math.min(confidence, clamp(changeCandidates[0]?.score ?? confidence, 20, 94)),
     supportingEvidence: [
-      `${topCandidate.title} was recorded ${evidenceSpan ? `${Math.max(1, Math.round(evidenceSpan / 60))}m before` : "at"} the first high-impact symptom.`,
+      `${topCandidate.title} was recorded ${evidenceSpan ? `${humanLead(evidenceSpan)} before` : "at"} the first high-impact symptom.`,
+      ...(changeCandidates[0]?.eventId === topCandidate.id && changeCandidates[0].reason.includes(". ") ? [changeCandidates[0].reason.slice(changeCandidates[0].reason.indexOf(". ") + 2)] : []),
       `A high-severity observation was later recorded in ${peak.service}.`
     ],
     conflictingEvidence: correlated
@@ -269,7 +329,9 @@ export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = [
 
   const evidenceGaps: string[] = [];
   if (!correlated && servicePath.length > 1) evidenceGaps.push("No trace, span, or request ID is attached; cross-service causality cannot be verified.");
-  if (!events.some((event) => event.kind === "deploy" || event.metadata?.eventType === "push")) evidenceGaps.push("No deployment or configuration change is recorded in the incident window.");
+  if (!events.some((event) => event.kind === "deploy" || event.metadata?.eventType === "push")) evidenceGaps.push(incident.environment && incident.environment !== "unknown"
+    ? `No deploy, flag, or config change to ${incident.service} in ${incident.environment} is recorded. If none happened, look at dependencies, traffic, or data instead; otherwise send deploys to ReplayOps (Sources → Generic, or GitHub deployments).`
+    : "No deployment or configuration change is recorded in the incident window.");
   const githubOnly = events.every((event) => event.metadata?.provider === "github");
   if (!hasRecovery && !githubOnly) evidenceGaps.push("No recovery has been observed yet, so there is nothing to compare a fix against.");
   if (events.filter((event) => event.timestamp < symptom.timestamp).length < 2) evidenceGaps.push("The pre-symptom baseline is thin; add healthy-window measurements for comparison.");

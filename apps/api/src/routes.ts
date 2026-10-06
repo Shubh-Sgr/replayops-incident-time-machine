@@ -8,7 +8,7 @@ import { diagnoseIncident } from "./diagnosis.js";
 import { config } from "./config.js";
 import { deriveIntegrationToken } from "./ingestion.js";
 import { repository } from "./repository.js";
-import type { IngestionBatch, Integration } from "./types.js";
+import type { Incident, IngestionBatch, Integration } from "./types.js";
 import { ingestionQueue } from "./queue.js";
 import { workspaceService } from "./workspace.js";
 import { buildEvidenceBundle, buildInvestigationIntelligence } from "./intelligence.js";
@@ -17,6 +17,7 @@ import { caseworkService } from "./casework.js";
 import { HttpError } from "./errors.js";
 import { alertEventTypes, alertService } from "./alerts.js";
 import { groupIncidentErrors } from "./exceptions.js";
+import { defaultEnvironments, defaultReleaseBranches } from "./release.js";
 import { alertEmailConfigured } from "./mailer.js";
 import { apiTokenService, tokenMayWrite } from "./apiTokens.js";
 
@@ -72,9 +73,16 @@ const integrationSchema = z.object({
 const integrationConfigSchema=z.object({expectedCadenceMinutes:z.number().int().min(1).max(43200),retentionDays:z.number().int().min(1).max(90),dailyQuota:z.number().int().min(100).max(1000000),healthySampleRate:z.number().min(.001).max(.25)});
 const serviceSchema = z.object({
   name: z.string().min(2).max(80), ownerTeam: z.string().min(2).max(80), tier: z.enum(["critical", "standard", "internal"]),
-  repositoryUrl: z.string().url().nullable().optional(), runbookUrl: z.string().url().nullable().optional(), dependencies: z.array(z.string().min(2).max(80)).max(30)
+  repositoryUrl: z.string().url().nullable().optional(), runbookUrl: z.string().url().nullable().optional(), dependencies: z.array(z.string().min(2).max(80)).max(30),
+  repositories: z.array(z.string().trim().regex(/^[\w.-]+\/[\w.-]+$/, "Use owner/name, e.g. acme/payments.")).max(10).optional(),
+  paths: z.array(z.string().trim().min(1).max(200)).max(30).optional()
 });
-const policySchema = z.object({ incidentThreshold: z.number().int().min(1).max(100), groupingWindowMinutes: z.number().int().min(5).max(1440), suppressLowSeverity: z.boolean(), maintenanceMode: z.boolean() });
+const environmentSchema = z.object({ name: z.string().trim().min(2).max(40), aliases: z.array(z.string().trim().min(1).max(40)).max(12), tier: z.enum(["production", "preprod", "dev"]), opensIncidents: z.boolean() });
+const policySchema = z.object({
+  incidentThreshold: z.number().int().min(1).max(100), groupingWindowMinutes: z.number().int().min(5).max(1440), suppressLowSeverity: z.boolean(), maintenanceMode: z.boolean(),
+  environments: z.array(environmentSchema).min(1).max(12).default(defaultEnvironments),
+  releaseBranches: z.array(z.string().trim().min(1).max(100)).min(1).max(20).default(defaultReleaseBranches)
+});
 const roleSchema = z.enum(["admin", "responder", "viewer"]);
 const inviteSchema = z.object({ email: z.string().email(), role: roleSchema });
 const mitigationSchema = z.object({ replayRunId: z.string().uuid(), title: z.string().min(4).max(120), action: z.string().min(12).max(1200), rollbackPlan: z.string().min(12).max(1200),currentValue:z.string().min(2).max(500),proposedValue:z.string().min(2).max(500),blastRadius:z.string().min(4).max(800),changeOwner:z.string().min(2).max(160),observationMinutes:z.number().int().min(5).max(1440) });
@@ -180,6 +188,12 @@ apiRouter.get("/incidents/:id", async (req, res) => {
   res.json(incident);
 });
 
+/** When each of the incident's errors was first seen anywhere in the workspace, so old errors don't blame new releases. */
+async function diagnosisContext(user: string, incident: Incident) {
+  const fingerprints = [...new Set(incident.events.map((event) => (event.metadata?.exception as { fingerprint?: string } | undefined)?.fingerprint).filter((value): value is string => Boolean(value)))];
+  return { exceptionHistory: await repository.exceptionHistory(user, fingerprints) };
+}
+
 apiRouter.get("/incidents/:id/diagnosis", async (req, res) => {
   const incident = await repository.getIncident(userId(req), req.params.id);
   if (!incident) {
@@ -187,7 +201,7 @@ apiRouter.get("/incidents/:id/diagnosis", async (req, res) => {
     return;
   }
   const tests = await workspaceService.listHypothesisTests(userId(req), req.params.id);
-  res.json(diagnoseIncident(incident, tests));
+  res.json(diagnoseIncident(incident, tests, await diagnosisContext(userId(req), incident)));
 });
 
 apiRouter.get("/incidents/:id/intelligence", async (req, res) => {
@@ -196,6 +210,25 @@ apiRouter.get("/incidents/:id/intelligence", async (req, res) => {
   res.json(buildInvestigationIntelligence(incident, await repository.listIncidents(userId(req))));
 });
 
+apiRouter.get("/changes", async (req, res) => {
+  const text = (value: unknown) => typeof value === "string" && value.trim() ? value.trim() : undefined;
+  res.json(await repository.listChanges(userId(req), { environment: text(req.query.environment), service: text(req.query.service), limit: Number(req.query.limit ?? 100) || 100 }));
+});
+/** What is running where: the latest successful deploy or rollback per service and environment, plus recent changes. */
+apiRouter.get("/releases", async (req, res) => {
+  const [changes, policy] = await Promise.all([repository.listChanges(userId(req), { limit: 500 }), workspaceService.getPolicy(userId(req))]);
+  const order = new Map(policy.environments.map((environment, index) => [environment.name, index]));
+  const environments = [...new Set([...policy.environments.map((environment) => environment.name), ...changes.map((change) => change.environment)])]
+    .filter((name) => changes.some((change) => change.environment === name)).sort((a, b) => (order.get(a) ?? 99) - (order.get(b) ?? 99));
+  const live = new Map<string, Record<string, (typeof changes)[number]>>();
+  for (const change of changes) {
+    if (!["deploy", "rollback"].includes(change.kind) || change.status !== "success") continue;
+    const row = live.get(change.service) ?? {};
+    if (!row[change.environment]) row[change.environment] = change;
+    live.set(change.service, row);
+  }
+  res.json({ environments, services: [...live.entries()].map(([service, releases]) => ({ service, releases })).sort((a, b) => a.service.localeCompare(b.service)), recent: changes.slice(0, 60) });
+});
 apiRouter.get("/incidents/:id/errors", async (req, res) => {
   const incident = await repository.getIncident(userId(req), String(req.params.id));
   if (!incident) { res.status(404).json({ error: "Incident not found." }); return; }
@@ -481,7 +514,7 @@ apiRouter.post("/assistant", async (req, res) => {
   const privacy=await workspaceService.getPrivacy(userId(req));
   const selected = parsed.data.incidentId ? await repository.getIncident(userId(req), parsed.data.incidentId) : undefined;
   if (parsed.data.incidentId && !selected) { res.status(404).json({ error: "Incident not found." }); return; }
-  const context = selected ? { incident: selected, diagnosis: diagnoseIncident(selected, await workspaceService.listHypothesisTests(userId(req), selected.id)) } : undefined;
+  const context = selected ? { incident: selected, diagnosis: diagnoseIncident(selected, await workspaceService.listHypothesisTests(userId(req), selected.id), await diagnosisContext(userId(req), selected)) } : undefined;
   const selectedResult = selected ? [{ incident: selected, score: 1, matchReason: "Currently selected incident" }] : [];
   // Incident-scoped questions only see that incident's evidence, so answers cannot cite unrelated investigations.
   if (selected && parsed.data.scope === "incident") {
@@ -613,7 +646,7 @@ apiRouter.get("/incident-policy", async (req, res) => {
 apiRouter.patch("/incident-policy", async (req: AuthenticatedRequest, res) => {
   const parsed = parseOrReply(policySchema, req.body);
   if ("error" in parsed) { res.status(400).json(parsed); return; }
-  res.json(await workspaceService.updatePolicy(userId(req), actor(req), parsed.data));
+  res.json(await workspaceService.updatePolicy(userId(req), actor(req), parsed.data as Parameters<typeof workspaceService.updatePolicy>[2]));
 });
 
 apiRouter.get("/team/members", async (req, res) => {

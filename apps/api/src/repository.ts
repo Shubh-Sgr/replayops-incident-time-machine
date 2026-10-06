@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { Pool } from "pg";
+import { Pool, type PoolClient } from "pg";
 import { config } from "./config.js";
 import { MEMBERSHIPS } from "./scope.js";
+import { placeSignal, resolveEnvironment, type ServiceMapping } from "./release.js";
+import { changeEvidence, resolveChange, selectChangesForIncident, type ChangeRecord, type CommitRecord, type ExtractedDelivery } from "./changes.js";
 import { seedActivities, seedDashboardSeries, seedIncidents, seedReplayRuns } from "./seed.js";
-import type { Activity, DashboardData, Incident, IncidentDecision, IncidentEvent, IncidentHeadline, IngestionBatch, IngestionResult, Integration, IntegrationDelivery, IntegrationProvider, IntegrationTarget, NormalizedSignal, ReplayConfig, ReplayProjection, ReplayResult, ReplayRun, SearchResult, Severity } from "./types.js";
+import type { Activity, DashboardData, Incident, IncidentDecision, IncidentEvent, IncidentHeadline, IncidentPolicy, IngestionBatch, IngestionResult, Integration, IntegrationDelivery, IntegrationProvider, IntegrationTarget, NormalizedSignal, ReplayConfig, ReplayProjection, ReplayResult, ReplayRun, SearchResult, Severity } from "./types.js";
 import { forbidden } from "./errors.js";
 import { workspaceService } from "./workspace.js";
 
@@ -34,6 +36,9 @@ export interface Repository {
   impactPreview(userId: string, threshold: number): Promise<{ atOrAbove: number; below: number }>;
   /** Earliest sighting of each exception fingerprint across the workspace's incidents and retained signals. */
   exceptionFirstSeen(userId: string, fingerprints: string[]): Promise<Map<string, string>>;
+  listChanges(userId: string, filter?: { environment?: string; service?: string; limit?: number }): Promise<ChangeRecord[]>;
+  /** Where and when each fingerprint has been seen, per environment, with the releases it came from. */
+  exceptionHistory(userId: string, fingerprints: string[]): Promise<Map<string, ExceptionSighting[]>>;
   listIntegrations(userId: string): Promise<Integration[]>;
   createIntegration(userId: string, input: IntegrationInput): Promise<Integration>;
   updateIntegrationConfig(userId: string, integrationId: string, input: IntegrationConfigInput): Promise<Integration | null>;
@@ -101,8 +106,59 @@ export class MemoryRepository implements Repository {
   private integrations: Integration[] = [];
   private deliveries = new Set<string>();
   private bufferedSignals: Array<NormalizedSignal & { integrationId: string; incidentId?: string }> = [];
+  private changes: ChangeRecord[] = [];
+  private commits: CommitRecord[] = [];
 
   async initialize() {}
+
+  /** Stores the delivery's commits and changes; returns the changes that are new. */
+  private recordDelivery(delivery: ExtractedDelivery | undefined, policy: Pick<IncidentPolicy, "environments" | "releaseBranches">, services: ServiceMapping[]) {
+    if (!delivery) return [];
+    for (const commit of delivery.commits) if (!this.commits.some((item) => item.repository === commit.repository && item.sha === commit.sha)) this.commits.push(commit);
+    const created: ChangeRecord[] = [];
+    for (const input of delivery.changes) {
+      const environment = resolveEnvironment(input.environment, policy.environments).name;
+      const previous = [...this.changes].filter((change) => change.environment === environment && ["deploy", "rollback"].includes(change.kind) && change.status === "success" && change.occurredAt < input.occurredAt && (input.repository ? change.repository === input.repository : change.service === input.service)).sort((a, b) => a.occurredAt.localeCompare(b.occurredAt)).at(-1);
+      for (const record of resolveChange(input, { environments: policy.environments, services, releaseBranches: policy.releaseBranches, repositoryCommits: this.commits.filter((commit) => commit.repository === input.repository), previousDeploy: previous ? { sha: previous.sha, version: previous.version } : undefined })) {
+        if (this.changes.some((change) => change.externalId === record.externalId)) continue;
+        const change = { ...record, id: randomUUID() };
+        this.changes.push(change);
+        created.push(change);
+      }
+    }
+    return created;
+  }
+
+  private linkChange(incident: Incident, change: ChangeRecord, liveRelease: boolean, services: ServiceMapping[]) {
+    if (incident.events.some((event) => event.metadata?.changeId === change.id)) return false;
+    const evidence = changeEvidence(change, { liveRelease, incidentService: incident.service, services, afterStart: change.occurredAt > incident.startedAt });
+    incident.events.push({ id: randomUUID(), incidentId: incident.id, ...evidence, evidenceState: "active", provenance: "derived" });
+    incident.events.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    incident.updatedAt = new Date().toISOString(); incident.evidenceRevision = incident.updatedAt;
+    return true;
+  }
+
+  /** Links what changed to newly opened incidents, and new changes to incidents already open. */
+  private async linkChanges(organizationId: string, openedIds: string[], newChanges: ChangeRecord[], services: ServiceMapping[]) {
+    const touched = new Set<string>();
+    for (const incident of this.incidents.filter((item) => openedIds.includes(item.id))) {
+      const relatedServices = await workspaceService.relatedServicesForOrganization(organizationId, incident.service);
+      for (const { change, liveRelease } of selectChangesForIncident(this.changes, { service: incident.service, relatedServices, environment: incident.environment ?? "unknown", startedAt: incident.startedAt })) if (this.linkChange(incident, change, liveRelease, services)) touched.add(incident.id);
+    }
+    for (const change of newChanges.filter((item) => item.status !== "failure")) {
+      for (const incident of this.incidents.filter((item) => item.status !== "resolved" && item.environment === change.environment && !openedIds.includes(item.id))) {
+        const relatedServices = await workspaceService.relatedServicesForOrganization(organizationId, incident.service);
+        if (!relatedServices.includes(change.service)) continue;
+        const selected = change.occurredAt > incident.startedAt ? [{ change, liveRelease: false }] : selectChangesForIncident([change, ...this.changes.filter((item) => item.id !== change.id)], { service: incident.service, relatedServices, environment: change.environment, startedAt: incident.startedAt }).filter((item) => item.change.id === change.id);
+        for (const item of selected) if (this.linkChange(incident, item.change, item.liveRelease, services)) touched.add(incident.id);
+      }
+    }
+    return [...touched];
+  }
+
+  async listChanges(_userId: string, filter: { environment?: string; service?: string; limit?: number } = {}) {
+    return clone(this.changes.filter((change) => (!filter.environment || change.environment === filter.environment) && (!filter.service || change.service === filter.service)).sort((a, b) => b.occurredAt.localeCompare(a.occurredAt)).slice(0, filter.limit ?? 100));
+  }
 
   async dashboard(_userId: string): Promise<DashboardData> {
     return { incidents: clone(this.incidents), activities: clone(seedActivities), replayRuns: clone(this.replayRuns), ...clone(seedDashboardSeries) };
@@ -243,20 +299,26 @@ export class MemoryRepository implements Repository {
     const movedToMonitoring: IncidentHeadline[] = [];
     const escalatedIncidents = new Map<string, IncidentHeadline>();
     let acceptedSignals = 0;
-    for (const signal of batch.signals) {
+    const services = await workspaceService.servicesForOrganization(integration.organizationId);
+    const newChanges = this.recordDelivery(batch.delivery, policy, services);
+    for (const placement of batch.signals.map((item) => placeSignal(item, policy, services))) {
+      if (placement.drop) continue;
+      const signal = placement.signal;
       const relatedServices = await workspaceService.relatedServicesForOrganization(integration.organizationId, signal.service);
       if (this.bufferedSignals.some((item) => item.integrationId === integration.id && item.externalId === signal.externalId)) continue;
       const buffered: NormalizedSignal & { integrationId: string; incidentId?: string } = { ...signal, integrationId: integration.id };
       this.bufferedSignals.push(buffered);
       acceptedSignals += 1;
-      let incident = signal.correlationKey
+      let incident = placement.laneOnly ? undefined : signal.correlationKey
         ? this.incidents.find((item) => item.status !== "resolved" && item.events.some((event) => event.metadata?.correlationKey === signal.correlationKey))
         : undefined;
       const lane = deliveryLaneOf(signal);
       if (lane) incident ??= this.incidents.find((item) => item.status !== "resolved" && item.events.some((event) => deliveryLaneOf(event) === lane));
-      incident ??= this.incidents.find((item) => item.status !== "resolved" && sameBranchLane(item.events, signal) && relatedServices.includes(item.service) && (item.environment ?? "unknown") === (signal.environment ?? "unknown") && Math.abs(new Date(item.startedAt).getTime() - new Date(signal.timestamp).getTime()) <= policy.groupingWindowMinutes * 60_000);
+      const fingerprint = exceptionFingerprintOf(signal);
+      if (!placement.laneOnly && fingerprint) incident ??= this.incidents.find((item) => item.status !== "resolved" && (item.environment ?? "unknown") === (signal.environment ?? "unknown") && item.events.some((event) => exceptionFingerprintOf(event) === fingerprint));
+      if (!placement.laneOnly) incident ??= this.incidents.find((item) => item.status !== "resolved" && sameBranchLane(item.events, signal) && relatedServices.includes(item.service) && (item.environment ?? "unknown") === (signal.environment ?? "unknown") && Math.abs(new Date(item.startedAt).getTime() - new Date(signal.timestamp).getTime()) <= policy.groupingWindowMinutes * 60_000);
       const suppressed = policy.maintenanceMode || (policy.suppressLowSeverity && signal.severity === "low");
-      if (!incident && !suppressed && signal.impactScore >= policy.incidentThreshold) {
+      if (!incident && !suppressed && placement.mayOpen && signal.impactScore >= policy.incidentThreshold) {
         const now = new Date().toISOString();
         incident = {
           id: randomUUID(), code: `AUTO-${String(Date.now()).slice(-6)}`, title: signal.title,
@@ -267,7 +329,7 @@ export class MemoryRepository implements Repository {
         this.incidents.unshift(incident);
         opened.push(headline(incident));
         const triggerTime = new Date(signal.timestamp).getTime();
-        for (const precursor of this.bufferedSignals.filter((item) => !item.incidentId && compatibleBranch(branchOf(item), branchOf(signal)) && relatedServices.includes(item.service) && new Date(item.timestamp).getTime() >= triggerTime - 1_800_000 && new Date(item.timestamp).getTime() <= triggerTime)) {
+        for (const precursor of this.bufferedSignals.filter((item) => !item.incidentId && !item.metadata?.laneOnly && compatibleBranch(branchOf(item), branchOf(signal)) && relatedServices.includes(item.service) && new Date(item.timestamp).getTime() >= triggerTime - 1_800_000 && new Date(item.timestamp).getTime() <= triggerTime)) {
           precursor.incidentId = incident.id;
           incident.events.push(signalToEvent(incident.id, precursor));
         }
@@ -291,6 +353,7 @@ export class MemoryRepository implements Repository {
         incidentIds.add(incident.id);
       }
     }
+    for (const id of await this.linkChanges(integration.organizationId, opened.map((item) => item.id), newChanges, services)) incidentIds.add(id);
     const now = new Date().toISOString();
     if (storedIntegration) {
       const delivery: IntegrationDelivery = { id: randomUUID(), integrationId: integration.id, externalId: batch.externalId, status: "accepted", signalCount: acceptedSignals, incidentIds: [...incidentIds], receivedAt: now };
@@ -301,9 +364,19 @@ export class MemoryRepository implements Repository {
       storedIntegration.deliveries.unshift(delivery);
       storedIntegration.deliveries = storedIntegration.deliveries.slice(0, 8);
     }
-    return { status: "accepted", acceptedSignals, incidentIds: [...incidentIds], opened, movedToMonitoring, escalated: [...escalatedIncidents.values()] } satisfies IngestionResult;
+    return { status: "accepted", acceptedSignals, acceptedChanges: newChanges.length, incidentIds: [...incidentIds], opened, movedToMonitoring, escalated: [...escalatedIncidents.values()] } satisfies IngestionResult;
   }
   async setIncidentEmbedding(_incidentId: string, _embedding: number[]) {}
+  async exceptionHistory(_userId: string, fingerprints: string[]) {
+    const rows: Array<{ fingerprint: string; environment: string; timestamp: string; release?: string }> = [];
+    const add = (metadata: Record<string, unknown> | undefined, timestamp: string, environment: string | undefined) => {
+      const fingerprint = exceptionFingerprintOf({ metadata });
+      if (fingerprint && fingerprints.includes(fingerprint)) rows.push({ fingerprint, environment: environment ?? "unknown", timestamp, release: typeof metadata?.release === "string" ? metadata.release : undefined });
+    };
+    for (const incident of this.incidents) for (const event of incident.events) add(event.metadata, event.timestamp, typeof event.metadata?.environment === "string" ? event.metadata.environment : incident.environment);
+    for (const signal of this.bufferedSignals) add(signal.metadata, signal.timestamp, signal.environment);
+    return summarizeSightings(rows);
+  }
   async exceptionFirstSeen(_userId: string, fingerprints: string[]) {
     const seen = new Map<string, string>();
     const consider = (metadata: Record<string, unknown> | undefined, timestamp: string) => {
@@ -329,6 +402,24 @@ const headline = (incident: Pick<Incident, "id" | "code" | "title" | "summary" |
  * same lane (above all, the successful run that proves recovery) belongs to the incident its failure opened,
  * even when a responder has since set the incident's environment or the fix took longer than the grouping window.
  */
+export interface ExceptionSighting { environment: string; firstSeen: string; releases: string[] }
+const summarizeSightings = (rows: Array<{ fingerprint: string; environment: string; timestamp: string; release?: string }>) => {
+  const history = new Map<string, ExceptionSighting[]>();
+  for (const row of rows) {
+    const list = history.get(row.fingerprint) ?? [];
+    const existing = list.find((item) => item.environment === row.environment);
+    if (existing) {
+      if (row.timestamp < existing.firstSeen) existing.firstSeen = row.timestamp;
+      if (row.release && !existing.releases.includes(row.release)) existing.releases.push(row.release);
+    } else list.push({ environment: row.environment, firstSeen: row.timestamp, releases: row.release ? [row.release] : [] });
+    history.set(row.fingerprint, list);
+  }
+  return history;
+};
+const exceptionFingerprintOf = (item: { metadata?: Record<string, unknown> }) => {
+  const value = (item.metadata?.exception as { fingerprint?: unknown } | undefined)?.fingerprint;
+  return typeof value === "string" ? value : undefined;
+};
 export const deliveryLaneOf = (item: { metadata?: Record<string, unknown> }) => {
   const meta = item.metadata ?? {};
   if (meta.provider !== "github") return undefined;
@@ -367,6 +458,18 @@ const summarize = (incident: Incident): Incident => ({
   ...incident, eventCount: incident.events.length,
   eventKinds: [...new Set(incident.events.filter((event) => event.evidenceState !== "excluded").map((event) => event.kind))],
   events: [...incident.events].sort((a, b) => a.timestamp.localeCompare(b.timestamp)).slice(-SUMMARY_EVENTS)
+});
+const mapCommit = (row: Row): CommitRecord => ({
+  repository: String(row.repository), sha: String(row.sha), branch: row.branch ? String(row.branch) : undefined, message: String(row.message), author: row.author ? String(row.author) : undefined,
+  url: row.url ? String(row.url) : undefined, files: Array.isArray(row.files) ? row.files.map(String) : [], committedAt: row.committed_at ? new Date(String(row.committed_at)).toISOString() : undefined,
+  pushBefore: row.push_before ? String(row.push_before) : undefined, pushAfter: row.push_after ? String(row.push_after) : undefined, position: Number(row.position ?? 0)
+});
+const mapChange = (row: Row): ChangeRecord => ({
+  id: String(row.id), kind: row.kind as ChangeRecord["kind"], status: row.status as ChangeRecord["status"], service: String(row.service), environment: String(row.environment), title: String(row.title),
+  version: row.version ? String(row.version) : undefined, previousVersion: row.previous_version ? String(row.previous_version) : undefined, sha: row.sha ? String(row.sha) : undefined,
+  previousSha: row.previous_sha ? String(row.previous_sha) : undefined, repository: row.repository ? String(row.repository) : undefined, author: row.author ? String(row.author) : undefined,
+  url: row.url ? String(row.url) : undefined, occurredAt: new Date(String(row.occurred_at)).toISOString(), source: String(row.source), externalId: String(row.external_id),
+  metadata: (row.metadata ?? {}) as Record<string, unknown>, commits: (row.commits ?? []) as ChangeRecord["commits"], files: Array.isArray(row.files) ? row.files.map(String) : []
 });
 const mapEvent = (row: Row): IncidentEvent => ({
   id: String(row.id), incidentId: String(row.incident_id), timestamp: new Date(String(row.timestamp)).toISOString(),
@@ -746,6 +849,24 @@ class PostgresRepository implements Repository {
     if (!row) return null;
     return { ...mapReplayRun(row), config, projection, evidenceVersion: incident.evidenceRevision ?? incident.updatedAt, eventCount: incident.events.length } satisfies ReplayResult;
   }
+  async exceptionHistory(userId: string, fingerprints: string[]) {
+    if (!fingerprints.length) return new Map<string, ExceptionSighting[]>();
+    const result = await this.pool.query(
+      `select fingerprint, environment, seen_at, release from (
+         select e.metadata->'exception'->>'fingerprint' as fingerprint, coalesce(e.metadata->>'environment', i.environment, 'unknown') as environment, e.timestamp as seen_at, e.metadata->>'release' as release
+         from incident_events e join incidents i on i.id = e.incident_id
+         where e.metadata->'exception'->>'fingerprint' = any($2::text[])
+           and exists (select 1 from ${MEMBERSHIPS} m where m.organization_id = i.organization_id and m.user_id = $1)
+         union all
+         select s.metadata->'exception'->>'fingerprint', coalesce(s.environment, 'unknown'), s.occurred_at, s.metadata->>'release'
+         from ingestion_signals s join integrations x on x.id = s.integration_id
+         where s.metadata->'exception'->>'fingerprint' = any($2::text[])
+           and exists (select 1 from ${MEMBERSHIPS} m where m.organization_id = x.organization_id and m.user_id = $1)
+       ) sightings`,
+      [userId, fingerprints]
+    );
+    return summarizeSightings((result.rows as Row[]).map((row) => ({ fingerprint: String(row.fingerprint), environment: String(row.environment), timestamp: new Date(String(row.seen_at)).toISOString(), release: row.release ? String(row.release) : undefined })));
+  }
   async exceptionFirstSeen(userId: string, fingerprints: string[]) {
     if (!fingerprints.length) return new Map<string, string>();
     const result = await this.pool.query(
@@ -885,6 +1006,95 @@ class PostgresRepository implements Repository {
       healthySampleRate: Number(row.healthy_sample_rate ?? .05)
     } : null;
   }
+  /** Stores the delivery's commits and changes (inside the ingest transaction); returns the changes that are new. */
+  private async recordDelivery(client: PoolClient, organizationId: string, delivery: ExtractedDelivery | undefined, policy: Pick<IncidentPolicy, "environments" | "releaseBranches">, services: ServiceMapping[]) {
+    if (!delivery) return [];
+    for (const commit of delivery.commits) {
+      await client.query(
+        `insert into repository_commits (organization_id, repository, sha, branch, message, author, url, files, committed_at, push_before, push_after, position)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) on conflict do nothing`,
+        [organizationId, commit.repository, commit.sha, commit.branch ?? null, commit.message, commit.author ?? null, commit.url ?? null, commit.files, commit.committedAt ?? null, commit.pushBefore ?? null, commit.pushAfter ?? null, commit.position]
+      );
+    }
+    const created: ChangeRecord[] = [];
+    for (const input of delivery.changes) {
+      const environment = resolveEnvironment(input.environment, policy.environments).name;
+      const previous = (await client.query(
+        `select sha, version from change_events where organization_id = $1 and environment = $2 and kind in ('deploy','rollback') and status = 'success' and occurred_at < $3
+         and (($4::text is not null and repository = $4) or ($4::text is null and service = $5)) order by occurred_at desc limit 1`,
+        [organizationId, environment, input.occurredAt, input.repository ?? null, input.service ?? null]
+      )).rows[0] as Row | undefined;
+      const repositoryCommits = input.repository ? ((await client.query(
+        `select * from repository_commits where organization_id = $1 and repository = $2 order by created_at desc limit 3000`, [organizationId, input.repository]
+      )).rows as Row[]).map(mapCommit) : [];
+      const previousDeploy = previous ? { sha: previous.sha ? String(previous.sha) : undefined, version: previous.version ? String(previous.version) : undefined } : undefined;
+      for (const record of resolveChange(input, { environments: policy.environments, services, releaseBranches: policy.releaseBranches, repositoryCommits, previousDeploy })) {
+        const inserted = await client.query(
+          `insert into change_events (organization_id, service, environment, kind, status, title, version, previous_version, sha, previous_sha, repository, author, url, occurred_at, commits, files, source, external_id, metadata)
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) on conflict (organization_id, external_id) do nothing returning *`,
+          [organizationId, record.service, record.environment, record.kind, record.status, record.title, record.version ?? null, record.previousVersion ?? null, record.sha ?? null, record.previousSha ?? null,
+            record.repository ?? null, record.author ?? null, record.url ?? null, record.occurredAt, JSON.stringify(record.commits), record.files, record.source, record.externalId, record.metadata]
+        );
+        if (inserted.rows[0]) created.push(mapChange(inserted.rows[0] as Row));
+      }
+    }
+    return created;
+  }
+
+  private async linkChange(client: PoolClient, incident: { id: string; service: string; startedAt: string }, change: ChangeRecord, liveRelease: boolean, services: ServiceMapping[]) {
+    const evidence = changeEvidence(change, { liveRelease, incidentService: incident.service, services, afterStart: change.occurredAt > incident.startedAt });
+    const inserted = await client.query(
+      `insert into incident_events (incident_id, timestamp, service, kind, title, detail, impact_score, provenance, metadata)
+       select $1,$2,$3,$4,$5,$6,$7,'derived',$8 where not exists (select 1 from incident_events where incident_id = $1 and metadata->>'changeId' = $9)`,
+      [incident.id, evidence.timestamp, evidence.service, evidence.kind, evidence.title, evidence.detail, evidence.impactScore, evidence.metadata, change.id]
+    );
+    if (inserted.rowCount) await client.query(`update incidents set updated_at = now(), evidence_revision = now() where id = $1`, [incident.id]);
+    return Boolean(inserted.rowCount);
+  }
+
+  /** Links what changed to newly opened incidents, and new changes to incidents already open. */
+  private async linkChanges(client: PoolClient, organizationId: string, openedIds: string[], newChanges: ChangeRecord[], services: ServiceMapping[]) {
+    const touched = new Set<string>();
+    const scopeOf = (row: Row) => ({ id: String(row.id), service: String(row.service), environment: String(row.environment ?? "unknown"), startedAt: new Date(String(row.started_at)).toISOString() });
+    if (openedIds.length) {
+      for (const incident of ((await client.query(`select id, service, environment, started_at from incidents where id = any($1::uuid[])`, [openedIds])).rows as Row[]).map(scopeOf)) {
+        if (incident.environment === "unknown") continue;
+        const relatedServices = await workspaceService.relatedServicesForOrganization(organizationId, incident.service);
+        const candidates = ((await client.query(
+          `select * from change_events where organization_id = $1 and environment = $2 and service = any($3::text[]) and occurred_at <= $4 and occurred_at >= $4::timestamptz - interval '180 days' order by occurred_at desc limit 300`,
+          [organizationId, incident.environment, relatedServices, incident.startedAt]
+        )).rows as Row[]).map(mapChange);
+        for (const { change, liveRelease } of selectChangesForIncident(candidates, { ...incident, relatedServices })) if (await this.linkChange(client, incident, change, liveRelease, services)) touched.add(incident.id);
+      }
+    }
+    for (const change of newChanges.filter((item) => item.status !== "failure")) {
+      const open = ((await client.query(`select id, service, environment, started_at from incidents where organization_id = $1 and status <> 'resolved' and environment = $2`, [organizationId, change.environment])).rows as Row[]).map(scopeOf).filter((incident) => !openedIds.includes(incident.id));
+      for (const incident of open) {
+        const relatedServices = await workspaceService.relatedServicesForOrganization(organizationId, incident.service);
+        if (!relatedServices.includes(change.service)) continue;
+        let liveRelease = false;
+        if (change.occurredAt <= incident.startedAt) {
+          // A change that reached us late but happened before the incident: link it if it is the live release or recent.
+          const others = ((await client.query(`select * from change_events where organization_id = $1 and environment = $2 and service = $3 and occurred_at <= $4 and id <> $5 order by occurred_at desc limit 50`, [organizationId, change.environment, change.service, incident.startedAt, change.id])).rows as Row[]).map(mapChange);
+          const selected = selectChangesForIncident([change, ...others], { ...incident, relatedServices }).find((item) => item.change.id === change.id);
+          if (!selected) continue;
+          liveRelease = selected.liveRelease;
+        }
+        if (await this.linkChange(client, incident, change, liveRelease, services)) touched.add(incident.id);
+      }
+    }
+    return [...touched];
+  }
+
+  async listChanges(userId: string, filter: { environment?: string; service?: string; limit?: number } = {}) {
+    const result = await this.pool.query(
+      `select c.* from change_events c where exists (select 1 from ${MEMBERSHIPS} m where m.organization_id = c.organization_id and m.user_id = $1)
+       and ($2::text is null or c.environment = $2) and ($3::text is null or c.service = $3) order by c.occurred_at desc limit $4`,
+      [userId, filter.environment ?? null, filter.service ?? null, Math.min(500, filter.limit ?? 100)]
+    );
+    return (result.rows as Row[]).map(mapChange);
+  }
+
   async ingest(integration: IntegrationTarget, batch: IngestionBatch) {
     const policy = await workspaceService.policyForOrganization(integration.organizationId);
     const client = await this.pool.connect();
@@ -915,7 +1125,11 @@ class PostgresRepository implements Repository {
       const movedToMonitoring: IncidentHeadline[] = [];
       const escalatedIncidents = new Map<string, IncidentHeadline>();
       let acceptedSignals = 0;
-      for (const signal of batch.signals) {
+      const services = await workspaceService.servicesForOrganization(integration.organizationId);
+      const newChanges = await this.recordDelivery(client, integration.organizationId, batch.delivery, policy, services);
+      for (const placement of batch.signals.map((item) => placeSignal(item, policy, services))) {
+        if (placement.drop) continue;
+        const signal = placement.signal;
         const relatedServices = await workspaceService.relatedServicesForOrganization(integration.organizationId, signal.service);
         const insertedSignal = await client.query(
           `insert into ingestion_signals (
@@ -936,8 +1150,11 @@ class PostgresRepository implements Repository {
            where i.organization_id = $1 and i.status <> 'resolved'
            and (
              ($8::text is not null and exists (select 1 from ingestion_signals b where b.incident_id = i.id and b.metadata->>'provider' = 'github' and ${DELIVERY_LANE_SQL} = $8))
+             -- The same error, wherever and whenever it shows up again, is the same problem while the incident is open.
+             or (not $9::boolean and $10::text is not null and coalesce(i.environment,'unknown')=coalesce($6::text,'unknown')
+               and exists (select 1 from ingestion_signals b where b.incident_id = i.id and b.metadata->'exception'->>'fingerprint' = $10))
              or (
-               coalesce(i.environment,'unknown')=coalesce($6::text,'unknown')
+               not $9::boolean and coalesce(i.environment,'unknown')=coalesce($6::text,'unknown')
                and ($7::text is null
                  or not exists (select 1 from ingestion_signals b where b.incident_id = i.id and b.metadata->>'branch' is not null)
                  or exists (select 1 from ingestion_signals b where b.incident_id = i.id and b.metadata->>'branch' = $7))
@@ -955,12 +1172,12 @@ class PostgresRepository implements Repository {
                select 1 from ingestion_signals prior where prior.incident_id = i.id and prior.correlation_key = $2
              ) then 1 else 2 end,
              i.started_at desc limit 1`,
-          [integration.organizationId, signal.correlationKey ?? null, relatedServices, signal.timestamp, policy.groupingWindowMinutes, signal.environment ?? "unknown", branchOf(signal) ?? null, deliveryLaneOf(signal) ?? null]
+          [integration.organizationId, signal.correlationKey ?? null, relatedServices, signal.timestamp, policy.groupingWindowMinutes, signal.environment ?? "unknown", branchOf(signal) ?? null, deliveryLaneOf(signal) ?? null, Boolean(placement.laneOnly), exceptionFingerprintOf(signal) ?? null]
         );
         let incidentId = match.rows[0] ? String((match.rows[0] as Row).id) : undefined;
 
         const suppressed = policy.maintenanceMode || (policy.suppressLowSeverity && signal.severity === "low");
-        if (!incidentId && !suppressed && signal.impactScore >= policy.incidentThreshold) {
+        if (!incidentId && !suppressed && placement.mayOpen && signal.impactScore >= policy.incidentThreshold) {
           const code = `AUTO-${new Date(signal.timestamp).toISOString().slice(5, 16).replace(/[-T:]/g, "")}-${randomUUID().slice(0, 4).toUpperCase()}`;
           const created = await client.query(
             `insert into incidents (organization_id, code, title, summary, service, environment, customer_impact, severity, status, owner, started_at)
@@ -973,7 +1190,7 @@ class PostgresRepository implements Repository {
           opened.push({ id: incidentId, code, title: signal.title, summary: `Automatically opened from ${integration.name} after ${signal.service} crossed the incident threshold.`, service: signal.service, environment: signal.environment ?? "unknown", severity: signal.severity, status: "investigating" });
           await client.query(
             `update ingestion_signals s set incident_id = $1
-             where s.incident_id is null and s.occurred_at between $2::timestamptz - interval '30 minutes' and $2::timestamptz + interval '5 minutes'
+             where s.incident_id is null and coalesce(s.metadata->>'laneOnly', '') <> 'true' and s.occurred_at between $2::timestamptz - interval '30 minutes' and $2::timestamptz + interval '5 minutes'
              and coalesce(s.environment,'unknown')=coalesce($6::text,'unknown')
              and ($7::text is null or s.metadata->>'branch' is null or s.metadata->>'branch' = $7)
              and (s.service = any($3::text[]) or ($4::text is not null and s.correlation_key = $4))
@@ -1040,6 +1257,7 @@ class PostgresRepository implements Repository {
         }
       }
 
+      for (const id of await this.linkChanges(client, integration.organizationId, opened.map((item) => item.id), newChanges, services)) incidentIds.add(id);
       const incidentIdList = [...incidentIds];
       await client.query(
         `update ingestion_deliveries set signal_count = $2, incident_ids = $3::uuid[] where integration_id = $1 and external_id = $4`,
@@ -1059,7 +1277,7 @@ class PostgresRepository implements Repository {
         );
       }
       await client.query("commit");
-      return { status: "accepted", acceptedSignals, incidentIds: incidentIdList, opened, movedToMonitoring, escalated: [...escalatedIncidents.values()] } satisfies IngestionResult;
+      return { status: "accepted", acceptedSignals, acceptedChanges: newChanges.length, incidentIds: incidentIdList, opened, movedToMonitoring, escalated: [...escalatedIncidents.values()] } satisfies IngestionResult;
     } catch (error) {
       await client.query("rollback");
       throw error;

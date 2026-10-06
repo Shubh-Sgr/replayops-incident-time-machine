@@ -223,8 +223,18 @@ export interface AlertChannel {
   lastStatus: "delivered" | "failed" | null; lastError: string | null; lastSentAt: string | null; createdAt: string; signingSecret?: string;
 }
 export interface PrivacySettings { externalAiEnabled: boolean; captureRequestBodies: boolean; productAnalyticsEnabled: boolean; updatedAt: string }
-export interface ServiceDefinition { id: string; name: string; ownerTeam: string; tier: "critical" | "standard" | "internal"; repositoryUrl?: string | null; runbookUrl?: string | null; dependencies: string[]; createdAt: string; updatedAt: string }
-export interface IncidentPolicy { incidentThreshold: number; groupingWindowMinutes: number; suppressLowSeverity: boolean; maintenanceMode: boolean; updatedAt: string }
+export interface ServiceDefinition { id: string; name: string; ownerTeam: string; tier: "critical" | "standard" | "internal"; repositoryUrl?: string | null; runbookUrl?: string | null; dependencies: string[]; repositories: string[]; paths: string[]; createdAt: string; updatedAt: string }
+export type EnvironmentTier = "production" | "preprod" | "dev";
+export interface EnvironmentConfig { name: string; aliases: string[]; tier: EnvironmentTier; opensIncidents: boolean }
+export interface IncidentPolicy { incidentThreshold: number; groupingWindowMinutes: number; suppressLowSeverity: boolean; maintenanceMode: boolean; environments: EnvironmentConfig[]; releaseBranches: string[]; updatedAt: string }
+export type ChangeKind = "deploy" | "rollback" | "feature_flag" | "config" | "migration" | "infra";
+export interface CommitSummary { sha: string; message: string; author?: string; url?: string; files: string[] }
+export interface ChangeRecord {
+  id: string; kind: ChangeKind; status: "success" | "failure" | "in_progress"; service: string; environment: string; title: string;
+  version?: string; previousVersion?: string; sha?: string; previousSha?: string; repository?: string; author?: string; url?: string;
+  occurredAt: string; source: string; externalId: string; metadata: Record<string, unknown>; commits: CommitSummary[]; files: string[];
+}
+export interface ReleasesOverview { environments: string[]; services: Array<{ service: string; releases: Record<string, ChangeRecord> }>; recent: ChangeRecord[] }
 export interface TeamMember { userId: string; email: string; displayName: string; role: WorkspaceRole; joinedAt: string }
 export interface TeamInvitation { id: string; email: string; role: WorkspaceRole; status: "pending" | "accepted" | "revoked" | "expired"; emailDeliveryStatus: "sent" | "manual" | "failed"; emailedAt?: string | null; emailLastError?: string | null; expiresAt: string; createdAt: string; inviteToken?: string }
 export interface AuditEntry { id: string; actor: string; action: string; targetType: string; targetId?: string | null; detail: Record<string, unknown>; createdAt: string }

@@ -1,7 +1,7 @@
 import { supabase } from "./supabase";
 import { encodeDemoSessionToken } from "./demoSession";
 import { ApiError, describeApiError } from "./apiErrors";
-import type { ActionNotification, AlertChannel, ApiToken, ErrorGroup, AssistantResponse, AuditEntry, CaseworkSnapshot, ChangeProposal, DashboardData, EvidenceBundle, HttpReplayExecution, HttpReplaySpec, HypothesisTest, HypothesisTestStatus, Incident, IncidentComment, IncidentDecision, IncidentDiagnosis, IncidentEvent, IncidentPolicy, IncidentPostmortem, IngestionResult, Integration, IntegrationProvider, InvestigationCheck, InvestigationCheckStatus, InvestigationIntelligence, MitigationRequest, PrivacySettings, ProposalReview, QueueJob, RecoveryCriterion, RecoveryVerification, ReplayConfig, ReplayResult, SearchResult, ServiceDefinition, TeamInvitation, TeamMember, TypedMeasurement, ValidationArtifact, WorkspaceContext, WorkspaceRole } from "../types";
+import type { ActionNotification, AlertChannel, ApiToken, ChangeRecord, ErrorGroup, ReleasesOverview, AssistantResponse, AuditEntry, CaseworkSnapshot, ChangeProposal, DashboardData, EvidenceBundle, HttpReplayExecution, HttpReplaySpec, HypothesisTest, HypothesisTestStatus, Incident, IncidentComment, IncidentDecision, IncidentDiagnosis, IncidentEvent, IncidentPolicy, IncidentPostmortem, IngestionResult, Integration, IntegrationProvider, InvestigationCheck, InvestigationCheckStatus, InvestigationIntelligence, MitigationRequest, PrivacySettings, ProposalReview, QueueJob, RecoveryCriterion, RecoveryVerification, ReplayConfig, ReplayResult, SearchResult, ServiceDefinition, TeamInvitation, TeamMember, TypedMeasurement, ValidationArtifact, WorkspaceContext, WorkspaceRole } from "../types";
 
 const API_URL = (import.meta.env.VITE_API_URL ?? "http://localhost:8787/api").replace(/\/$/, "");
 
@@ -46,6 +46,8 @@ export const api = {
   incidents: () => request<Incident[]>("/incidents"),
   incident: (id: string) => request<Incident>(`/incidents/${id}`),
   diagnosis: (id: string) => request<IncidentDiagnosis>(`/incidents/${id}/diagnosis`),
+  releases: () => request<ReleasesOverview>("/releases"),
+  changes: (filter: { environment?: string; service?: string } = {}) => request<ChangeRecord[]>(`/changes?${new URLSearchParams(Object.entries(filter).filter(([, value]) => value) as Array<[string, string]>).toString()}`),
   incidentErrors: (id: string) => request<ErrorGroup[]>(`/incidents/${id}/errors`),
   intelligence: (id: string) => request<InvestigationIntelligence>(`/incidents/${id}/intelligence`),
   casework:(id:string)=>request<CaseworkSnapshot>(`/incidents/${id}/casework`),
@@ -100,7 +102,7 @@ export const api = {
   recordProductOutcome:(event:string,detail:Record<string,string|number|boolean|null>={})=>request<{recorded:boolean}>("/product-outcomes",{method:"POST",body:JSON.stringify({event,detail})}),
   productOutcomes:()=>request<AuditEntry[]>("/product-outcomes"),
   services: () => request<ServiceDefinition[]>("/services"),
-  saveService: (input: Pick<ServiceDefinition, "name" | "ownerTeam" | "tier" | "repositoryUrl" | "runbookUrl" | "dependencies">) => request<ServiceDefinition>("/services", { method: "POST", body: JSON.stringify(input) }),
+  saveService: (input: Pick<ServiceDefinition, "name" | "ownerTeam" | "tier" | "repositoryUrl" | "runbookUrl" | "dependencies" | "repositories" | "paths">) => request<ServiceDefinition>("/services", { method: "POST", body: JSON.stringify(input) }),
   incidentPolicy: () => request<IncidentPolicy>("/incident-policy"),
   incidentPolicyPreview: (threshold: number) => request<{ atOrAbove: number; below: number }>(`/incident-policy/preview?threshold=${threshold}`),
   updateIncidentPolicy: (input: Omit<IncidentPolicy, "updatedAt">) => request<IncidentPolicy>("/incident-policy", { method: "PATCH", body: JSON.stringify(input) }),

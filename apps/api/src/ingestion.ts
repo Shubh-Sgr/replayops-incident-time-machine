@@ -5,6 +5,7 @@ import { repository } from "./repository.js";
 import { ingestionQueue } from "./queue.js";
 import { workspaceService } from "./workspace.js";
 import { exceptionFromAttributes, exceptionFromGeneric } from "./exceptions.js";
+import { extractDelivery, isChangeEvent } from "./changes.js";
 import type { EventKind, IngestionBatch, IntegrationProvider, NormalizedSignal, Severity } from "./types.js";
 
 type JsonRecord = Record<string, unknown>;
@@ -97,19 +98,8 @@ function normalizeGitHub(payload: JsonRecord, eventName: string, deliveryId: str
   const repositoryId = textValue(repository.node_id, String(repository.id ?? ""));
   const sender = textValue(object(payload.sender).login, "GitHub");
 
-  if (eventName === "deployment") {
-    const deployment = object(payload.deployment);
-    const environment = textValue(deployment.environment, "production");
-    const ref = textValue(deployment.ref, "unknown ref");
-    return [normalized({
-      externalId: `${deliveryId}:deployment`, timestamp: isoTime(deployment.created_at), service: repositoryName, kind: "deploy",
-      title: `Deployment created for ${environment}`,
-      detail: `${sender} deployed ${ref} to ${environment}. This change is buffered as precursor evidence until an incident matches it.`,
-      impactScore: 24, sourceUrl: repositoryUrl, environment,
-      correlationKey: textValue(deployment.task, `${repositoryName}:${environment}`),
-      metadata: { provider: "github", eventType: "deployment", repositoryId, repository: repositoryName, deploymentId: deployment.id, deploymentEnvironment: environment, ref, branch: ref, sha: deployment.sha, creator: sender, sourceUrl: repositoryUrl }
-    })];
-  }
+  // A created deployment is not an outcome yet; its status events (and the change log) carry what matters.
+  if (eventName === "deployment") return [];
 
   if (eventName === "deployment_status") {
     const deployment = object(payload.deployment);
@@ -127,7 +117,7 @@ function normalizeGitHub(payload: JsonRecord, eventName: string, deliveryId: str
       impactScore: failed ? 78 : successful ? 28 : 44,
       severity: failed ? "high" : "low", sourceUrl: environmentUrl, environment,
       correlationKey: `${repositoryName}:${environment}`,
-      metadata: { provider: "github", eventType: "deployment_status", repositoryId, repository: repositoryName, deploymentId: deployment.id, deploymentEnvironment: environment, branch: textValue(deployment.ref) || undefined, state, sha: deployment.sha, creator: sender, sourceUrl: environmentUrl, logUrl: textValue(deploymentStatus.log_url, textValue(deploymentStatus.target_url)) || undefined, productionHealthMeasured: false }
+      metadata: { provider: "github", eventType: "deployment_status", laneOnly: successful || undefined, repositoryId, repository: repositoryName, deploymentId: deployment.id, deploymentEnvironment: environment, branch: textValue(deployment.ref) || undefined, state, sha: deployment.sha, creator: sender, sourceUrl: environmentUrl, logUrl: textValue(deploymentStatus.log_url, textValue(deploymentStatus.target_url)) || undefined, productionHealthMeasured: false }
     })];
   }
 
@@ -230,7 +220,7 @@ function normalizeOtelLogs(payload: JsonRecord, deliveryId: string): NormalizedS
           kind: failed ? "alert" : "metric", title: `${textValue(log.severityText, failed ? "Error" : "Warning")} log from ${service}`,
           detail: message.slice(0, 1200), impactScore: failed ? 78 : 54, traceId,
           correlationKey: traceId || `${service}:${Math.floor(new Date(nanoTime(log.timeUnixNano)).getTime() / 300_000)}`,
-          environment, metadata: { provider: "opentelemetry", signal: "log", severityNumber, attributes: logAttributes, ...(exception ? { exception } : {}) }
+          environment, metadata: { provider: "opentelemetry", signal: "log", severityNumber, release: resourceAttributes["service.version"], attributes: logAttributes, ...(exception ? { exception } : {}) }
         }));
       }
     }
@@ -277,61 +267,27 @@ function normalizeOtelMetrics(payload: JsonRecord, deliveryId: string): Normaliz
   return signals;
 }
 
-export type ChangeType = "deploy" | "feature_flag" | "config" | "migration" | "infra" | "rollback";
-const changeTypes: ChangeType[] = ["deploy", "feature_flag", "config", "migration", "infra", "rollback"];
-const changeAliases: Record<string, ChangeType> = { flag: "feature_flag", "feature-flag": "feature_flag", featureflag: "feature_flag", configuration: "config", "config-change": "config", schema: "migration", infrastructure: "infra", terraform: "infra", release: "deploy", deployment: "deploy", revert: "rollback" };
-const changeTypeOf = (value: string): ChangeType | undefined => {
-  const key = value.trim().toLowerCase().replace(/\s+/g, "_");
-  return changeTypes.includes(key as ChangeType) ? key as ChangeType : changeAliases[key];
-};
-
-/**
- * Change events — deploys from any CD tool, feature-flag flips, config edits, migrations — are the most
- * common incident cause, so they are first-class suspects even when they don't come from GitHub.
- */
-function changeTitle(changeType: ChangeType, service: string, input: JsonRecord) {
-  const version = textValue(input.version ?? input.release);
-  const key = textValue(input.flag ?? input.flagKey ?? input.key ?? input.setting);
-  const to = input.newValue ?? input.to ?? input.value;
-  if (changeType === "feature_flag") return `Feature flag ${key || "changed"}${to !== undefined ? ` set to ${String(to)}` : ""} on ${service}`;
-  if (changeType === "config") return `Config ${key || "change"}${to !== undefined ? ` set to ${String(to)}` : ""} on ${service}`;
-  if (changeType === "migration") return `Database migration ${version || key || "applied"} on ${service}`;
-  if (changeType === "infra") return `Infrastructure change${key ? ` to ${key}` : ""} for ${service}`;
-  if (changeType === "rollback") return `Rolled back ${service}${version ? ` to ${version}` : ""}`;
-  return `Deployed ${service}${version ? ` ${version}` : ""}`;
-}
-
 function normalizeGenericEvent(inputValue: unknown, index: number, deliveryId: string): NormalizedSignal | null {
   const input = object(inputValue);
   const service = textValue(input.service, textValue(object(input.labels).service, textValue(input.source, "external-service")));
-  const rawKind = textValue(input.kind).toLowerCase();
-  // `kind: "change" | "deploy" | "feature_flag" | …` or an explicit `changeType` marks a change; an alert that merely mentions a changeType stays an alert.
-  const changeType = changeTypeOf(textValue(input.changeType ?? input.change_type)) ?? (rawKind === "change" ? "deploy" : changeTypeOf(rawKind));
-  const isChange = Boolean(changeType) && (!rawKind || rawKind === "change" || Boolean(changeTypeOf(rawKind)));
-  const exception = isChange ? null : exceptionFromGeneric(service, input);
-  const title = textValue(input.title, textValue(input.name, textValue(input.message, isChange ? changeTitle(changeType!, service, input) : exception ? `${exception.type}: ${exception.message}`.slice(0, 140) : "External operational signal")));
+  const exception = exceptionFromGeneric(service, input);
+  const title = textValue(input.title, textValue(input.name, textValue(input.message, exception ? `${exception.type}: ${exception.message}`.slice(0, 140) : "External operational signal")));
   const detail = textValue(input.detail, textValue(input.description, textValue(input.message, title)));
-  const kindCandidate = (isChange ? "deploy" : rawKind || "metric") as EventKind;
-  const kind: EventKind = ["alert", "deploy", "dependency", "metric", "action", "recovery"].includes(kindCandidate) ? kindCandidate : "metric";
-  const impactScore = boundedImpact(input.impactScore ?? input.impact_score, kind === "alert" ? 75 : kind === "recovery" ? 22 : isChange ? 40 : 48);
+  const kindCandidate = (textValue(input.kind).toLowerCase() || "metric") as EventKind;
+  const kind: EventKind = ["alert", "dependency", "metric", "action", "recovery"].includes(kindCandidate) ? kindCandidate : "metric";
+  const impactScore = boundedImpact(input.impactScore ?? input.impact_score, kind === "alert" ? 75 : kind === "recovery" ? 22 : 48);
   const externalId = textValue(input.eventId ?? input.event_id ?? input.id, `${deliveryId}:event:${index}`);
   if (!title || !detail) return null;
-  const change = isChange ? {
-    changeType, version: textValue(input.version ?? input.release) || undefined, previousVersion: textValue(input.previousVersion ?? input.previous_version) || undefined,
-    sha: textValue(input.sha ?? input.commit) || undefined, author: textValue(input.author ?? input.actor ?? input.user) || undefined,
-    flagKey: textValue(input.flag ?? input.flagKey ?? input.key ?? input.setting) || undefined,
-    previousValue: input.previousValue ?? input.from, newValue: input.newValue ?? input.to ?? input.value,
-    branch: textValue(input.branch) || undefined
-  } : {};
   // A sender that omits the time means "now"; a malformed time stays unknown rather than looking fresh.
   const rawTime = input.timestamp ?? input.occurredAt ?? input.startsAt;
   const timestampMissing = rawTime === undefined || rawTime === null || rawTime === "";
+  const release = textValue(input.version ?? input.release ?? object(input.labels).version);
   return normalized({
     externalId, timestamp: timestampMissing ? new Date().toISOString() : isoTime(rawTime), service, kind, title, detail,
     impactScore, severity: severityValue(input.severity, severityForImpact(impactScore)),
     correlationKey: textValue(input.correlationKey ?? input.incidentKey ?? input.groupKey),
     traceId: textValue(input.traceId ?? input.trace_id), sourceUrl: textValue(input.sourceUrl ?? input.url ?? input.generatorURL),
-    environment: textValue(input.environment), metadata: { provider: "generic", ...object(input.metadata), ...change, ...(exception ? { exception } : {}), ...(timestampMissing ? { timestampSource: "received" } : {}), labels: input.labels, tags: input.tags }
+    environment: textValue(input.environment), metadata: { provider: "generic", ...object(input.metadata), ...(exception ? { exception } : {}), ...(release ? { release } : {}), ...(timestampMissing ? { timestampSource: "received" } : {}), labels: input.labels, tags: input.tags }
   });
 }
 
@@ -399,8 +355,9 @@ function normalizeGeneric(payload: JsonRecord, deliveryId: string): NormalizedSi
       })];
     });
   }
+  // Change events (deploys, flags, config…) go to the change log instead; see changes.ts.
   const source = Array.isArray(payload.events) ? payload.events : [payload];
-  return source.map((event, index) => normalizeGenericEvent(event, index, deliveryId)).filter((event): event is NormalizedSignal => Boolean(event));
+  return source.map((event, index) => isChangeEvent(object(event)) ? null : normalizeGenericEvent(event, index, deliveryId)).filter((event): event is NormalizedSignal => Boolean(event));
 }
 
 export function normalizePayload(provider: IntegrationProvider, payload: JsonRecord, deliveryId: string, eventName = "", healthySampleRate = .05) {
@@ -458,7 +415,7 @@ async function receive(req: RawRequest, res: Response) {
   const eventName = req.get("x-github-event") ?? textValue(req.params.signal);
   const privacy = await workspaceService.privacyForOrganization(integration.organizationId);
   const signals = normalizePayload(integration.provider, payload, externalId, eventName, integration.healthySampleRate);
-  const batch: IngestionBatch = { externalId, signals: privacy.captureRequestBodies ? signals : stripCapturedBodies(signals) };
+  const batch: IngestionBatch = { externalId, signals: privacy.captureRequestBodies ? signals : stripCapturedBodies(signals), delivery: extractDelivery(integration.provider, payload, eventName, externalId) };
   const queued = await ingestionQueue.enqueue(integration, batch);
   if (queued.duplicate && queued.job.status === "completed") {
     res.status(200).json({ status: "duplicate", acceptedSignals: 0, incidentIds: [], queueId: queued.job.id });

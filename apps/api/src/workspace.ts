@@ -2,12 +2,13 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import { config } from "./config.js";
 import { MEMBERSHIPS } from "./scope.js";
+import { defaultEnvironments, defaultReleaseBranches, type EnvironmentConfig, type ServiceMapping } from "./release.js";
 import { sendInvitationEmail } from "./mailer.js";
 import { conflict, forbidden, HttpError, notFound } from "./errors.js";
 import type { ActionNotification, AuditEntry, HypothesisTest, HypothesisTestStatus, IncidentComment, IncidentPolicy, IncidentPostmortem, MitigationRequest, PrivacySettings, RecoveryVerification, ReplayResult, ServiceDefinition, TeamInvitation, TeamMember, WorkspaceContext, WorkspaceRole } from "./types.js";
 
 type Row = Record<string, unknown>;
-type ServiceInput = Pick<ServiceDefinition, "name" | "ownerTeam" | "tier" | "repositoryUrl" | "runbookUrl" | "dependencies">;
+type ServiceInput = Pick<ServiceDefinition, "name" | "ownerTeam" | "tier" | "repositoryUrl" | "runbookUrl" | "dependencies"> & Partial<Pick<ServiceDefinition, "repositories" | "paths">>;
 
 export function mitigationReviewPermission(input: { requestedBy: string; actor: string; role: WorkspaceRole; status: "approved" | "rejected"; stale: boolean }) {
   const self = input.requestedBy.trim().toLowerCase() === input.actor.trim().toLowerCase();
@@ -25,11 +26,15 @@ export function mitigationReviewPermission(input: { requestedBy: string; actor: 
 const mapService = (row: Row): ServiceDefinition => ({
   id: String(row.id), name: String(row.name), ownerTeam: String(row.owner_team), tier: row.tier as ServiceDefinition["tier"],
   repositoryUrl: row.repository_url ? String(row.repository_url) : null, runbookUrl: row.runbook_url ? String(row.runbook_url) : null,
-  dependencies: Array.isArray(row.dependencies) ? row.dependencies.map(String) : [], createdAt: new Date(String(row.created_at)).toISOString(), updatedAt: new Date(String(row.updated_at)).toISOString()
+  dependencies: Array.isArray(row.dependencies) ? row.dependencies.map(String) : [],
+  repositories: Array.isArray(row.repositories) ? row.repositories.map(String) : [], paths: Array.isArray(row.paths) ? row.paths.map(String) : [], createdAt: new Date(String(row.created_at)).toISOString(), updatedAt: new Date(String(row.updated_at)).toISOString()
 });
 const mapPolicy = (row: Row): IncidentPolicy => ({
   incidentThreshold: Number(row.incident_threshold), groupingWindowMinutes: Number(row.grouping_window_minutes),
-  suppressLowSeverity: Boolean(row.suppress_low_severity), maintenanceMode: Boolean(row.maintenance_mode), updatedAt: new Date(String(row.updated_at)).toISOString()
+  suppressLowSeverity: Boolean(row.suppress_low_severity), maintenanceMode: Boolean(row.maintenance_mode),
+  environments: Array.isArray(row.environments) && row.environments.length ? row.environments as EnvironmentConfig[] : structuredClone(defaultEnvironments),
+  releaseBranches: Array.isArray(row.release_branches) && row.release_branches.length ? row.release_branches.map(String) : [...defaultReleaseBranches],
+  updatedAt: new Date(String(row.updated_at)).toISOString()
 });
 const mapMember = (row: Row): TeamMember => ({
   userId: String(row.user_id), email: String(row.email ?? "unknown@workspace.local"), displayName: String(row.display_name ?? String(row.email ?? "Responder").split("@")[0]),
@@ -74,10 +79,10 @@ const mapPrivacy=(row:Row):PrivacySettings=>({externalAiEnabled:Boolean(row.exte
 class WorkspaceService {
   private pool?: Pool;
   private memoryServices: ServiceDefinition[] = [
-    { id: "svc-checkout", name: "checkout-api", ownerTeam: "Commerce", tier: "critical", repositoryUrl: "https://github.com/example/checkout", runbookUrl: null, dependencies: ["inventory-api", "payments-api"], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
-    { id: "svc-inventory", name: "inventory-api", ownerTeam: "Commerce", tier: "critical", repositoryUrl: null, runbookUrl: null, dependencies: ["catalog-db"], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }
+    { id: "svc-checkout", name: "checkout-api", ownerTeam: "Commerce", tier: "critical", repositoryUrl: "https://github.com/example/checkout", runbookUrl: null, repositories: [], paths: [], dependencies: ["inventory-api", "payments-api"], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+    { id: "svc-inventory", name: "inventory-api", ownerTeam: "Commerce", tier: "critical", repositoryUrl: null, runbookUrl: null, repositories: [], paths: [], dependencies: ["catalog-db"], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }
   ];
-  private memoryPolicy: IncidentPolicy = { incidentThreshold: 65, groupingWindowMinutes: 120, suppressLowSeverity: true, maintenanceMode: false, updatedAt: new Date().toISOString() };
+  private memoryPolicy: IncidentPolicy = { incidentThreshold: 65, groupingWindowMinutes: 120, suppressLowSeverity: true, maintenanceMode: false, environments: structuredClone(defaultEnvironments), releaseBranches: [...defaultReleaseBranches], updatedAt: new Date().toISOString() };
   private memoryMembers: TeamMember[] = [
     { userId: "00000000-0000-4000-8000-000000000001", email: "operator@replayops.dev", displayName: "Maya Chen", role: "admin", joinedAt: new Date().toISOString() },
     { userId: "00000000-0000-4000-8000-000000000002", email: "reviewer@replayops.dev", displayName: "Alex Rivera", role: "admin", joinedAt: new Date().toISOString() }
@@ -269,6 +274,13 @@ class WorkspaceService {
     return (await this.pool.query(`select * from service_catalog where organization_id=$1 order by case tier when 'critical' then 1 when 'standard' then 2 else 3 end,name`, [context.organizationId])).rows.map(mapService);
   }
 
+  /** Service ↔ repository/path mapping for machine paths (ingestion, change linking). */
+  async servicesForOrganization(organizationId: string): Promise<ServiceMapping[]> {
+    if (!this.pool) return this.memoryServices.map((service) => ({ name: service.name, repositories: service.repositories, paths: service.paths, repositoryUrl: service.repositoryUrl }));
+    const result = await this.pool.query(`select name, repositories, paths, repository_url from service_catalog where organization_id=$1`, [organizationId]);
+    return (result.rows as Row[]).map((row) => ({ name: String(row.name), repositories: Array.isArray(row.repositories) ? row.repositories.map(String) : [], paths: Array.isArray(row.paths) ? row.paths.map(String) : [], repositoryUrl: row.repository_url ? String(row.repository_url) : null }));
+  }
+
   async relatedServicesForOrganization(organizationId: string, serviceName: string): Promise<string[]> {
     if (!this.pool) {
       const related = new Set([serviceName]);
@@ -293,12 +305,12 @@ class WorkspaceService {
     const context = await this.assertRole(userId, ["admin", "responder"]);
     if (!this.pool) {
       const existing = this.memoryServices.find((service) => service.name === input.name);
-      const value: ServiceDefinition = existing ? { ...existing, ...input, updatedAt: new Date().toISOString() } : { ...input, id: randomUUID(), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+      const value: ServiceDefinition = existing ? { ...existing, ...input, repositories: input.repositories ?? existing.repositories, paths: input.paths ?? existing.paths, updatedAt: new Date().toISOString() } : { ...input, repositories: input.repositories ?? [], paths: input.paths ?? [], id: randomUUID(), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
       this.memoryServices = existing ? this.memoryServices.map((service) => service.id === existing.id ? value : service) : [value, ...this.memoryServices];
       await this.audit(userId, actor, existing ? "updated service" : "created service", "service", value.id, { name: value.name });
       return value;
     }
-    const result = await this.pool.query(`insert into service_catalog(organization_id,name,owner_team,tier,repository_url,runbook_url,dependencies) values($1,$2,$3,$4,$5,$6,$7) on conflict(organization_id,name) do update set owner_team=excluded.owner_team,tier=excluded.tier,repository_url=excluded.repository_url,runbook_url=excluded.runbook_url,dependencies=excluded.dependencies,updated_at=now() returning *`, [context.organizationId, input.name, input.ownerTeam, input.tier, input.repositoryUrl ?? null, input.runbookUrl ?? null, input.dependencies]);
+    const result = await this.pool.query(`insert into service_catalog(organization_id,name,owner_team,tier,repository_url,runbook_url,dependencies,repositories,paths) values($1,$2,$3,$4,$5,$6,$7,$8,$9) on conflict(organization_id,name) do update set owner_team=excluded.owner_team,tier=excluded.tier,repository_url=excluded.repository_url,runbook_url=excluded.runbook_url,dependencies=excluded.dependencies,repositories=excluded.repositories,paths=excluded.paths,updated_at=now() returning *`, [context.organizationId, input.name, input.ownerTeam, input.tier, input.repositoryUrl ?? null, input.runbookUrl ?? null, input.dependencies, input.repositories ?? [], input.paths ?? []]);
     const value = mapService(result.rows[0] as Row);
     await this.audit(userId, actor, "upserted service", "service", value.id, { name: value.name, tier: value.tier });
     return value;
@@ -315,7 +327,7 @@ class WorkspaceService {
   async updatePolicy(userId: string, actor: string, input: Omit<IncidentPolicy, "updatedAt">) {
     const context = await this.assertRole(userId, ["admin"]);
     if (!this.pool) { this.memoryPolicy = { ...input, updatedAt: new Date().toISOString() }; await this.audit(userId, actor, "updated intake policy", "policy", undefined, input); return this.memoryPolicy; }
-    const result = await this.pool.query(`insert into incident_policies(organization_id,incident_threshold,grouping_window_minutes,suppress_low_severity,maintenance_mode,updated_at) values($1,$2,$3,$4,$5,now()) on conflict(organization_id) do update set incident_threshold=excluded.incident_threshold,grouping_window_minutes=excluded.grouping_window_minutes,suppress_low_severity=excluded.suppress_low_severity,maintenance_mode=excluded.maintenance_mode,updated_at=now() returning *`, [context.organizationId, input.incidentThreshold, input.groupingWindowMinutes, input.suppressLowSeverity, input.maintenanceMode]);
+    const result = await this.pool.query(`insert into incident_policies(organization_id,incident_threshold,grouping_window_minutes,suppress_low_severity,maintenance_mode,environments,release_branches,updated_at) values($1,$2,$3,$4,$5,$6,$7,now()) on conflict(organization_id) do update set incident_threshold=excluded.incident_threshold,grouping_window_minutes=excluded.grouping_window_minutes,suppress_low_severity=excluded.suppress_low_severity,maintenance_mode=excluded.maintenance_mode,environments=excluded.environments,release_branches=excluded.release_branches,updated_at=now() returning *`, [context.organizationId, input.incidentThreshold, input.groupingWindowMinutes, input.suppressLowSeverity, input.maintenanceMode, JSON.stringify(input.environments), input.releaseBranches]);
     await this.audit(userId, actor, "updated intake policy", "policy", undefined, input);
     return mapPolicy(result.rows[0] as Row);
   }

@@ -74,8 +74,8 @@ describe("GitHub ingestion noise", () => {
     const now = Date.now();
     const at = (minutes: number) => new Date(now - minutes * 60_000).toISOString();
     const signal = (id: string, branch: string, minutes: number, impactScore: number, kind: "metric" | "alert" = "metric") => ({ externalId: id, timestamp: at(minutes), service: "acme/api", kind, title: id, detail: id, impactScore, severity: impactScore > 70 ? "high" as const : "low" as const, metadata: { provider: "github", eventType: kind === "alert" ? "workflow_run" : "push", branch } });
-    await repo.ingest(target, { externalId: "d1", signals: [signal("main-push", "main", 10, 18), signal("drill-push", "drill", 5, 18)] });
-    const result = await repo.ingest(target, { externalId: "d2", signals: [signal("drill-fail", "drill", 1, 76, "alert")] });
+    await repo.ingest(target, { externalId: "d1", signals: [signal("main-push", "main", 10, 18), signal("drill-push", "release/drill", 5, 18)] });
+    const result = await repo.ingest(target, { externalId: "d2", signals: [signal("drill-fail", "release/drill", 1, 76, "alert")] });
     const incident = (await repo.getIncident("demo", result.incidentIds[0]!))!;
     expect(incident.events.map((event) => event.title).sort()).toEqual(["drill-fail", "drill-push"]);
     const later = await repo.ingest(target, { externalId: "d3", signals: [signal("main-push-2", "main", 0, 18)] });
@@ -86,7 +86,7 @@ describe("GitHub ingestion noise", () => {
 describe("GitHub recovery evidence routing", () => {
   const run = (id: number, sha: string, conclusion: "failure" | "success", updatedAt: string) => normalizePayload("github", {
     action: "completed", repository: { id: 1, full_name: repo, html_url: `https://github.com/${repo}` }, sender: { login: "dev" },
-    workflow_run: { id, workflow_id: 7, name: "ReplayOps incident drill", run_number: id, run_attempt: 1, status: "completed", conclusion, head_sha: sha, head_branch: "replayops-drill", event: "push", html_url: `https://github.com/${repo}/actions/runs/${id}`, updated_at: updatedAt }
+    workflow_run: { id, workflow_id: 7, name: "ReplayOps incident drill", run_number: id, run_attempt: 1, status: "completed", conclusion, head_sha: sha, head_branch: "main", event: "push", html_url: `https://github.com/${repo}/actions/runs/${id}`, updated_at: updatedAt }
   }, `delivery-${id}`, "workflow_run");
   const target = { id: "gh", organizationId: "demo-organization", name: "GitHub", provider: "github" as const, status: "active" as const };
 
@@ -105,8 +105,30 @@ describe("GitHub recovery evidence routing", () => {
   it("keeps runs from another branch out of the incident", async () => {
     const repository = new MemoryRepository();
     const opened = await repository.ingest(target, { externalId: "d3", signals: run(3, "aaaa", "failure", new Date().toISOString()) });
-    const other = run(4, "bbbb", "success", new Date().toISOString()).map((signal) => ({ ...signal, metadata: { ...signal.metadata, branch: "main" } }));
+    const other = run(4, "bbbb", "success", new Date().toISOString()).map((signal) => ({ ...signal, metadata: { ...signal.metadata, branch: "release/9" } }));
     const result = await repository.ingest(target, { externalId: "d4", signals: other });
     expect(result.incidentIds).not.toContain(opened.opened![0]!.id);
   });
 });
+
+describe("real-world intake rules", () => {
+  const target = { id: "gh2", organizationId: "demo-organization", name: "GitHub", provider: "github" as const, status: "active" as const };
+  const failedRun = (branch: string, id: number) => normalizePayload("github", { action: "completed", repository: { id: 1, full_name: repo }, sender: { login: "dev" }, workflow_run: { id, name: "CI", status: "completed", conclusion: "failure", head_sha: `sha${id}`, head_branch: branch, updated_at: new Date().toISOString() } }, `rw-${id}`, "workflow_run");
+
+  it("never pages for a failing feature branch, but does for main", async () => {
+    const repository = new MemoryRepository();
+    expect((await repository.ingest(target, { externalId: "rw1", signals: failedRun("feature/new-checkout", 1) })).opened).toEqual([]);
+    expect((await repository.ingest(target, { externalId: "rw2", signals: failedRun("main", 2) })).opened).toHaveLength(1);
+  });
+
+  it("keeps staging and preview failures as evidence without opening incidents", async () => {
+    const repository = new MemoryRepository();
+    const generic = { ...target, id: "gen2", provider: "generic" as const };
+    const alert = (environment: string, id: string) => normalizePayload("generic", { kind: "alert", service: "checkout-api", environment, title: `5xx in ${environment}`, detail: "error rate 9%", impactScore: 88 }, id);
+    expect((await repository.ingest(generic, { externalId: "s1", signals: alert("Staging", "s1") })).opened).toEqual([]);
+    expect((await repository.ingest(generic, { externalId: "s2", signals: alert("preview", "s2") })).opened).toEqual([]);
+    const prod = await repository.ingest(generic, { externalId: "s3", signals: alert("prd", "s3") });
+    expect(prod.opened?.[0]).toMatchObject({ environment: "production" });
+  });
+});
+

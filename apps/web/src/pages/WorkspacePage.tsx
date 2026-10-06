@@ -6,9 +6,9 @@ import { api } from "../lib/api";
 import { AlertDestinations } from "../components/AlertDestinations";
 import { ApiTokens } from "../components/ApiTokens";
 import { presentAuditEntry } from "../lib/audit";
-import { policyWarnings, recommendedPolicy } from "../lib/policy";
+import { defaultEnvironments, defaultReleaseBranches, policyWarnings, recommendedPolicy } from "../lib/policy";
 import { cn, formatRelative } from "../lib/utils";
-import type { IncidentPolicy, PrivacySettings, ServiceDefinition, TeamInvitation, WorkspaceRole } from "../types";
+import type { EnvironmentConfig, IncidentPolicy, PrivacySettings, ServiceDefinition, TeamInvitation, WorkspaceRole } from "../types";
 
 type Mode = "services" | "alerts" | "tokens" | "intake" | "privacy" | "team" | "audit" | "queue";
 const modes = [
@@ -25,10 +25,13 @@ const modes = [
 function ServiceMap() {
   const queryClient = useQueryClient();
   const services = useQuery({ queryKey: ["services"], queryFn: api.services });
-  const [draft, setDraft] = useState({ name: "", ownerTeam: "", tier: "standard" as ServiceDefinition["tier"], repositoryUrl: "", runbookUrl: "", dependencies: "" });
+  const emptyDraft = { name: "", ownerTeam: "", tier: "standard" as ServiceDefinition["tier"], repositoryUrl: "", runbookUrl: "", dependencies: "", repositories: "", paths: "" };
+  const [draft, setDraft] = useState(emptyDraft);
+  const list = (value: string) => value.split(",").map((item) => item.trim()).filter(Boolean);
+  const edit = (service: ServiceDefinition) => setDraft({ name: service.name, ownerTeam: service.ownerTeam, tier: service.tier, repositoryUrl: service.repositoryUrl ?? "", runbookUrl: service.runbookUrl ?? "", dependencies: service.dependencies.join(", "), repositories: service.repositories.join(", "), paths: service.paths.join(", ") });
   const save = useMutation({
-    mutationFn: () => api.saveService({ ...draft, repositoryUrl: draft.repositoryUrl || null, runbookUrl: draft.runbookUrl || null, dependencies: draft.dependencies.split(",").map((item) => item.trim()).filter(Boolean) }),
-    onSuccess: () => { setDraft({ name: "", ownerTeam: "", tier: "standard", repositoryUrl: "", runbookUrl: "", dependencies: "" }); void queryClient.invalidateQueries({ queryKey: ["services"] }); }
+    mutationFn: () => api.saveService({ ...draft, repositoryUrl: draft.repositoryUrl || null, runbookUrl: draft.runbookUrl || null, dependencies: list(draft.dependencies), repositories: list(draft.repositories), paths: list(draft.paths) }),
+    onSuccess: () => { setDraft(emptyDraft); void queryClient.invalidateQueries({ queryKey: ["services"] }); }
   });
   const submit = (event: FormEvent) => { event.preventDefault(); save.mutate(); };
 
@@ -43,6 +46,8 @@ function ServiceMap() {
         <label className="text-sm font-semibold">Dependencies<input className="field mt-2" value={draft.dependencies} onChange={(e) => setDraft({ ...draft, dependencies: e.target.value })} placeholder="inventory-api, payments-api" /></label>
         <label className="text-sm font-semibold sm:col-span-2 xl:col-span-1 2xl:col-span-2">Repository URL<input type="url" className="field mt-2" value={draft.repositoryUrl} onChange={(e) => setDraft({ ...draft, repositoryUrl: e.target.value })} placeholder="https://github.com/org/repository" /></label>
         <label className="text-sm font-semibold sm:col-span-2 xl:col-span-1 2xl:col-span-2">Runbook URL<input type="url" className="field mt-2" value={draft.runbookUrl} onChange={(e) => setDraft({ ...draft, runbookUrl: e.target.value })} placeholder="https://docs.example.com/runbooks/checkout" /></label>
+        <label className="text-sm font-semibold sm:col-span-2 xl:col-span-1 2xl:col-span-2">GitHub repositories<input className="field mt-2" value={draft.repositories} onChange={(e) => setDraft({ ...draft, repositories: e.target.value })} placeholder="acme/payments, acme/platform" /><span className="mt-1 block text-xs font-normal text-muted">owner/name, comma-separated. GitHub pushes, CI and deploys from these repos count as this service.</span></label>
+        <label className="text-sm font-semibold sm:col-span-2 xl:col-span-1 2xl:col-span-2">Monorepo paths<input className="field mt-2" value={draft.paths} onChange={(e) => setDraft({ ...draft, paths: e.target.value })} placeholder="services/payouts, libs/payments" /><span className="mt-1 block text-xs font-normal text-muted">Only changes touching these folders affect this service. Leave empty if the repository is only this service.</span></label>
       </div>
       {save.error && <p role="alert" className="mt-4 rounded-control bg-danger/10 p-3 text-sm text-danger">{save.error.message}</p>}
       <button className="control-primary mt-5 inline-flex w-full items-center justify-center gap-2" disabled={save.isPending}>{save.isPending ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}Save service</button>
@@ -51,7 +56,7 @@ function ServiceMap() {
       <div className="px-5 py-5 sm:px-6"><h2 id="catalog-title" className="section-title">Dependency-aware catalog</h2><p className="mt-1 text-sm text-muted">Used by incident grouping, ownership, and mitigation review.</p></div>
       <div className="divide-y divide-line border-t border-line">
         {services.isLoading && <p className="p-6 text-sm text-muted">Loading service context…</p>}
-        {services.data?.map((service) => <article key={service.id} className="px-5 py-4 sm:px-6"><div className="flex flex-wrap items-start justify-between gap-3"><div><div className="flex items-center gap-2"><span className="measurement-number text-sm font-semibold">{service.name}</span><span className={cn("rounded-full px-2 py-0.5 text-xs font-semibold capitalize", service.tier === "critical" ? "bg-danger/10 text-danger" : service.tier === "standard" ? "bg-info/10 text-info" : "bg-elevated text-muted")}>{service.tier}</span></div><p className="mt-1 text-sm text-muted">Owned by {service.ownerTeam}</p></div>{service.repositoryUrl && <a className="control-quiet inline-flex !min-h-9 items-center gap-2" href={service.repositoryUrl} target="_blank" rel="noreferrer"><GitBranch className="h-4 w-4" />Repository</a>}</div><div className="mt-3 flex flex-wrap gap-2">{service.dependencies.length ? service.dependencies.map((dependency) => <span key={dependency} className="measurement-number rounded-full bg-elevated px-2.5 py-1 text-xs text-muted">calls {dependency}</span>) : <span className="text-xs text-faint">No dependencies recorded</span>}</div></article>)}
+        {services.data?.map((service) => <article key={service.id} className="px-5 py-4 sm:px-6"><div className="flex flex-wrap items-start justify-between gap-3"><div><div className="flex items-center gap-2"><span className="measurement-number text-sm font-semibold">{service.name}</span><span className={cn("rounded-full px-2 py-0.5 text-xs font-semibold capitalize", service.tier === "critical" ? "bg-danger/10 text-danger" : service.tier === "standard" ? "bg-info/10 text-info" : "bg-elevated text-muted")}>{service.tier}</span></div><p className="mt-1 text-sm text-muted">Owned by {service.ownerTeam}</p>{(service.repositories.length > 0 || service.paths.length > 0) && <p className="measurement-number mt-1 break-all text-xs text-muted">{service.repositories.join(", ") || "—"}{service.paths.length ? ` · ${service.paths.join(", ")}` : ""}</p>}</div><div className="flex gap-2"><button type="button" className="control-quiet !min-h-9" onClick={() => edit(service)}>Edit</button>{service.repositoryUrl && <a className="control-quiet inline-flex !min-h-9 items-center gap-2" href={service.repositoryUrl} target="_blank" rel="noreferrer"><GitBranch className="h-4 w-4" />Repository</a>}</div></div><div className="mt-3 flex flex-wrap gap-2">{service.dependencies.length ? service.dependencies.map((dependency) => <span key={dependency} className="measurement-number rounded-full bg-elevated px-2.5 py-1 text-xs text-muted">calls {dependency}</span>) : <span className="text-xs text-faint">No dependencies recorded</span>}</div></article>)}
         {services.data && !services.data.length && <div className="px-6 py-12 text-center"><Boxes className="mx-auto h-6 w-6 text-faint" /><p className="mt-3 font-semibold">No services registered</p><p className="mt-1 text-sm text-muted">Add the first production service and its owner.</p></div>}
       </div>
     </section>
@@ -61,12 +66,15 @@ function ServiceMap() {
 function IntakePolicyPanel() {
   const queryClient = useQueryClient();
   const policy = useQuery({ queryKey: ["incident-policy"], queryFn: api.incidentPolicy });
-  const [draft, setDraft] = useState<Omit<IncidentPolicy, "updatedAt">>({ incidentThreshold: 65, groupingWindowMinutes: 120, suppressLowSeverity: true, maintenanceMode: false });
+  const [draft, setDraft] = useState<Omit<IncidentPolicy, "updatedAt">>({ incidentThreshold: 65, groupingWindowMinutes: 120, suppressLowSeverity: true, maintenanceMode: false, environments: defaultEnvironments, releaseBranches: defaultReleaseBranches });
+  const [branches, setBranches] = useState(defaultReleaseBranches.join(", "));
+  useEffect(() => { if (policy.data) setBranches(policy.data.releaseBranches.join(", ")); }, [policy.data]);
+  const updateEnvironment = (index: number, patch: Partial<EnvironmentConfig>) => setDraft({ ...draft, environments: draft.environments.map((item, position) => position === index ? { ...item, ...patch } : item) });
   useEffect(() => { if (policy.data) setDraft(policy.data); }, [policy.data]);
   const [previewThreshold, setPreviewThreshold] = useState(65);
   useEffect(() => { const timer = window.setTimeout(() => setPreviewThreshold(draft.incidentThreshold), 250); return () => window.clearTimeout(timer); }, [draft.incidentThreshold]);
   const preview = useQuery({ queryKey: ["incident-policy-preview", previewThreshold], queryFn: () => api.incidentPolicyPreview(previewThreshold), placeholderData: (previous) => previous });
-  const save = useMutation({ mutationFn: () => api.updateIncidentPolicy(draft), onSuccess: (value) => queryClient.setQueryData(["incident-policy"], value) });
+  const save = useMutation({ mutationFn: () => api.updateIncidentPolicy({ ...draft, releaseBranches: branches.split(",").map((item) => item.trim()).filter(Boolean), environments: draft.environments.filter((item) => item.name.trim()) }), onSuccess: (value) => queryClient.setQueryData(["incident-policy"], value) });
   return <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(280px,0.55fr)]">
     <section className="surface-lined p-5 sm:p-6"><h2 className="section-title">Decide when evidence becomes an incident</h2><p className="mt-2 max-w-2xl text-sm leading-6 text-muted">These deterministic controls run before AI. They prevent noisy signals from creating low-value investigations and group related evidence into one response window.</p>
       <label className="mt-7 block text-sm font-semibold">Incident threshold <span className="measurement-number float-right text-muted">{draft.incidentThreshold}/100</span><input className="mt-3 h-2 w-full cursor-pointer accent-[oklch(var(--accent))]" type="range" min="30" max="95" value={draft.incidentThreshold} onChange={(e) => setDraft({ ...draft, incidentThreshold: Number(e.target.value) })} /></label>
@@ -75,7 +83,22 @@ function IntakePolicyPanel() {
         <label className="flex min-h-16 cursor-pointer items-center justify-between gap-5 py-3"><span><span className="block text-sm font-semibold">Suppress low-severity signals</span><span className="mt-1 block text-xs text-muted">Retain them as evidence without opening an incident.</span></span><input type="checkbox" className="h-5 w-5 accent-[oklch(var(--accent))]" checked={draft.suppressLowSeverity} onChange={(e) => setDraft({ ...draft, suppressLowSeverity: e.target.checked })} /></label>
         <label className="flex min-h-16 cursor-pointer items-center justify-between gap-5 py-3"><span><span className="block text-sm font-semibold">Maintenance mode</span><span className="mt-1 block text-xs text-muted">Buffer all incoming evidence and suspend automatic incident creation.</span></span><input type="checkbox" className="h-5 w-5 accent-[oklch(var(--accent))]" checked={draft.maintenanceMode} onChange={(e) => setDraft({ ...draft, maintenanceMode: e.target.checked })} /></label>
       </div>
-      {policyWarnings(draft).length > 0 && <div role="status" className="mt-5 rounded-control bg-warning/12 p-4 text-sm"><p className="font-semibold text-warning">This policy will be noisy or split incidents</p><ul className="mt-2 list-disc space-y-1 pl-5 text-xs leading-5 text-muted">{policyWarnings(draft).map((item) => <li key={item}>{item}</li>)}</ul><button type="button" className="control-secondary mt-3 !min-h-9" onClick={() => setDraft({ ...recommendedPolicy })}>Use recommended (65 · 120 min · suppress low)</button></div>}
+      <div className="mt-7 border-t border-line pt-6">
+        <h3 className="font-semibold">Environments</h3>
+        <p className="mt-1 text-xs leading-5 text-muted">Tools name environments differently (“Production”, “prd”, “Preview”). Aliases map them to one name. Only environments that open incidents can page anyone; the rest are kept as early warnings, so a staging failure before promotion shows up when production breaks.</p>
+        <div className="mt-3 space-y-2">{draft.environments.map((environment, index) => <div key={index} className="grid gap-2 rounded-control bg-elevated p-3 sm:grid-cols-2">
+          <label className="text-xs font-semibold text-muted">Name<input className="field mt-1 !min-h-9 text-sm text-ink" value={environment.name} onChange={(e) => updateEnvironment(index, { name: e.target.value })} placeholder="production" /></label>
+          <label className="text-xs font-semibold text-muted">Tier<select className="field mt-1 !min-h-9 text-sm text-ink" value={environment.tier} onChange={(e) => updateEnvironment(index, { tier: e.target.value as EnvironmentConfig["tier"] })}><option value="production">Production</option><option value="preprod">Pre-production</option><option value="dev">Development</option></select></label>
+          <label className="text-xs font-semibold text-muted sm:col-span-2">Also called<input className="field mt-1 !min-h-9 text-sm text-ink" value={environment.aliases.join(", ")} onChange={(e) => updateEnvironment(index, { aliases: e.target.value.split(",").map((item) => item.trim()).filter(Boolean) })} placeholder="prod, prd, live" /></label>
+          <div className="flex items-center justify-between gap-3 sm:col-span-2">
+            <label className="flex items-center gap-2 text-xs"><input type="checkbox" className="h-4 w-4 accent-[oklch(var(--accent))]" checked={environment.opensIncidents} onChange={(e) => updateEnvironment(index, { opensIncidents: e.target.checked })} />Failures here open incidents and send alerts</label>
+            <button type="button" className="control-quiet !min-h-8 !px-2 text-xs text-danger" onClick={() => setDraft({ ...draft, environments: draft.environments.filter((_, position) => position !== index) })} disabled={draft.environments.length <= 1}>Remove</button>
+          </div>
+        </div>)}</div>
+        <button type="button" className="control-secondary mt-2 !min-h-9" onClick={() => setDraft({ ...draft, environments: [...draft.environments, { name: "", aliases: [], tier: "preprod", opensIncidents: false }] })}>Add environment</button>
+        <label className="mt-5 block text-sm font-semibold">Release branches<input className="field mt-2" value={branches} onChange={(e) => setBranches(e.target.value)} placeholder="main, release/*, hotfix/*" /><span className="mt-1 block text-xs font-normal text-muted">CI or deploy failures on these branches are incidents. Feature-branch failures never page; their commits are still recorded for release history.</span></label>
+      </div>
+      {policyWarnings(draft).length > 0 && <div role="status" className="mt-5 rounded-control bg-warning/12 p-4 text-sm"><p className="font-semibold text-warning">This policy will be noisy or split incidents</p><ul className="mt-2 list-disc space-y-1 pl-5 text-xs leading-5 text-muted">{policyWarnings(draft).map((item) => <li key={item}>{item}</li>)}</ul><button type="button" className="control-secondary mt-3 !min-h-9" onClick={() => setDraft({ ...draft, ...recommendedPolicy })}>Use recommended (65 · 120 min · suppress low)</button></div>}
       {save.error && <p role="alert" className="mt-4 text-sm text-danger">{save.error.message}</p>}
       <button className="control-primary mt-5" onClick={() => save.mutate()} disabled={save.isPending}>{save.isPending ? "Saving policy…" : "Save intake policy"}</button>
     </section>
