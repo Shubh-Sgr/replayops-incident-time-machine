@@ -129,3 +129,17 @@ export function placeSignal<T extends { service: string; environment?: string; m
   }
   return { signal: placed, mayOpen: true };
 }
+
+/**
+ * Places a batch. A GitHub deployment whose release ships code of several services in a shared repository
+ * counts once per service, so each service's failure is opened, and recovered, by its own deploys.
+ */
+export function placeSignals<T extends { externalId: string; service: string; environment?: string; metadata: Record<string, unknown> }>(signals: T[], model: IntakeModel, services: ServiceMapping[], commitFiles: (sha: string) => string[] = () => []): Array<PlacedSignal<T>> {
+  return signals.flatMap((signal) => {
+    const meta = signal.metadata ?? {};
+    const files = meta.provider === "github" && meta.eventType === "deployment_status" && !meta.serviceHint && typeof meta.sha === "string" ? commitFiles(meta.sha) : [];
+    const names = files.length ? servicesForChange(typeof meta.repository === "string" ? meta.repository : undefined, files, services) : [];
+    if (names.length < 2) return [placeSignal(signal, model, services, commitFiles)];
+    return names.map((name) => placeSignal({ ...signal, externalId: `${signal.externalId}:${name}`, metadata: { ...meta, serviceHint: name } }, model, services, commitFiles));
+  });
+}

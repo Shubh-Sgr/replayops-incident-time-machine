@@ -44,7 +44,8 @@ app.use(express.json({
 }));
 
 app.get("/health", (_req, res) => {
-  res.json({ status: "ok", service: "replayops-api", demoMode: config.demoMode, automatedIngestion: Boolean(config.ingestionSigningSecret || process.env.NODE_ENV !== "production") });
+  // Render sets RENDER_GIT_COMMIT, so a deploy can be confirmed from outside.
+  res.json({ status: "ok", service: "replayops-api", commit: process.env.RENDER_GIT_COMMIT?.slice(0, 7) ?? null, demoMode: config.demoMode, automatedIngestion: Boolean(config.ingestionSigningSecret || process.env.NODE_ENV !== "production") });
 });
 
 app.use("/ingest", ingestionRouter);

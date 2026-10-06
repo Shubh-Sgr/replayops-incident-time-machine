@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Pool, type PoolClient } from "pg";
 import { config } from "./config.js";
 import { MEMBERSHIPS } from "./scope.js";
-import { placeSignal, resolveEnvironment, type ServiceMapping } from "./release.js";
+import { placeSignals, resolveEnvironment, type ServiceMapping } from "./release.js";
 import { changeEvidence, commitFilesLookup, resolveChange, selectChangesForIncident, type ChangeRecord, type CommitRecord, type ExtractedDelivery } from "./changes.js";
 import { seedActivities, seedDashboardSeries, seedIncidents, seedReplayRuns } from "./seed.js";
 import type { Activity, DashboardData, Incident, IncidentDecision, IncidentEvent, IncidentHeadline, IncidentPolicy, IngestionBatch, IngestionResult, Integration, IntegrationDelivery, IntegrationProvider, IntegrationTarget, NormalizedSignal, ReplayConfig, ReplayProjection, ReplayResult, ReplayRun, SearchResult, Severity } from "./types.js";
@@ -302,7 +302,7 @@ export class MemoryRepository implements Repository {
     const services = await workspaceService.servicesForOrganization(integration.organizationId);
     const newChanges = this.recordDelivery(batch.delivery, policy, services);
     const commitFiles = commitFilesLookup(this.commits, newChanges);
-    for (const placement of batch.signals.map((item) => placeSignal(item, policy, services, commitFiles))) {
+    for (const placement of placeSignals(batch.signals, policy, services, commitFiles)) {
       if (placement.drop) continue;
       const signal = placement.signal;
       const relatedServices = await workspaceService.relatedServicesForOrganization(integration.organizationId, signal.service);
@@ -428,17 +428,18 @@ const exceptionFingerprintOf = (item: { metadata?: Record<string, unknown> }) =>
   const value = (item.metadata?.exception as { fingerprint?: unknown } | undefined)?.fingerprint;
   return typeof value === "string" ? value : undefined;
 };
-export const deliveryLaneOf = (item: { metadata?: Record<string, unknown> }) => {
+// A deployment lane is per service: in a shared repository, one service's good deploy must not recover another's failure.
+export const deliveryLaneOf = (item: { service?: string; metadata?: Record<string, unknown> }) => {
   const meta = item.metadata ?? {};
   if (meta.provider !== "github") return undefined;
   const text = (value: unknown) => typeof value === "string" ? value : value === undefined || value === null ? "" : String(value);
   if (meta.eventType === "workflow_run") return `workflow:${text(meta.repository)}:${text(meta.workflow)}:${text(meta.branch)}`;
-  if (meta.eventType === "deployment_status") return `deploy:${text(meta.repository)}:${text(meta.deploymentEnvironment)}`;
+  if (meta.eventType === "deployment_status") return `deploy:${text(meta.repository)}:${text(item.service)}:${text(meta.deploymentEnvironment).toLowerCase()}`;
   return undefined;
 };
 const DELIVERY_LANE_SQL = `case b.metadata->>'eventType'
   when 'workflow_run' then 'workflow:'||coalesce(b.metadata->>'repository','')||':'||coalesce(b.metadata->>'workflow','')||':'||coalesce(b.metadata->>'branch','')
-  when 'deployment_status' then 'deploy:'||coalesce(b.metadata->>'repository','')||':'||coalesce(b.metadata->>'deploymentEnvironment','') end`;
+  when 'deployment_status' then 'deploy:'||coalesce(b.metadata->>'repository','')||':'||coalesce(b.service,'')||':'||lower(coalesce(b.metadata->>'deploymentEnvironment','')) end`;
 
 // GitHub evidence is grouped per branch, so a failure on one branch doesn't absorb pushes and CI runs from others.
 const branchOf = (item: { metadata?: Record<string, unknown> }) => typeof item.metadata?.branch === "string" && item.metadata.branch ? item.metadata.branch : undefined;
@@ -1143,7 +1144,7 @@ class PostgresRepository implements Repository {
       const services = await workspaceService.servicesForOrganization(integration.organizationId);
       const newChanges = await this.recordDelivery(client, integration.organizationId, batch.delivery, policy, services);
       const commitFiles = commitFilesLookup(await this.commitsForSignals(client, integration.organizationId, batch.signals), newChanges);
-      for (const placement of batch.signals.map((item) => placeSignal(item, policy, services, commitFiles))) {
+      for (const placement of placeSignals(batch.signals, policy, services, commitFiles)) {
         if (placement.drop) continue;
         const signal = placement.signal;
         const relatedServices = await workspaceService.relatedServicesForOrganization(integration.organizationId, signal.service);

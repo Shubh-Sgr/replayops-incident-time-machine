@@ -9,7 +9,7 @@ const githubOutcome = (event: Incident["events"][number]): GitHubOutcome | null 
   if (meta.eventType === "deployment_status") {
     const state = String(meta.state ?? "");
     if (!["success", "failure", "error"].includes(state)) return null;
-    return { event, lane: `${repository} deploy ${String(meta.deploymentEnvironment ?? "production")}`, passed: state === "success" };
+    return { event, lane: `${repository} ${event.service} deploy ${String(meta.deploymentEnvironment ?? "production").toLowerCase()}`, passed: state === "success" };
   }
   if (meta.eventType === "workflow_run") {
     const conclusion = String(meta.conclusion ?? "");

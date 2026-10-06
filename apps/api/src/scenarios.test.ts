@@ -240,12 +240,15 @@ describe("real-world scenarios", () => {
 
     await w.github.push("acme/shop", "main", "s2", "s3", [["s3", "Restyle checkout", ["apps/web/checkout.tsx", "README.md"]]], 3);
     await w.github.deploy("acme/shop", "production", "s3", "success", 3.1);
-    // s2 never reached production, so the s3 release also ships s2's payouts change.
+    // s2 never reached production, so the s3 release also ships s2's payouts change, and recovers its failure.
     const servicesFor = async (sha: string) => (await w.repository.listChanges(ADMIN, { environment: "production" })).filter((item) => item.sha === sha).map((item) => item.service).sort();
     expect(await servicesFor("s3")).toEqual(["drill-payouts", "shop"]);
+    expect((await w.incident(opened.id)).events.some((event) => event.metadata?.sha === "s3" && event.service === "drill-payouts")).toBe(true);
     await w.github.push("acme/shop", "main", "s3", "s4", [["s4", "Fix checkout copy", ["apps/web/checkout.tsx"]]], 4);
-    await w.github.deploy("acme/shop", "production", "s4", "success", 4.1);
+    const shopOnly = await w.github.deploy("acme/shop", "production", "s4", "success", 4.1);
     expect(await servicesFor("s4")).toEqual(["shop"]);
+    // Another service's good deploy is not evidence for the payouts incident.
+    expect(shopOnly.incidentIds).not.toContain(opened.id);
   });
 
   it("12. with no change recorded, the diagnosis says to look at dependencies, traffic or data", async () => {
