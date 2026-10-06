@@ -111,7 +111,7 @@ export class MemoryRepository implements Repository {
   async getIncident(_userId: string, id: string) { return clone(this.incidents.find((incident) => incident.id === id) ?? null); }
   async createIncident(_userId: string, input: IncidentInput) {
     const now = new Date().toISOString();
-    const incident: Incident = { ...input, environment: input.environment ?? "unknown", customerImpact: input.customerImpact ?? "Unknown until measured", id: randomUUID(), code: `ROP-${Math.floor(2000 + Math.random() * 7000)}`, createdAt: now, updatedAt: now, evidenceRevision: now, events: [] };
+    const incident: Incident = { ...input, environment: input.environment ?? "unknown", customerImpact: input.customerImpact ?? "Unknown until measured", id: randomUUID(), code: nextManualCode(this.incidents), createdAt: now, updatedAt: now, evidenceRevision: now, events: [] };
     this.incidents.unshift(incident);
     return clone(incident);
   }
@@ -241,6 +241,7 @@ export class MemoryRepository implements Repository {
     const incidentIds = new Set<string>();
     const opened: IncidentHeadline[] = [];
     const movedToMonitoring: IncidentHeadline[] = [];
+    const escalatedIncidents = new Map<string, IncidentHeadline>();
     let acceptedSignals = 0;
     for (const signal of batch.signals) {
       const relatedServices = await workspaceService.relatedServicesForOrganization(integration.organizationId, signal.service);
@@ -273,7 +274,15 @@ export class MemoryRepository implements Repository {
       }
       if (incident && !buffered.incidentId) {
         buffered.incidentId = incident.id;
+        const autoTitle = incident.owner === "Automation" && incident.events.some((event) => event.title === incident!.title && event.provenance === "ingested");
         if (!incident.events.some((event) => event.metadata?.sourceExternalId === signal.externalId)) incident.events.push(signalToEvent(incident.id, signal));
+        if (signal.kind === "alert" && incident.status !== "resolved" && severityRank[signal.severity] > severityRank[incident.severity]) {
+          incident.severity = signal.severity;
+          if (autoTitle) incident.title = signal.title;
+          const index = opened.findIndex((item) => item.id === incident!.id);
+          if (index >= 0) opened[index] = headline(incident);
+          else escalatedIncidents.set(incident.id, headline(incident));
+        }
       }
       if (incident) {
         incident.events.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
@@ -292,7 +301,7 @@ export class MemoryRepository implements Repository {
       storedIntegration.deliveries.unshift(delivery);
       storedIntegration.deliveries = storedIntegration.deliveries.slice(0, 8);
     }
-    return { status: "accepted", acceptedSignals, incidentIds: [...incidentIds], opened, movedToMonitoring } satisfies IngestionResult;
+    return { status: "accepted", acceptedSignals, incidentIds: [...incidentIds], opened, movedToMonitoring, escalated: [...escalatedIncidents.values()] } satisfies IngestionResult;
   }
   async setIncidentEmbedding(_incidentId: string, _embedding: number[]) {}
   async exceptionFirstSeen(_userId: string, fingerprints: string[]) {
@@ -352,6 +361,8 @@ const signalToEvent = (incidentId: string, signal: NormalizedSignal): IncidentEv
 
 type Row = Record<string, unknown>;
 const SUMMARY_EVENTS = 3;
+const severityRank: Record<Severity, number> = { low: 0, medium: 1, high: 2, critical: 3 };
+const nextManualCode = (incidents: Incident[]) => `ROP-${Math.max(2000, ...incidents.map((item) => Number(/^ROP-(\d+)$/.exec(item.code)?.[1] ?? 0))) + 1}`;
 const summarize = (incident: Incident): Incident => ({
   ...incident, eventCount: incident.events.length,
   eventKinds: [...new Set(incident.events.filter((event) => event.evidenceState !== "excluded").map((event) => event.kind))],
@@ -583,17 +594,30 @@ class PostgresRepository implements Repository {
   }
   async getIncident(userId: string, id: string) { return (await this.hydrated(userId, "and i.id = $2", [id]))[0] ?? null; }
   async createIncident(userId: string, input: IncidentInput, embedding?: number[]) {
-    const result = await this.pool.query(
-      `insert into incidents (organization_id,code,title,summary,service,environment,customer_impact,severity,status,owner,started_at,resolved_at,embedding)
-       select m.organization_id,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::vector
-       from ${MEMBERSHIPS} m where m.user_id = $1
-       order by m.created_at desc limit 1 returning *`,
-      [userId, `ROP-${Math.floor(2000 + Math.random() * 7000)}`, input.title, input.summary, input.service, input.environment ?? "unknown", input.customerImpact ?? "Unknown until measured", input.severity, input.status, input.owner, input.startedAt, input.resolvedAt ?? null, embedding ? `[${embedding.join(",")}]` : null]
-    );
-    const row = result.rows[0] as Row | undefined;
-    if (!row) throw forbidden("No organization membership exists for this account. Complete workspace onboarding before creating incidents.");
-    return mapIncident(row);
+    // Codes are sequential per workspace (ROP-2001, ROP-2002, …), unique by (organization_id, code); a concurrent create
+    // that takes the same number retries with the next one.
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        const result = await this.pool.query(
+          `with org as (select m.organization_id from ${MEMBERSHIPS} m where m.user_id = $1 limit 1),
+           next_code as (
+             select 'ROP-' || (greatest(coalesce(max((substring(i.code from '^ROP-([0-9]+)$'))::int), 0), 2000) + 1) as code
+             from incidents i join org on org.organization_id = i.organization_id
+           )
+           insert into incidents (organization_id,code,title,summary,service,environment,customer_impact,severity,status,owner,started_at,resolved_at,embedding)
+           select org.organization_id,next_code.code,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::vector from org, next_code
+           returning *`,
+          [userId, input.title, input.summary, input.service, input.environment ?? "unknown", input.customerImpact ?? "Unknown until measured", input.severity, input.status, input.owner, input.startedAt, input.resolvedAt ?? null, embedding ? `[${embedding.join(",")}]` : null]
+        );
+        const row = result.rows[0] as Row | undefined;
+        if (!row) throw forbidden("No organization membership exists for this account. Complete workspace onboarding before creating incidents.");
+        return mapIncident(row);
+      } catch (error) {
+        if ((error as { code?: string }).code !== "23505" || attempt >= 4) throw error;
+      }
+    }
   }
+
   async updateIncident(userId: string, id: string, input: Partial<IncidentInput>, embedding?: number[]) {
     const fields: Array<[string, unknown, boolean?]> = [
       ["title", input.title], ["summary", input.summary], ["service", input.service], ["environment", input.environment], ["customer_impact", input.customerImpact], ["severity", input.severity], ["status", input.status],
@@ -889,6 +913,7 @@ class PostgresRepository implements Repository {
       const incidentIds = new Set<string>();
       const opened: IncidentHeadline[] = [];
       const movedToMonitoring: IncidentHeadline[] = [];
+      const escalatedIncidents = new Map<string, IncidentHeadline>();
       let acceptedSignals = 0;
       for (const signal of batch.signals) {
         const relatedServices = await workspaceService.relatedServicesForOrganization(integration.organizationId, signal.service);
@@ -978,6 +1003,26 @@ class PostgresRepository implements Repository {
               traceId: signal.traceId, sourceUrl: signal.sourceUrl, environment: signal.environment, automated: true
             }]
           );
+          // A clearly worse alert joining an open incident raises its severity; an automatic title follows it.
+          const escalated = await client.query(
+            `update incidents i set severity = $2,
+               title = case when i.owner = 'Automation' and exists (select 1 from incident_events e where e.incident_id = i.id and e.title = i.title and e.provenance = 'ingested') then $3 else i.title end
+             where i.id = $1 and i.status <> 'resolved' and $4 = 'alert'
+               and (case i.severity when 'low' then 0 when 'medium' then 1 when 'high' then 2 else 3 end) < (case $2::text when 'low' then 0 when 'medium' then 1 when 'high' then 2 else 3 end)
+             returning id, code, title, summary, service, environment, severity, status`,
+            [incidentId, signal.severity, signal.title, signal.kind]
+          );
+          const raised = escalated.rows[0] as Row | undefined;
+          if (raised) {
+            const headline: IncidentHeadline = { id: String(raised.id), code: String(raised.code), title: String(raised.title), summary: String(raised.summary), service: String(raised.service), environment: raised.environment ? String(raised.environment) : undefined, severity: raised.severity as Severity, status: raised.status as IncidentHeadline["status"] };
+            const alreadyOpened = opened.findIndex((item) => item.id === headline.id);
+            if (alreadyOpened >= 0) opened[alreadyOpened] = headline;
+            else escalatedIncidents.set(headline.id, headline);
+            await client.query(
+              `insert into incident_activities (organization_id, incident_id, actor, action, detail, timestamp) values ($1,$2,'Connector','escalated severity',$3,now())`,
+              [integration.organizationId, headline.id, `Raised to ${signal.severity} by “${signal.title}”.`]
+            );
+          }
         }
 
         if (incidentId) {
@@ -1014,7 +1059,7 @@ class PostgresRepository implements Repository {
         );
       }
       await client.query("commit");
-      return { status: "accepted", acceptedSignals, incidentIds: incidentIdList, opened, movedToMonitoring } satisfies IngestionResult;
+      return { status: "accepted", acceptedSignals, incidentIds: incidentIdList, opened, movedToMonitoring, escalated: [...escalatedIncidents.values()] } satisfies IngestionResult;
     } catch (error) {
       await client.query("rollback");
       throw error;

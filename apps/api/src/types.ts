@@ -244,6 +244,7 @@ export interface IngestionResult {
   /** Internal only (stripped before the HTTP reply): incidents this delivery opened or moved to monitoring. */
   opened?: IncidentHeadline[];
   movedToMonitoring?: IncidentHeadline[];
+  escalated?: IncidentHeadline[];
 }
 
 export type WorkspaceRole = "admin" | "responder" | "viewer";

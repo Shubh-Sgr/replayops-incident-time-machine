@@ -199,7 +199,13 @@ export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = [
   const servicePath = [...new Set(events.map((event) => event.service))];
   const hasRecovery = events.some((event) => event.kind === "recovery");
   const hasChange = events.some((event) => event.kind === "deploy" || event.kind === "dependency");
-  const hasHealthyCohort = events.some((event) => /healthy|control|baseline|successful/i.test(`${event.title} ${event.detail}`));
+  // A real comparison cohort: sampled healthy traces, an explicitly labelled control/baseline series, or a
+  // responder's own note describing one. Words like "successful" in an automated title are not a cohort.
+  const hasHealthyCohort = events.some((event) => {
+    const meta = event.metadata ?? {};
+    if (meta.cohortRole === "healthy" || ["healthy", "control", "baseline"].includes(String(meta.cohort ?? ""))) return true;
+    return event.provenance === "manual" && /\b(healthy|control|baseline)\b.*\b(cohort|group|requests|traffic|instances?)\b/i.test(`${event.title} ${event.detail}`);
+  });
   const evidenceCompleteness = clamp(Math.min(30, events.length * 5) + Math.min(15, servicePath.length * 5) + (hasRecovery ? 15 : 0) + (hasChange ? 15 : 0) + (correlated ? 15 : 0) + (hasHealthyCohort ? 10 : 0), 0, 100);
   const causalConfidence = clamp(24 + (hasChange ? 14 : 0) + (correlated ? 22 : 0) + (hasHealthyCohort ? 18 : 0) + (hasRecovery ? 10 : 0) + Math.min(12, events.length * 2), 12, 94);
   const confidence = causalConfidence;

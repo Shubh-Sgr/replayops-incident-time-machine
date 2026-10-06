@@ -10,6 +10,7 @@ import { cn, formatRelative } from "../lib/utils";
 import type { DashboardData, Incident } from "../types";
 import { useAuth } from "../providers/AuthProvider";
 import { useOwnerName } from "../lib/useOwnerName";
+import { policyWarnings } from "../lib/policy";
 
 function sourceState(provider: string, receivedAt?: string | null) {
   if (!receivedAt) return { label:"Awaiting first real receipt", tone:"text-warning", action:"Send one event from the source" };
@@ -28,6 +29,7 @@ export function DashboardPage() {
   const notifications = useQuery({ queryKey:["notifications"], queryFn:api.notifications });
   const queue = useQuery({ queryKey:["ingestion-queue"], queryFn:api.queue });
   const alertChannels = useQuery({ queryKey:["alert-channels"], queryFn:api.alertChannels });
+  const intakePolicy = useQuery({ queryKey:["incident-policy"], queryFn:api.incidentPolicy });
   const createIncident = useMutation({
     mutationFn:async(draft:IncidentDraft) => {
       const created=await api.createIncident(draft);
@@ -44,6 +46,7 @@ export function DashboardPage() {
   const deadLetters=queue.data?.filter((job)=>job.status==="dead_letter" || job.status==="retrying") ?? [];
   return <div className="space-y-6">
     <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between"><div><p className="measurement-number text-xs uppercase tracking-[.14em] text-muted">Responder workspace</p><h1 className="mt-2 font-heading text-3xl font-semibold tracking-[-.03em] sm:text-4xl">Investigations</h1><p className="mt-2 max-w-2xl text-sm leading-6 text-muted">Find what needs attention, what evidence is fresh, and the next useful action—without rebuilding your observability stack.</p></div><div className="flex gap-2"><Link to="/integrations" className="control-secondary inline-flex items-center gap-2"><RadioTower className="h-4 w-4" />Connect source</Link><button className="control-primary inline-flex items-center gap-2" onClick={()=>setEditorOpen(true)}><Plus className="h-4 w-4" />Quick intake</button></div></header>
+    {intakePolicy.data && policyWarnings(intakePolicy.data).length > 0 && <Link to="/workspace?tab=intake" className="surface-lined flex items-center gap-3 p-4 text-sm transition-colors hover:bg-elevated"><TriangleAlert className="h-5 w-5 shrink-0 text-warning" /><span className="min-w-0 flex-1"><strong>Your intake policy needs a look.</strong> <span className="text-muted">{policyWarnings(intakePolicy.data)[0]}</span></span><ArrowRight className="h-4 w-4 shrink-0 text-muted" /></Link>}
     {realReceipt && alertChannels.data && !alertChannels.data.length && <Link to="/workspace?tab=alerts" className="surface-lined flex items-center gap-3 p-4 text-sm transition-colors hover:bg-elevated"><BellRing className="h-5 w-5 shrink-0 text-warning" /><span className="min-w-0 flex-1"><strong>Nobody is notified when an incident opens.</strong> <span className="text-muted">Add a free email or phone-push alert so automatic incidents reach you.</span></span><ArrowRight className="h-4 w-4 shrink-0 text-muted" /></Link>}
 
     {!realReceipt && <section className="surface-lined grid gap-5 p-5 sm:p-6 lg:grid-cols-[1fr_auto] lg:items-center"><div><div className="flex items-center gap-2"><DatabaseZap className="h-5 w-5 text-info" /><h2 className="font-heading text-xl font-semibold">Get to the first real investigation</h2></div><p className="mt-2 max-w-3xl text-sm leading-6 text-muted">Choose GitHub, OpenTelemetry, or a generic webhook; send one real event; then open the investigation it creates. Connector self-tests stay labeled as synthetic and never count as source activation.</p></div><Link to="/integrations" className="control-primary inline-flex items-center gap-2">Set up a source <ArrowRight className="h-4 w-4" /></Link></section>}

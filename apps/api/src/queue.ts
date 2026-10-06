@@ -36,12 +36,13 @@ const mapJob = (row: Row, integration?: IntegrationTarget): QueueJob => {
  * Work that follows a committed delivery but must never fail it: tell people about new or recovering
  * incidents, and embed new incidents so "similar past incidents" search can find them later.
  */
-export async function afterIngest(integration: IntegrationTarget, opened: IncidentHeadline[], movedToMonitoring: IncidentHeadline[]) {
-  if (!opened.length && !movedToMonitoring.length) return;
+export async function afterIngest(integration: IntegrationTarget, opened: IncidentHeadline[], movedToMonitoring: IncidentHeadline[], escalated: IncidentHeadline[] = []) {
+  if (!opened.length && !movedToMonitoring.length && !escalated.length) return;
   try {
     const privacy = await workspaceService.privacyForOrganization(integration.organizationId);
     await Promise.all([
       ...opened.map((incident) => alertService.dispatch(integration.organizationId, { type: "opened", incident, detail: `Opened automatically from ${integration.name}.` })),
+      ...escalated.map((incident) => alertService.dispatch(integration.organizationId, { type: "escalated", incident, detail: `Severity raised to ${incident.severity} by new evidence from ${integration.name}.` })),
       ...movedToMonitoring.map((incident) => alertService.dispatch(integration.organizationId, { type: "monitoring", incident, detail: `${integration.name} reported a recovery signal. Verify recovery, then resolve.` })),
       ...opened.map(async (incident) => {
         const embedding = await embedText(`${incident.title}\n${incident.summary}\n${incident.service}`, privacy.externalAiEnabled).catch(() => undefined);
@@ -117,8 +118,8 @@ class DurableIngestionQueue {
       if (!this.pool) {
         const job = this.jobs.find((item) => item.id === jobId)!; job.status = "completed"; job.lastError = null; job.updatedAt = new Date().toISOString();
       } else await this.pool.query(`update ingestion_queue set status='completed',last_error=null,updated_at=now() where id=$1`, [jobId]);
-      const { opened = [], movedToMonitoring = [], ...reply } = result;
-      void afterIngest(integration, opened, movedToMonitoring);
+      const { opened = [], movedToMonitoring = [], escalated = [], ...reply } = result;
+      void afterIngest(integration, opened, movedToMonitoring, escalated);
       return { ...reply, queueId: jobId };
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown ingestion failure";

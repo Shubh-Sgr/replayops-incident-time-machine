@@ -35,16 +35,17 @@ export interface AlertChannel {
 }
 export interface AlertChannelInput { name: string; kind: AlertChannelKind; url: string; events: AlertEventType[]; minSeverity: Severity; enabled?: boolean }
 export interface AlertIncident { id: string; code: string; title: string; service: string; environment?: string; severity: Severity; status: string }
-export interface AlertEvent { type: AlertEventType | "test"; incident: AlertIncident; detail?: string; actor?: string }
+/** "escalated" is delivered to destinations that subscribe to "opened": it is the same "this needs attention now" signal. */
+export interface AlertEvent { type: AlertEventType | "escalated" | "test"; incident: AlertIncident; detail?: string; actor?: string }
 
 type StoredChannel = Omit<AlertChannel, "target" | "signingSecret"> & { organizationId: string; url: string };
 type Row = Record<string, unknown>;
 
 const severityRank: Record<Severity, number> = { low: 0, medium: 1, high: 2, critical: 3 };
 const headline: Record<AlertEvent["type"], string> = {
-  opened: "Incident opened", monitoring: "Fix applied, monitoring recovery", resolved: "Incident resolved", reopened: "Incident reopened", test: "Test alert"
+  opened: "Incident opened", escalated: "Incident escalated", monitoring: "Fix applied, monitoring recovery", resolved: "Incident resolved", reopened: "Incident reopened", test: "Test alert"
 };
-const emoji: Record<AlertEvent["type"], string> = { opened: "🚨", monitoring: "🩺", resolved: "✅", reopened: "🔁", test: "🔔" };
+const emoji: Record<AlertEvent["type"], string> = { opened: "🚨", escalated: "⬆️", monitoring: "🩺", resolved: "✅", reopened: "🔁", test: "🔔" };
 
 const webBaseUrl = () => config.publicWebUrl ?? config.webOrigin.split(",")[0]?.trim() ?? "http://localhost:5173";
 export const incidentUrl = (incident: AlertIncident) => `${webBaseUrl()}/incidents/${incident.id}`;
@@ -119,10 +120,10 @@ export function plainAlert(event: AlertEvent) {
 /** ntfy push: plain-text body plus headers; critical incidents use urgent priority so the phone rings through. */
 export function ntfyRequest(event: AlertEvent) {
   const plain = plainAlert(event);
-  const priority = event.type === "opened" || event.type === "reopened" ? (event.incident.severity === "critical" ? "urgent" : event.incident.severity === "high" ? "high" : "default") : "default";
+  const priority = event.type === "opened" || event.type === "reopened" || event.type === "escalated" ? (event.incident.severity === "critical" ? "urgent" : event.incident.severity === "high" ? "high" : "default") : "default";
   // HTTP headers must be Latin-1; keep the title ASCII and leave emoji to the tags.
   const title = plain.heading.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^\x20-\x7e]/g, "").replace(/\s+/g, " ").trim().slice(0, 200);
-  const tags = { opened: "rotating_light", monitoring: "stethoscope", resolved: "white_check_mark", reopened: "repeat", test: "bell" }[event.type];
+  const tags = { opened: "rotating_light", escalated: "arrow_up", monitoring: "stethoscope", resolved: "white_check_mark", reopened: "repeat", test: "bell" }[event.type];
   return { body: plain.lines.join("\n") || plain.heading, headers: { Title: title, Priority: priority, Tags: tags, Click: plain.link, "Content-Type": "text/plain; charset=utf-8" } };
 }
 
@@ -143,7 +144,7 @@ export function formatAlert(kind: AlertChannelKind, event: AlertEvent, occurredA
 }
 
 export const channelWantsEvent = (channel: Pick<AlertChannel, "enabled" | "events" | "minSeverity">, event: AlertEvent) =>
-  event.type === "test" || (channel.enabled && channel.events.includes(event.type) && severityRank[event.incident.severity] >= severityRank[channel.minSeverity]);
+  event.type === "test" || (channel.enabled && channel.events.includes(event.type === "escalated" ? "opened" : event.type) && severityRank[event.incident.severity] >= severityRank[channel.minSeverity]);
 
 const mapRow = (row: Row): StoredChannel => ({
   id: String(row.id), organizationId: String(row.organization_id), name: String(row.name), kind: row.kind as AlertChannelKind, url: String(row.url),

@@ -6,6 +6,7 @@ import { api } from "../lib/api";
 import { AlertDestinations } from "../components/AlertDestinations";
 import { ApiTokens } from "../components/ApiTokens";
 import { presentAuditEntry } from "../lib/audit";
+import { policyWarnings, recommendedPolicy } from "../lib/policy";
 import { cn, formatRelative } from "../lib/utils";
 import type { IncidentPolicy, PrivacySettings, ServiceDefinition, TeamInvitation, WorkspaceRole } from "../types";
 
@@ -74,6 +75,7 @@ function IntakePolicyPanel() {
         <label className="flex min-h-16 cursor-pointer items-center justify-between gap-5 py-3"><span><span className="block text-sm font-semibold">Suppress low-severity signals</span><span className="mt-1 block text-xs text-muted">Retain them as evidence without opening an incident.</span></span><input type="checkbox" className="h-5 w-5 accent-[oklch(var(--accent))]" checked={draft.suppressLowSeverity} onChange={(e) => setDraft({ ...draft, suppressLowSeverity: e.target.checked })} /></label>
         <label className="flex min-h-16 cursor-pointer items-center justify-between gap-5 py-3"><span><span className="block text-sm font-semibold">Maintenance mode</span><span className="mt-1 block text-xs text-muted">Buffer all incoming evidence and suspend automatic incident creation.</span></span><input type="checkbox" className="h-5 w-5 accent-[oklch(var(--accent))]" checked={draft.maintenanceMode} onChange={(e) => setDraft({ ...draft, maintenanceMode: e.target.checked })} /></label>
       </div>
+      {policyWarnings(draft).length > 0 && <div role="status" className="mt-5 rounded-control bg-warning/12 p-4 text-sm"><p className="font-semibold text-warning">This policy will be noisy or split incidents</p><ul className="mt-2 list-disc space-y-1 pl-5 text-xs leading-5 text-muted">{policyWarnings(draft).map((item) => <li key={item}>{item}</li>)}</ul><button type="button" className="control-secondary mt-3 !min-h-9" onClick={() => setDraft({ ...recommendedPolicy })}>Use recommended (65 · 120 min · suppress low)</button></div>}
       {save.error && <p role="alert" className="mt-4 text-sm text-danger">{save.error.message}</p>}
       <button className="control-primary mt-5" onClick={() => save.mutate()} disabled={save.isPending}>{save.isPending ? "Saving policy…" : "Save intake policy"}</button>
     </section>
