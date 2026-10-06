@@ -82,3 +82,31 @@ describe("GitHub ingestion noise", () => {
     expect(later.incidentIds).toHaveLength(0);
   });
 });
+
+describe("GitHub recovery evidence routing", () => {
+  const run = (id: number, sha: string, conclusion: "failure" | "success", updatedAt: string) => normalizePayload("github", {
+    action: "completed", repository: { id: 1, full_name: repo, html_url: `https://github.com/${repo}` }, sender: { login: "dev" },
+    workflow_run: { id, workflow_id: 7, name: "ReplayOps incident drill", run_number: id, run_attempt: 1, status: "completed", conclusion, head_sha: sha, head_branch: "replayops-drill", event: "push", html_url: `https://github.com/${repo}/actions/runs/${id}`, updated_at: updatedAt }
+  }, `delivery-${id}`, "workflow_run");
+  const target = { id: "gh", organizationId: "demo-organization", name: "GitHub", provider: "github" as const, status: "active" as const };
+
+  it("attaches the passing run to the incident its failure opened, even after the environment was set and hours passed", async () => {
+    const repository = new MemoryRepository();
+    const failedAt = new Date(Date.now() - 5 * 3_600_000).toISOString();
+    const opened = await repository.ingest(target, { externalId: "d1", signals: run(1, "eb6ac77aaaa", "failure", failedAt) });
+    const incidentId = opened.opened![0]!.id;
+    await repository.updateIncident("u", incidentId, { environment: "production", status: "monitoring" });
+    const recovered = await repository.ingest(target, { externalId: "d2", signals: run(2, "9044c67bbbb", "success", new Date().toISOString()) });
+    expect(recovered.incidentIds).toEqual([incidentId]);
+    const incident = (await repository.getIncident("u", incidentId))!;
+    expect(evaluateGitHubDeliveryRecovery(incident)!.state).toBe("verified");
+  });
+
+  it("keeps runs from another branch out of the incident", async () => {
+    const repository = new MemoryRepository();
+    const opened = await repository.ingest(target, { externalId: "d3", signals: run(3, "aaaa", "failure", new Date().toISOString()) });
+    const other = run(4, "bbbb", "success", new Date().toISOString()).map((signal) => ({ ...signal, metadata: { ...signal.metadata, branch: "main" } }));
+    const result = await repository.ingest(target, { externalId: "d4", signals: other });
+    expect(result.incidentIds).not.toContain(opened.opened![0]!.id);
+  });
+});

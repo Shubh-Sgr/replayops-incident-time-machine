@@ -251,6 +251,8 @@ export class MemoryRepository implements Repository {
       let incident = signal.correlationKey
         ? this.incidents.find((item) => item.status !== "resolved" && item.events.some((event) => event.metadata?.correlationKey === signal.correlationKey))
         : undefined;
+      const lane = deliveryLaneOf(signal);
+      if (lane) incident ??= this.incidents.find((item) => item.status !== "resolved" && item.events.some((event) => deliveryLaneOf(event) === lane));
       incident ??= this.incidents.find((item) => item.status !== "resolved" && sameBranchLane(item.events, signal) && relatedServices.includes(item.service) && (item.environment ?? "unknown") === (signal.environment ?? "unknown") && Math.abs(new Date(item.startedAt).getTime() - new Date(signal.timestamp).getTime()) <= policy.groupingWindowMinutes * 60_000);
       const suppressed = policy.maintenanceMode || (policy.suppressLowSeverity && signal.severity === "low");
       if (!incident && !suppressed && signal.impactScore >= policy.incidentThreshold) {
@@ -312,6 +314,23 @@ export class MemoryRepository implements Repository {
 const headline = (incident: Pick<Incident, "id" | "code" | "title" | "summary" | "service" | "environment" | "severity" | "status">): IncidentHeadline => ({
   id: incident.id, code: incident.code, title: incident.title, summary: incident.summary, service: incident.service, environment: incident.environment, severity: incident.severity, status: incident.status
 });
+
+/**
+ * A GitHub delivery lane: one workflow on one branch, or deploys to one environment. A later outcome in the
+ * same lane (above all, the successful run that proves recovery) belongs to the incident its failure opened,
+ * even when a responder has since set the incident's environment or the fix took longer than the grouping window.
+ */
+export const deliveryLaneOf = (item: { metadata?: Record<string, unknown> }) => {
+  const meta = item.metadata ?? {};
+  if (meta.provider !== "github") return undefined;
+  const text = (value: unknown) => typeof value === "string" ? value : value === undefined || value === null ? "" : String(value);
+  if (meta.eventType === "workflow_run") return `workflow:${text(meta.repository)}:${text(meta.workflow)}:${text(meta.branch)}`;
+  if (meta.eventType === "deployment_status") return `deploy:${text(meta.repository)}:${text(meta.deploymentEnvironment)}`;
+  return undefined;
+};
+const DELIVERY_LANE_SQL = `case b.metadata->>'eventType'
+  when 'workflow_run' then 'workflow:'||coalesce(b.metadata->>'repository','')||':'||coalesce(b.metadata->>'workflow','')||':'||coalesce(b.metadata->>'branch','')
+  when 'deployment_status' then 'deploy:'||coalesce(b.metadata->>'repository','')||':'||coalesce(b.metadata->>'deploymentEnvironment','') end`;
 
 // GitHub evidence is grouped per branch, so a failure on one branch doesn't absorb pushes and CI runs from others.
 const branchOf = (item: { metadata?: Record<string, unknown> }) => typeof item.metadata?.branch === "string" && item.metadata.branch ? item.metadata.branch : undefined;
@@ -890,22 +909,28 @@ class PostgresRepository implements Repository {
         const match = await client.query(
           `select i.id from incidents i
            where i.organization_id = $1 and i.status <> 'resolved'
-           and coalesce(i.environment,'unknown')=coalesce($6::text,'unknown')
-           and ($7::text is null
-             or not exists (select 1 from ingestion_signals b where b.incident_id = i.id and b.metadata->>'branch' is not null)
-             or exists (select 1 from ingestion_signals b where b.incident_id = i.id and b.metadata->>'branch' = $7))
            and (
-             ($2::text is not null and exists (
-               select 1 from ingestion_signals prior where prior.incident_id = i.id and prior.correlation_key = $2
-             ))
-             or (i.service = any($3::text[]) and i.started_at between $4::timestamptz - ($5 * interval '1 minute') and $4::timestamptz + ($5 * interval '1 minute'))
+             ($8::text is not null and exists (select 1 from ingestion_signals b where b.incident_id = i.id and b.metadata->>'provider' = 'github' and ${DELIVERY_LANE_SQL} = $8))
+             or (
+               coalesce(i.environment,'unknown')=coalesce($6::text,'unknown')
+               and ($7::text is null
+                 or not exists (select 1 from ingestion_signals b where b.incident_id = i.id and b.metadata->>'branch' is not null)
+                 or exists (select 1 from ingestion_signals b where b.incident_id = i.id and b.metadata->>'branch' = $7))
+               and (
+                 ($2::text is not null and exists (
+                   select 1 from ingestion_signals prior where prior.incident_id = i.id and prior.correlation_key = $2
+                 ))
+                 or (i.service = any($3::text[]) and i.started_at between $4::timestamptz - ($5 * interval '1 minute') and $4::timestamptz + ($5 * interval '1 minute'))
+               )
+             )
            )
            order by
-             case when $2::text is not null and exists (
+             case when $8::text is not null and exists (select 1 from ingestion_signals b where b.incident_id = i.id and b.metadata->>'provider' = 'github' and ${DELIVERY_LANE_SQL} = $8) then 0
+               when $2::text is not null and exists (
                select 1 from ingestion_signals prior where prior.incident_id = i.id and prior.correlation_key = $2
-             ) then 0 else 1 end,
+             ) then 1 else 2 end,
              i.started_at desc limit 1`,
-          [integration.organizationId, signal.correlationKey ?? null, relatedServices, signal.timestamp, policy.groupingWindowMinutes, signal.environment ?? "unknown", branchOf(signal) ?? null]
+          [integration.organizationId, signal.correlationKey ?? null, relatedServices, signal.timestamp, policy.groupingWindowMinutes, signal.environment ?? "unknown", branchOf(signal) ?? null, deliveryLaneOf(signal) ?? null]
         );
         let incidentId = match.rows[0] ? String((match.rows[0] as Row).id) : undefined;
 
