@@ -11,19 +11,17 @@
 begin;
 
 create temporary table reset_target on commit drop as
+-- The workspace this admin has open in the app, by the same rule the API uses to scope every request.
 select m.organization_id as id
-from organization_members m
+from replayops_internal.active_memberships m
 join auth.users u on u.id = m.user_id
 where lower(u.email) = lower('you@example.com')   -- ← the admin's sign-in email
-  and m.role = 'admin'
-  -- With several workspaces, the one currently open in the app.
-  and ((select count(*) from organization_members x where x.user_id = u.id and x.role = 'admin') = 1
-    or m.organization_id = (select a.organization_id from replayops_internal.active_workspaces a where a.user_id = u.id));
+  and m.role = 'admin';
 
 do $$
 begin
   if (select count(*) from reset_target) <> 1 then
-    raise exception 'Could not tell which workspace to reset (% matched). Check the email, and open the workspace to reset in the app first.', (select count(*) from reset_target);
+    raise exception 'No workspace found where that email is an admin (% matched). Check the email you sign in with.', (select count(*) from reset_target);
   end if;
 end $$;
 
