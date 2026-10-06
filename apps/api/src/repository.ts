@@ -118,8 +118,11 @@ export class MemoryRepository implements Repository {
     const created: ChangeRecord[] = [];
     for (const input of delivery.changes) {
       const environment = resolveEnvironment(input.environment, policy.environments).name;
-      const previous = [...this.changes].filter((change) => change.environment === environment && ["deploy", "rollback"].includes(change.kind) && change.status === "success" && change.occurredAt < input.occurredAt && (input.repository ? change.repository === input.repository : change.service === input.service)).sort((a, b) => a.occurredAt.localeCompare(b.occurredAt)).at(-1);
-      for (const record of resolveChange(input, { environments: policy.environments, services, releaseBranches: policy.releaseBranches, repositoryCommits: this.commits.filter((commit) => commit.repository === input.repository), previousDeploy: previous ? { sha: previous.sha, version: previous.version } : undefined })) {
+      const previousDeploys: Record<string, { sha?: string; version?: string }> = {};
+      for (const change of [...this.changes].filter((item) => item.environment === environment && ["deploy", "rollback"].includes(item.kind) && item.status === "success" && item.occurredAt < input.occurredAt && (input.repository ? item.repository === input.repository : item.service === input.service)).sort((a, b) => a.occurredAt.localeCompare(b.occurredAt))) {
+        previousDeploys[change.service] = { sha: change.sha, version: change.version };
+      }
+      for (const record of resolveChange(input, { environments: policy.environments, services, releaseBranches: policy.releaseBranches, repositoryCommits: this.commits.filter((commit) => commit.repository === input.repository), previousDeploys })) {
         if (this.changes.some((change) => change.externalId === record.externalId)) continue;
         const change = { ...record, id: randomUUID() };
         this.changes.push(change);
@@ -1035,16 +1038,16 @@ class PostgresRepository implements Repository {
     const created: ChangeRecord[] = [];
     for (const input of delivery.changes) {
       const environment = resolveEnvironment(input.environment, policy.environments).name;
-      const previous = (await client.query(
-        `select sha, version from change_events where organization_id = $1 and environment = $2 and kind in ('deploy','rollback') and status = 'success' and occurred_at < $3
-         and (($4::text is not null and repository = $4) or ($4::text is null and service = $5)) order by occurred_at desc limit 1`,
+      const previousDeploys: Record<string, { sha?: string; version?: string }> = {};
+      for (const row of (await client.query(
+        `select distinct on (service) service, sha, version from change_events where organization_id = $1 and environment = $2 and kind in ('deploy','rollback') and status = 'success' and occurred_at < $3
+         and (($4::text is not null and repository = $4) or ($4::text is null and service = $5)) order by service, occurred_at desc`,
         [organizationId, environment, input.occurredAt, input.repository ?? null, input.service ?? null]
-      )).rows[0] as Row | undefined;
+      )).rows as Row[]) previousDeploys[String(row.service)] = { sha: row.sha ? String(row.sha) : undefined, version: row.version ? String(row.version) : undefined };
       const repositoryCommits = input.repository ? ((await client.query(
         `select * from repository_commits where organization_id = $1 and repository = $2 order by created_at desc limit 3000`, [organizationId, input.repository]
       )).rows as Row[]).map(mapCommit) : [];
-      const previousDeploy = previous ? { sha: previous.sha ? String(previous.sha) : undefined, version: previous.version ? String(previous.version) : undefined } : undefined;
-      for (const record of resolveChange(input, { environments: policy.environments, services, releaseBranches: policy.releaseBranches, repositoryCommits, previousDeploy })) {
+      for (const record of resolveChange(input, { environments: policy.environments, services, releaseBranches: policy.releaseBranches, repositoryCommits, previousDeploys })) {
         const inserted = await client.query(
           `insert into change_events (organization_id, service, environment, kind, status, title, version, previous_version, sha, previous_sha, repository, author, url, occurred_at, commits, files, source, external_id, metadata)
            values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) on conflict (organization_id, external_id) do nothing returning *`,

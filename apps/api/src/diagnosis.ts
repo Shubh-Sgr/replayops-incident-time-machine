@@ -210,13 +210,20 @@ export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = [
     const code = isCodeChange(change);
     const errors = [...firstExceptions.values()];
     const since = (item: (typeof errors)[number]) => code ? item.timestamp : firstAnywhere(item);
-    // A release that ran cleanly for a while, then a runtime change (config, flag, infra) and only then the
-    // errors: they began with that change. Not when the stack runs through the release's own code, or the
+    // A release that ran cleanly for a while, then a runtime change (config, flag, infra), and the errors right
+    // after it: they began with that change. Not when the stack runs through the release's own code, or the
     // same error already showed up on this release in staging.
     const cleanUntil = code && !suspectFor(change) && !earlyWarningFor(text(change.metadata?.version), change.timestamp).length
-      ? events.find((event) => event.kind === "deploy" && !isCodeChange(event) && event.timestamp > change.timestamp && secondsBetween(change.timestamp, event.timestamp) >= 600 && errors.some((item) => since(item) >= event.timestamp)
-        // …while this release was still the one running.
-        && !laterChanges(change, true).some((time) => time <= event.timestamp))
+      ? events.find((event) => {
+        if (event.kind !== "deploy" || isCodeChange(event) || event.timestamp <= change.timestamp) return false;
+        // …while this release was still the one running…
+        if (laterChanges(change, true).some((time) => time <= event.timestamp)) return false;
+        const onset = errors.map(since).filter((time) => time >= event.timestamp).sort()[0];
+        if (!onset) return false;
+        // …and it ran cleanly far longer than the errors took to follow the runtime change.
+        const clean = secondsBetween(change.timestamp, event.timestamp);
+        return clean >= 300 && clean >= 3 * secondsBetween(event.timestamp, onset);
+      })
       : undefined;
     const later = [...laterChanges(change, code), ...(cleanUntil ? [cleanUntil.timestamp] : [])];
     return {

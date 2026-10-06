@@ -296,6 +296,28 @@ describe("real-world scenarios", () => {
     expect(lead!.score - second!.score).toBeGreaterThanOrEqual(10);
   });
 
+  it("19. production replay: monorepo with another service deployed from main; config change 9 minutes after a release", async () => {
+    const w = world();
+    const v4 = "4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c", m1 = "9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a", v6 = "6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f";
+    await w.github.push("acme/shop", "replayops-drill", "a0", v4, [[v4, "drill: payouts v4 release", ["drill/payouts-api/release.txt"]]], 0);
+    await w.github.deploy("acme/shop", "production", v4, "success", 0.1);
+    // The app (whole repo) ships from main in between; it is not drill-payouts' previous release.
+    await w.github.push("acme/shop", "main", "b0", m1, [[m1, "fix: credit shared-repo releases", ["apps/api/src/release.ts"]]], 0.5);
+    await w.github.deploy("acme/shop", "Production", m1, "success", 0.6);
+    await w.github.push("acme/shop", "replayops-drill", v4, v6, [[v6, "payouts: validate IBAN before sending", ["drill/payouts-api/iban.ts", "drill/payouts-api/send.ts"]]], 1);
+    await w.github.deploy("acme/shop", "production", v6, "success", 1.0);
+    const changes = await w.repository.listChanges(ADMIN, { environment: "production" });
+    expect(changes.filter((item) => item.sha === v6).map((item) => [item.service, item.previousSha, item.commits.map((commit) => commit.sha)])).toEqual([["drill-payouts", v4, [v6]]]);
+    expect(changes.filter((item) => item.sha === m1).map((item) => item.service)).toEqual(["shop"]);
+
+    await w.change({ changeType: "config", service: "drill-payouts", environment: "production", title: "DB_POOL_MAX 50 → 5 on drill-payouts", key: "DB_POOL_MAX", from: 50, to: 5 }, 1 + 9.4 / 60);
+    const timeout = { release: v6.slice(0, 7), error: { type: "TimeoutError", message: "timeout exceeded when trying to connect", stack: "Error: timeout exceeded when trying to connect\n    at /app/node_modules/pg-pool/index.js:45:11\n    at withConnection (/app/drill/payouts-api/db.ts:18:9)\n    at sendPayout (/app/drill/payouts-api/send.ts:5:16)" } };
+    const first = await w.alert("drill-payouts", "production", 1 + 10.9 / 60, timeout);
+    const [lead, second] = (await w.diagnose(await w.incident(first.opened![0]!.id))).changeCandidates;
+    expect(lead!.title).toBe("DB_POOL_MAX 50 → 5 on drill-payouts");
+    expect(second!.reason).toContain("It ran for 9 minutes without these errors");
+  });
+
   it("12. with no change recorded, the diagnosis says to look at dependencies, traffic or data", async () => {
     const w = world();
     const incident = await w.incident((await w.alert("ledger-api", "production", 5)).opened![0]!.id);

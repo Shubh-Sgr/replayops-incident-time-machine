@@ -133,7 +133,14 @@ export function commitRange(commits: CommitRecord[], sha: string | undefined, pr
   return { commits: unique.slice(0, 100).map(({ sha: id, message, author, url, files }) => ({ sha: id, message, author, url, files })), complete };
 }
 
-export interface ResolveChangeContext { environments: EnvironmentConfig[]; services: ServiceMapping[]; releaseBranches: string[]; repositoryCommits: CommitRecord[]; previousDeploy?: { sha?: string; version?: string } }
+export interface DeployRef { sha?: string; version?: string }
+export interface ResolveChangeContext {
+  environments: EnvironmentConfig[]; services: ServiceMapping[]; releaseBranches: string[]; repositoryCommits: CommitRecord[];
+  /** The last successful release of each service in this environment. In a monorepo every service has its own. */
+  previousDeploys?: Record<string, DeployRef>;
+  /** Fallback when releases aren't known per service. */
+  previousDeploy?: DeployRef;
+}
 
 const kindTitle: Record<ChangeKind, string> = { deploy: "Deployed", rollback: "Rolled back", feature_flag: "Feature flag", config: "Config change", migration: "Migration", infra: "Infrastructure change" };
 
@@ -142,20 +149,35 @@ export function resolveChange(input: ChangeInput, context: ResolveChangeContext)
   const environment = resolveEnvironment(input.environment, context.environments).name;
   // Only code releases replace a previous release; a flag or config change has its own before/after values.
   const release = input.kind === "deploy" || input.kind === "rollback";
-  const previousSha = input.previousSha ?? (release ? context.previousDeploy?.sha : undefined);
-  const previousVersion = input.previousVersion ?? (release ? context.previousDeploy?.version : undefined);
-  const range = input.repository ? commitRange(context.repositoryCommits, input.sha, previousSha) : { commits: [], complete: false };
-  const files = [...new Set(range.commits.flatMap((commit) => commit.files))];
-  const affected = input.service ? [input.service] : servicesForChange(input.repository, files, context.services);
-  const services = affected.length ? affected : [input.repository ?? "unknown-service"];
-  return services.map((service) => {
+  const previousOf = (service: string): DeployRef => input.previousSha || input.previousVersion ? { sha: input.previousSha, version: input.previousVersion }
+    : !release ? {} : context.previousDeploys ? context.previousDeploys[service] ?? {} : context.previousDeploy ?? {};
+  const rangeFrom = (previous: DeployRef) => input.repository ? commitRange(context.repositoryCommits, input.sha, previous.sha) : { commits: [], complete: false };
+  // Each service's release replaces that service's previous release, so its commit range starts there: in a
+  // monorepo, another service's deploy of a different branch is not this service's predecessor.
+  const candidates = input.service ? [input.service] : servicesForChange(input.repository, [], context.services);
+  const resolved = candidates.map((service) => {
+    const previous = previousOf(service);
+    const range = rangeFrom(previous);
+    const files = [...new Set(range.commits.flatMap((commit) => commit.files))];
+    return { service, previous, range, files };
+  });
+  const scoped = (service: string) => Boolean(context.services.find((item) => item.name === service)?.paths.length);
+  const wholeRepo = candidates.filter((service) => !scoped(service));
+  const resolvedAffected = resolved.filter((item) => input.service
+    || (item.files.length ? servicesForChange(input.repository, item.files, context.services).includes(item.service)
+      // Unknown content: a path-scoped service can't be shown to be in it, so a whole-repository service owns it.
+      : !scoped(item.service) || !wholeRepo.length));
+  const fallback = () => { const previous = previousOf(input.repository ?? "unknown-service"); const range = rangeFrom(previous); return { service: input.repository ?? "unknown-service", previous, range, files: [...new Set(range.commits.flatMap((commit) => commit.files))] }; };
+  const entries = resolvedAffected.length ? resolvedAffected : [fallback()];
+  const services = entries.map((entry) => entry.service);
+  return entries.map(({ service, previous, range, files }) => {
     const label = input.version ?? (input.sha ? input.sha.slice(0, 7) : undefined);
     const flag = typeof input.metadata.flagKey === "string" ? input.metadata.flagKey : undefined;
     const title = input.title
       ?? (input.kind === "feature_flag" || input.kind === "config" ? `${kindTitle[input.kind]} ${flag ?? ""}${input.metadata.newValue !== undefined ? ` set to ${String(input.metadata.newValue)}` : ""} on ${service}`.replace(/\s+/g, " ")
         : `${kindTitle[input.kind]} ${service}${label ? ` ${label}` : ""} to ${environment}${input.status === "failure" ? " (failed)" : ""}`);
     return {
-      ...input, service, environment, title, previousSha, previousVersion, commits: range.commits, files,
+      ...input, service, environment, title, previousSha: previous.sha, previousVersion: previous.version, commits: range.commits, files,
       externalId: services.length > 1 ? `${input.externalId}:${service}` : input.externalId,
       metadata: { ...input.metadata, commitRangeComplete: range.complete }
     };
