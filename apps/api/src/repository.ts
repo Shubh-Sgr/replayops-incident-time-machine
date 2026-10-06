@@ -327,7 +327,7 @@ export class MemoryRepository implements Repository {
       if (!incident && !suppressed && placement.mayOpen && signal.impactScore >= policy.incidentThreshold) {
         const now = new Date().toISOString();
         incident = {
-          id: randomUUID(), code: `AUTO-${String(Date.now()).slice(-6)}`, title: signal.title,
+          id: randomUUID(), code: nextManualCode(this.incidents), title: signal.title,
           summary: `Automatically opened from ${integration.name} after ${signal.service} crossed the incident threshold.`,
           service: signal.service, environment: signal.environment ?? "unknown", customerImpact: "Unknown until measured", severity: signal.severity, status: "investigating", owner: "Automation",
           startedAt: signal.timestamp, resolvedAt: null, createdAt: now, updatedAt: now, evidenceRevision: now, events: []
@@ -1119,6 +1119,9 @@ class PostgresRepository implements Repository {
     const client = await this.pool.connect();
     try {
       await client.query("begin");
+      // Lock the source first. Inserting the delivery takes a key-share lock on it through the foreign key, so
+      // taking this lock afterwards let two concurrent deliveries to one source deadlock.
+      const sourceConfig=await client.query(`select daily_quota,retention_days,case when counter_date=current_date then accepted_today else 0 end as accepted_today from integrations where id=$1 for update`,[integration.id]);
       const delivery = await client.query(
         `insert into ingestion_deliveries (integration_id, external_id, status, signal_count)
          values ($1, $2, 'accepted', 0)
@@ -1130,7 +1133,6 @@ class PostgresRepository implements Repository {
         return { status: "duplicate", acceptedSignals: 0, incidentIds: [] } satisfies IngestionResult;
       }
 
-      const sourceConfig=await client.query(`select daily_quota,retention_days,case when counter_date=current_date then accepted_today else 0 end as accepted_today from integrations where id=$1 for update`,[integration.id]);
       const sourceRow=sourceConfig.rows[0] as Row|undefined;
       if(sourceRow && Number(sourceRow.accepted_today)+batch.signals.length>Number(sourceRow.daily_quota)){
         const reason=`Daily quota ${Number(sourceRow.daily_quota)} would be exceeded.`;
@@ -1201,15 +1203,28 @@ class PostgresRepository implements Repository {
 
         const suppressed = policy.maintenanceMode || (policy.suppressLowSeverity && signal.severity === "low");
         if (!incidentId && !suppressed && placement.mayOpen && signal.impactScore >= policy.incidentThreshold) {
-          const code = `AUTO-${new Date(signal.timestamp).toISOString().slice(5, 16).replace(/[-T:]/g, "")}-${randomUUID().slice(0, 4).toUpperCase()}`;
-          const created = await client.query(
-            `insert into incidents (organization_id, code, title, summary, service, environment, customer_impact, severity, status, owner, started_at)
-             values ($1,$2,$3,$4,$5,$6,'Unknown until measured',$7,'investigating','Automation',$8) returning id`,
-            [integration.organizationId, code, signal.title,
-              `Automatically opened from ${integration.name} after ${signal.service} crossed the incident threshold.`,
-              signal.service, signal.environment ?? "unknown", signal.severity, signal.timestamp]
-          );
-          incidentId = String((created.rows[0] as Row).id);
+          // Same sequence as incidents opened by hand (ROP-2001, ROP-2002, …). A concurrent open that takes the same
+          // number rolls back to the savepoint and takes the next one, without failing the whole delivery.
+          let created: Row | undefined;
+          for (let attempt = 0; !created; attempt += 1) {
+            await client.query("savepoint incident_code");
+            try {
+              created = (await client.query(
+                `insert into incidents (organization_id, code, title, summary, service, environment, customer_impact, severity, status, owner, started_at)
+                 select $1, 'ROP-' || (greatest(coalesce(max((substring(i.code from '^ROP-([0-9]+)$'))::int), 0), 2000) + 1), $2,$3,$4,$5,'Unknown until measured',$6,'investigating','Automation',$7
+                 from incidents i where i.organization_id = $1 returning id, code`,
+                [integration.organizationId, signal.title,
+                  `Automatically opened from ${integration.name} after ${signal.service} crossed the incident threshold.`,
+                  signal.service, signal.environment ?? "unknown", signal.severity, signal.timestamp]
+              )).rows[0] as Row;
+              await client.query("release savepoint incident_code");
+            } catch (error) {
+              await client.query("rollback to savepoint incident_code");
+              if ((error as { code?: string }).code !== "23505" || attempt >= 4) throw error;
+            }
+          }
+          incidentId = String(created.id);
+          const code = String(created.code);
           opened.push({ id: incidentId, code, title: signal.title, summary: `Automatically opened from ${integration.name} after ${signal.service} crossed the incident threshold.`, service: signal.service, environment: signal.environment ?? "unknown", severity: signal.severity, status: "investigating" });
           await client.query(
             `update ingestion_signals s set incident_id = $1
