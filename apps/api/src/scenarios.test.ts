@@ -251,6 +251,27 @@ describe("real-world scenarios", () => {
     expect(shopOnly.incidentIds).not.toContain(opened.id);
   });
 
+  it("17. a release passes its health check, then fails on real traffic: the stack trace points at the file it changed", async () => {
+    const w = world();
+    const v6 = "6e1f0c2a9b8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f", v5 = "5d0e9b1a8c7f6e5d4c3b2a1f0e9d8c7b6a5f4e3d";
+    await w.github.push("acme/shop", "main", "a0", v5, [[v5, "payouts: batch settlement", ["drill/payouts-api/batch.ts"]]], 0);
+    await w.github.deploy("acme/shop", "production", v5, "success", 0.1);
+    await w.github.push("acme/shop", "main", v5, v6, [[v6, "payouts: validate IBAN before sending", ["drill/payouts-api/iban.ts", "drill/payouts-api/send.ts"]]], 30);
+    await w.github.deploy("acme/shop", "production", v6, "success", 30.1);
+    // Ten minutes before the errors, someone turns on a flag: the obvious but wrong suspect.
+    await w.change({ changeType: "feature_flag", service: "drill-payouts", environment: "production", flag: "instant-payouts", from: false, to: true }, 30.5);
+    const crash = (payout: number) => ({ release: v6.slice(0, 7), error: { type: "TypeError", message: `Cannot read properties of undefined (reading 'iban') for payout ${payout}`, stack: `TypeError: Cannot read properties of undefined (reading 'iban')\n    at validateIban (/app/drill/payouts-api/iban.ts:12:31)\n    at sendPayout (/app/drill/payouts-api/send.ts:40:5)\n    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)` } });
+    const first = await w.alert("drill-payouts", "production", 30.66, crash(1001));
+    await w.alert("drill-payouts", "production", 30.68, crash(1002));
+    const diagnosis = await w.diagnose(await w.incident(first.opened![0]!.id));
+    const lead = diagnosis.changeCandidates[0]!;
+    expect(lead.title).toBe(`Deployed drill-payouts ${v6.slice(0, 7)} to production`);
+    expect(lead.reason).toContain(`The failing stack frame drill/payouts-api/iban.ts:12 is in a file it changed (${v6.slice(0, 7)} “payouts: validate IBAN before sending”).`);
+    expect(lead.reason).toContain(`Every failing event reports version ${v6.slice(0, 7)}.`);
+    const flag = diagnosis.changeCandidates.find((candidate) => candidate.title.startsWith("Feature flag"))!;
+    expect(flag.score).toBeLessThan(lead.score);
+  });
+
   it("12. with no change recorded, the diagnosis says to look at dependencies, traffic or data", async () => {
     const w = world();
     const incident = await w.incident((await w.alert("ledger-api", "production", 5)).opened![0]!.id);

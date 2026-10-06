@@ -1,4 +1,5 @@
 import { evaluateGitHubDeliveryRecovery } from "./deliveryRecovery.js";
+import { frameIsFile, stackFiles } from "./exceptions.js";
 import type { DiagnosticHypothesis, HypothesisTest, Incident, IncidentDiagnosis, IncidentEvent, SignalDelta } from "./types.js";
 
 const clamp = (value: number, minimum: number, maximum: number) => Math.min(maximum, Math.max(minimum, Math.round(value)));
@@ -189,6 +190,10 @@ export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = [
   const earlyWarningFor = (version: string | undefined, changedAt: string) => version ? [...firstExceptions.values()].flatMap((item) => (context.exceptionHistory?.get(item.fingerprint) ?? [])
     .filter((sighting) => sighting.environment !== (environment ?? "unknown") && sighting.environment !== "unknown" && sighting.firstSeen < changedAt && sighting.releases.includes(version))
     .map((sighting) => ({ type: item.type, environment: sighting.environment }))) : [];
+  // Where the failures happen in the code: application frames of every error's stack, top frames first.
+  const failingFrames = events.flatMap((event) => stackFiles((event.metadata?.exception as { stack?: string } | undefined)?.stack)).sort((a, b) => Number(b.top) - Number(a.top));
+  /** A release named by version, or by the git SHA apps often report as their release. */
+  const sameRelease = (release: string, version: string | undefined, sha: string | undefined) => release === version || Boolean(sha && release.length >= 7 && (sha.startsWith(release) || release.startsWith(sha)));
   const failingReleases = [...new Set(events.filter((event) => event.timestamp >= symptom.timestamp && (event.kind === "alert" || event.metadata?.exception)).map(releaseOf).filter((value): value is string => Boolean(value)))];
   const isCodeChange = (change: IncidentEvent) => !text(change.metadata?.changeType) || ["deploy", "rollback"].includes(String(change.metadata?.changeType));
   const firstAnywhere = (item: { timestamp: string; fingerprint: string }) => [item.timestamp, ...(context.exceptionHistory?.get(item.fingerprint) ?? []).map((sighting) => sighting.firstSeen)].sort()[0]!;
@@ -227,12 +232,23 @@ export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = [
       notes.push(elsewhere ? `${preexisting[0]!.type} was already seen ${((place) => place ? `in ${place}` : "elsewhere")((context.exceptionHistory?.get(preexisting[0]!.fingerprint) ?? []).find((sighting) => sighting.firstSeen < event.timestamp)?.environment)} before this change, so it didn't start with it.` : "Its errors were already happening before it.");
     }
     const version = text(meta.version);
+    const sha = text(meta.sha);
+    const releaseLabel = version ?? sha?.slice(0, 7);
+    // Suspect files: the failing stack runs through code this change modified.
+    const changedFiles = event.kind === "deploy" && isCodeChange(event) && Array.isArray(meta.files) ? (meta.files as unknown[]).filter((file): file is string => typeof file === "string") : [];
+    const suspect = changedFiles.length ? failingFrames.find((frame) => changedFiles.some((file) => frameIsFile(frame.file, file))) : undefined;
+    if (suspect) {
+      const file = changedFiles.find((item) => frameIsFile(suspect.file, item))!;
+      const commit = (Array.isArray(meta.commits) ? meta.commits as Array<{ sha?: string; message?: string; files?: string[] }> : []).find((item) => item.files?.includes(file));
+      adjustment += suspect.top ? 18 : 10;
+      notes.push(`The failing stack ${suspect.top ? "frame" : "passes through"} ${file}${suspect.line ? `:${suspect.line}` : ""}${suspect.top ? " is in a file it changed" : ", a file it changed"}${commit?.sha ? ` (${commit.sha.slice(0, 7)} “${commit.message ?? ""}”)` : ""}.`);
+    }
     const earlyWarnings = event.kind === "deploy" ? earlyWarningFor(version, event.timestamp) : [];
     if (earlyWarnings.length) { adjustment += 15; notes.push(`The same ${earlyWarnings[0]!.type} appeared in ${earlyWarnings[0]!.environment} on ${version} before it reached ${environment ?? "this environment"}.`); }
-    if (event.kind === "deploy" && version && failingReleases.length) {
+    if (event.kind === "deploy" && isCodeChange(event) && releaseLabel && failingReleases.length) {
       // Matching versions is weak evidence when only one version is running; mixed versions are strong evidence against.
-      if (failingReleases.every((release) => release === version)) { adjustment += 5; notes.push(`Every failing event reports version ${version}.`); }
-      else { adjustment -= 12; notes.push(`Failures also come from ${failingReleases.filter((release) => release !== version).slice(0, 2).join(", ")}, not only ${version}.`); }
+      if (failingReleases.every((release) => sameRelease(release, version, sha))) { adjustment += 5; notes.push(`Every failing event reports version ${releaseLabel}.`); }
+      else { adjustment -= 12; notes.push(`Failures also come from ${failingReleases.filter((release) => !sameRelease(release, version, sha)).slice(0, 2).join(", ")}, not only ${releaseLabel}.`); }
     }
     if (meta.touchesService === false) { adjustment -= 22; notes.push(`None of its changed files are in ${incident.service}'s code: likely unrelated.`); }
     else if (meta.touchesService === true) { adjustment += 6; notes.push(`It changed ${incident.service}'s code.`); }

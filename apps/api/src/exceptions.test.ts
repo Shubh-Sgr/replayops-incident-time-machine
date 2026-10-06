@@ -83,3 +83,15 @@ describe("error groups", () => {
     expect(candidate.score).toBeGreaterThan(withoutErrors.score);
   });
 });
+
+describe("stack frame files", () => {
+  it("reads application frames from Node and Python stacks, skipping vendor frames", async () => {
+    const { stackFiles, frameIsFile } = await import("./exceptions.js");
+    expect(stackFiles("TypeError: x\n    at validateIban (/app/drill/payouts-api/iban.ts:12:31)\n    at /app/node_modules/express/router.js:5:1\n    at sendPayout (/app/drill/payouts-api/send.ts:40:5)")).toEqual([
+      { file: "/app/drill/payouts-api/iban.ts", line: 12, top: true }, { file: "/app/drill/payouts-api/send.ts", line: 40, top: false }
+    ]);
+    expect(stackFiles('Traceback:\n  File "/srv/app/payouts/iban.py", line 9, in validate')).toEqual([{ file: "/srv/app/payouts/iban.py", line: 9, top: true }]);
+    expect(frameIsFile("/app/drill/payouts-api/iban.ts", "drill/payouts-api/iban.ts")).toBe(true);
+    expect(frameIsFile("/app/other/drill/payouts-api/iban.tsx", "drill/payouts-api/iban.ts")).toBe(false);
+  });
+});

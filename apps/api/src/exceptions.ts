@@ -43,6 +43,28 @@ export function topFrameOf(stack: string | null | undefined) {
   return frame ? frame.replace(/:\d+(?::\d+)?\)?$/, "").replace(/, line \d+/, "").replace(/^at\s+/, "").replace(/\s+\($/, "").slice(0, 200) : null;
 }
 
+export interface StackFrameFile { file: string; line: number | null; top: boolean }
+/**
+ * The source files of a stack's application frames, top first: "at fn (/app/src/a.ts:12:3)",
+ * "at /app/src/a.ts:12:3", or Python's 'File "/app/a.py", line 12'.
+ */
+export function stackFiles(stack: string | null | undefined): StackFrameFile[] {
+  if (!stack) return [];
+  const files: StackFrameFile[] = [];
+  for (const raw of stack.split("\n")) {
+    const line = raw.trim();
+    const match = /File "([^"]+)", line (\d+)/.exec(line) ?? /\(?((?:[A-Za-z]:)?[^\s()]+\.[A-Za-z]{1,5}):(\d+)(?::\d+)?\)?$/.exec(line);
+    if (!match || vendorFrame.test(match[1]!)) continue;
+    files.push({ file: match[1]!.replace(/^file:\/\//, "").replace(/\\/g, "/"), line: Number(match[2]) || null, top: files.length === 0 });
+  }
+  return files;
+}
+/** A frame's absolute path names a repository file when it ends with it: "/app/drill/a.ts" ⊇ "drill/a.ts". */
+export const frameIsFile = (framePath: string, repositoryFile: string) => {
+  const file = repositoryFile.replace(/^\.?\//, "");
+  return Boolean(file) && (framePath === file || framePath.endsWith(`/${file}`));
+};
+
 export function fingerprintException(service: string, type: string, message: string, stack?: string | null): ExceptionInfo {
   const cleanType = type.trim().slice(0, 120) || "Error";
   const topFrame = topFrameOf(stack);
