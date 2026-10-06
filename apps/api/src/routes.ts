@@ -277,10 +277,12 @@ apiRouter.post("/incidents/:id/measurements",async(req,res)=>{
 
 apiRouter.post("/incidents/:id/lifecycle",async(req:AuthenticatedRequest,res)=>{
   const parsed=parseOrReply(lifecycleSchema,req.body);if("error" in parsed){res.status(400).json(parsed);return;}
-  try{const context=await workspaceService.context(userId(req));const result=await caseworkService.transition(userId(req),String(req.params.id),actor(req),context.role,parsed.data);res.json(result);
+  try{const context=await workspaceService.context(userId(req));const before=await repository.getIncident(userId(req),String(req.params.id));
+    const result=await caseworkService.transition(userId(req),String(req.params.id),actor(req),context.role,parsed.data);res.json(result);
     const incident=await repository.getIncident(userId(req),String(req.params.id));
     const type=parsed.data.action==="start_monitoring"?"monitoring":parsed.data.action==="resolve"?"resolved":"reopened";
-    if(incident)void alertService.dispatch(context.organizationId,{type,incident,detail:parsed.data.reason,actor:actor(req)});}
+    // Alert on real status changes only: a repeated click or retried request must not page twice.
+    if(incident&&before&&incident.status!==before.status)void alertService.dispatch(context.organizationId,{type,incident,detail:parsed.data.reason,actor:actor(req)});}
   catch(error){res.status(error instanceof HttpError?error.status:409).json({error:error instanceof Error?error.message:"Lifecycle transition failed."});}
 });
 
