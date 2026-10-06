@@ -45,13 +45,16 @@ export function topFrameOf(stack: string | null | undefined) {
 
 export interface StackFrameFile { file: string; line: number | null; top: boolean }
 /**
- * The source files of a stack's application frames, top first: "at fn (/app/src/a.ts:12:3)",
+ * The source files of a stack's application frames, innermost (where it was thrown) first: "at fn (/app/src/a.ts:12:3)",
  * "at /app/src/a.ts:12:3", or Python's 'File "/app/a.py", line 12'.
  */
 export function stackFiles(stack: string | null | undefined): StackFrameFile[] {
   if (!stack) return [];
   const files: StackFrameFile[] = [];
-  for (const raw of stack.split("\n")) {
+  // Python tracebacks list the innermost call last; everything else lists it first.
+  const lines = stack.split("\n");
+  const innermostLast = /Traceback \(most recent call last\)|^\s*File "/m.test(stack);
+  for (const raw of innermostLast ? lines.reverse() : lines) {
     const line = raw.trim();
     const match = /File "([^"]+)", line (\d+)/.exec(line) ?? /\(?((?:[A-Za-z]:)?[^\s()]+\.[A-Za-z]{1,5}):(\d+)(?::\d+)?\)?$/.exec(line);
     if (!match || vendorFrame.test(match[1]!)) continue;

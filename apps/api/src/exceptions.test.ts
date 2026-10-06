@@ -90,7 +90,9 @@ describe("stack frame files", () => {
     expect(stackFiles("TypeError: x\n    at validateIban (/app/drill/payouts-api/iban.ts:12:31)\n    at /app/node_modules/express/router.js:5:1\n    at sendPayout (/app/drill/payouts-api/send.ts:40:5)")).toEqual([
       { file: "/app/drill/payouts-api/iban.ts", line: 12, top: true }, { file: "/app/drill/payouts-api/send.ts", line: 40, top: false }
     ]);
-    expect(stackFiles('Traceback:\n  File "/srv/app/payouts/iban.py", line 9, in validate')).toEqual([{ file: "/srv/app/payouts/iban.py", line: 9, top: true }]);
+    expect(stackFiles('Traceback (most recent call last):\n  File "/srv/app/payouts/send.py", line 30, in send\n  File "/srv/app/payouts/iban.py", line 9, in validate\nKeyError: iban')).toEqual([
+      { file: "/srv/app/payouts/iban.py", line: 9, top: true }, { file: "/srv/app/payouts/send.py", line: 30, top: false }
+    ]);
     expect(frameIsFile("/app/drill/payouts-api/iban.ts", "drill/payouts-api/iban.ts")).toBe(true);
     expect(frameIsFile("/app/other/drill/payouts-api/iban.tsx", "drill/payouts-api/iban.ts")).toBe(false);
   });

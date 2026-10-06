@@ -275,6 +275,27 @@ describe("real-world scenarios", () => {
     expect(diagnosis.changeCandidates.every((candidate) => candidate.kind === "deploy")).toBe(true);
   });
 
+  it("18. a config change squeezes the DB pool while a clean release has been live for an hour: the config change leads", async () => {
+    const w = world();
+    const v6 = "6e1f0c2a9b8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f", v5 = "5d0e9b1a8c7f6e5d4c3b2a1f0e9d8c7b6a5f4e3d";
+    await w.github.push("acme/shop", "main", "a0", v5, [[v5, "payouts: batch settlement", ["drill/payouts-api/batch.ts"]]], 0);
+    await w.github.deploy("acme/shop", "production", v5, "success", 0.1);
+    await w.github.push("acme/shop", "main", v5, v6, [[v6, "payouts: validate IBAN before sending", ["drill/payouts-api/iban.ts", "drill/payouts-api/send.ts"]]], 30);
+    await w.github.deploy("acme/shop", "production", v6, "success", 30.1);
+    await w.change({ changeType: "config", service: "drill-payouts", environment: "production", title: "DB_POOL_MAX 50 → 5 on drill-payouts", key: "DB_POOL_MAX", from: 50, to: 5 }, 31.1);
+    const timeout = (id: number) => ({ release: v6.slice(0, 7), error: { type: "TimeoutError", message: `timeout exceeded when trying to connect (payout ${id})`, stack: "Error: timeout exceeded when trying to connect\n    at /app/node_modules/pg-pool/index.js:45:11\n    at withConnection (/app/drill/payouts-api/db.ts:18:9)\n    at sendPayout (/app/drill/payouts-api/send.ts:5:16)" } });
+    const first = await w.alert("drill-payouts", "production", 31.2, timeout(1));
+    await w.alert("drill-payouts", "production", 31.22, timeout(2));
+    const diagnosis = await w.diagnose(await w.incident(first.opened![0]!.id));
+    const [lead, second] = diagnosis.changeCandidates;
+    expect(lead!.title).toBe("DB_POOL_MAX 50 → 5 on drill-payouts");
+    expect(second!.title).toBe(`Deployed drill-payouts ${v6.slice(0, 7)} to production`);
+    expect(second!.reason).toContain("It ran for 60 minutes without these errors, until “DB_POOL_MAX 50 → 5 on drill-payouts”.");
+    // The stack passes through send.ts, which the release changed, but the error is thrown in db.ts: not a suspect file.
+    expect(second!.reason).not.toContain("send.ts");
+    expect(lead!.score - second!.score).toBeGreaterThanOrEqual(10);
+  });
+
   it("12. with no change recorded, the diagnosis says to look at dependencies, traffic or data", async () => {
     const w = world();
     const incident = await w.incident((await w.alert("ledger-api", "production", 5)).opened![0]!.id);

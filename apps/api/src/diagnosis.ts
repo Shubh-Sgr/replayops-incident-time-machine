@@ -191,8 +191,9 @@ export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = [
   const earlyWarningFor = (version: string | undefined, changedAt: string) => version ? [...firstExceptions.values()].flatMap((item) => (context.exceptionHistory?.get(item.fingerprint) ?? [])
     .filter((sighting) => sighting.environment !== (environment ?? "unknown") && sighting.environment !== "unknown" && sighting.firstSeen < changedAt && sighting.releases.includes(version))
     .map((sighting) => ({ type: item.type, environment: sighting.environment }))) : [];
-  // Where the failures happen in the code: application frames of every error's stack, top frames first.
-  const failingFrames = events.flatMap((event) => stackFiles((event.metadata?.exception as { stack?: string } | undefined)?.stack)).sort((a, b) => Number(b.top) - Number(a.top));
+  // Where the failures happen in the code: the application frame each error was thrown in. Callers deeper in the
+  // stack are on most request paths, so a change to them says little.
+  const failingFrames = events.flatMap((event) => stackFiles((event.metadata?.exception as { stack?: string } | undefined)?.stack).filter((frame) => frame.top));
   /** A release named by version, or by the git SHA apps often report as their release. */
   const sameRelease = (release: string, version: string | undefined, sha: string | undefined) => release === version || Boolean(sha && release.length >= 7 && (sha.startsWith(release) || release.startsWith(sha)));
   const failingReleases = [...new Set(events.filter((event) => event.timestamp >= symptom.timestamp && (event.kind === "alert" || event.metadata?.exception)).map(releaseOf).filter((value): value is string => Boolean(value)))];
@@ -205,14 +206,23 @@ export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = [
    * judged against every environment, because an error seen anywhere before it started without it.
    */
   const errorEvidence = (change: IncidentEvent) => {
-    if (change.kind !== "deploy") return { introduced: [], preexisting: [] };
+    if (change.kind !== "deploy") return { introduced: [], preexisting: [], cleanUntil: undefined };
     const code = isCodeChange(change);
-    const later = laterChanges(change, code);
     const errors = [...firstExceptions.values()];
     const since = (item: (typeof errors)[number]) => code ? item.timestamp : firstAnywhere(item);
+    // A release that ran cleanly for a while, then a runtime change (config, flag, infra) and only then the
+    // errors: they began with that change. Not when the stack runs through the release's own code, or the
+    // same error already showed up on this release in staging.
+    const cleanUntil = code && !suspectFor(change) && !earlyWarningFor(text(change.metadata?.version), change.timestamp).length
+      ? events.find((event) => event.kind === "deploy" && !isCodeChange(event) && event.timestamp > change.timestamp && secondsBetween(change.timestamp, event.timestamp) >= 600 && errors.some((item) => since(item) >= event.timestamp)
+        // …while this release was still the one running.
+        && !laterChanges(change, true).some((time) => time <= event.timestamp))
+      : undefined;
+    const later = [...laterChanges(change, code), ...(cleanUntil ? [cleanUntil.timestamp] : [])];
     return {
       introduced: errors.filter((item) => since(item) >= change.timestamp && !later.some((time) => time <= item.timestamp && since(item) >= time)),
-      preexisting: errors.filter((item) => since(item) < change.timestamp)
+      preexisting: errors.filter((item) => since(item) < change.timestamp),
+      cleanUntil
     };
   };
   /** Suspect files: the failing stack runs through code this change modified. */
@@ -234,7 +244,7 @@ export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = [
     // release that was running keeps a floor however old it is. Observations keep the short, minute-scale window.
     const proximity = event.kind === "deploy" ? 28 * Math.exp(-leadTimeSeconds / 7_200) + (meta.liveRelease === true ? 6 : 0) : Math.max(0, 28 - leadTimeSeconds / 30);
     const progression = Math.max(0, symptom.impactScore - event.impactScore) * 0.22;
-    const { introduced: newErrors, preexisting } = errorEvidence(event);
+    const { introduced: newErrors, preexisting, cleanUntil } = errorEvidence(event);
     const notes: string[] = [];
     let adjustment = Math.min(12, newErrors.length * 6);
     if (newErrors.length) notes.push(`${newErrors.length} error type${newErrors.length === 1 ? "" : "s"} (${[...new Set(newErrors.map((item) => item.type))].slice(0, 3).join(", ")}) first appeared after it.`);
@@ -243,14 +253,15 @@ export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = [
       const elsewhere = !isCodeChange(event) && preexisting.some((item) => firstAnywhere(item) < item.timestamp);
       notes.push(elsewhere ? `${preexisting[0]!.type} was already seen ${((place) => place ? `in ${place}` : "elsewhere")((context.exceptionHistory?.get(preexisting[0]!.fingerprint) ?? []).find((sighting) => sighting.firstSeen < event.timestamp)?.environment)} before this change, so it didn't start with it.` : "Its errors were already happening before it.");
     }
+    if (cleanUntil) { adjustment -= 12; notes.push(`It ran for ${humanLead(secondsBetween(event.timestamp, cleanUntil.timestamp))} without these errors, until “${cleanUntil.title}”.`); }
     const version = text(meta.version);
     const sha = text(meta.sha);
     const releaseLabel = version ?? sha?.slice(0, 7);
     const suspect = suspectFor(event);
     if (suspect) {
       const { frame, file, commit } = suspect;
-      adjustment += frame.top ? 18 : 10;
-      notes.push(`The failing stack ${frame.top ? "frame" : "passes through"} ${file}${frame.line ? `:${frame.line}` : ""}${frame.top ? " is in a file it changed" : ", a file it changed"}${commit?.sha ? ` (${commit.sha.slice(0, 7)} “${commit.message ?? ""}”)` : ""}.`);
+      adjustment += 18;
+      notes.push(`The failing stack frame ${file}${frame.line ? `:${frame.line}` : ""} is in a file it changed${commit?.sha ? ` (${commit.sha.slice(0, 7)} “${commit.message ?? ""}”)` : ""}.`);
     } else if (suspectChange && event.kind === "deploy") {
       // A flag can expose a bug, but the failing code was written elsewhere: that is where the fix goes.
       adjustment -= 12;
@@ -258,7 +269,8 @@ export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = [
     }
     const earlyWarnings = event.kind === "deploy" ? earlyWarningFor(version, event.timestamp) : [];
     if (earlyWarnings.length) { adjustment += 15; notes.push(`The same ${earlyWarnings[0]!.type} appeared in ${earlyWarnings[0]!.environment} on ${version} before it reached ${environment ?? "this environment"}.`); }
-    if (event.kind === "deploy" && isCodeChange(event) && releaseLabel && failingReleases.length) {
+    // A release that already ran cleanly gains nothing from the failures carrying its version: it was the only one running.
+    if (event.kind === "deploy" && isCodeChange(event) && releaseLabel && failingReleases.length && !cleanUntil) {
       // Matching versions is weak evidence when only one version is running; mixed versions are strong evidence against.
       if (failingReleases.every((release) => sameRelease(release, version, sha))) { adjustment += 5; notes.push(`Every failing event reports version ${releaseLabel}.`); }
       else { adjustment -= 12; notes.push(`Failures also come from ${failingReleases.filter((release) => !sameRelease(release, version, sha)).slice(0, 2).join(", ")}, not only ${releaseLabel}.`); }
