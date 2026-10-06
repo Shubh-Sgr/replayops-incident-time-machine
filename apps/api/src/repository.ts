@@ -3,7 +3,7 @@ import { Pool, type PoolClient } from "pg";
 import { config } from "./config.js";
 import { MEMBERSHIPS } from "./scope.js";
 import { placeSignal, resolveEnvironment, type ServiceMapping } from "./release.js";
-import { changeEvidence, resolveChange, selectChangesForIncident, type ChangeRecord, type CommitRecord, type ExtractedDelivery } from "./changes.js";
+import { changeEvidence, commitFilesLookup, resolveChange, selectChangesForIncident, type ChangeRecord, type CommitRecord, type ExtractedDelivery } from "./changes.js";
 import { seedActivities, seedDashboardSeries, seedIncidents, seedReplayRuns } from "./seed.js";
 import type { Activity, DashboardData, Incident, IncidentDecision, IncidentEvent, IncidentHeadline, IncidentPolicy, IngestionBatch, IngestionResult, Integration, IntegrationDelivery, IntegrationProvider, IntegrationTarget, NormalizedSignal, ReplayConfig, ReplayProjection, ReplayResult, ReplayRun, SearchResult, Severity } from "./types.js";
 import { forbidden } from "./errors.js";
@@ -301,7 +301,8 @@ export class MemoryRepository implements Repository {
     let acceptedSignals = 0;
     const services = await workspaceService.servicesForOrganization(integration.organizationId);
     const newChanges = this.recordDelivery(batch.delivery, policy, services);
-    for (const placement of batch.signals.map((item) => placeSignal(item, policy, services))) {
+    const commitFiles = commitFilesLookup(this.commits, newChanges);
+    for (const placement of batch.signals.map((item) => placeSignal(item, policy, services, commitFiles))) {
       if (placement.drop) continue;
       const signal = placement.signal;
       const relatedServices = await workspaceService.relatedServicesForOrganization(integration.organizationId, signal.service);
@@ -1014,6 +1015,13 @@ class PostgresRepository implements Repository {
     } : null;
   }
   /** Stores the delivery's commits and changes (inside the ingest transaction); returns the changes that are new. */
+  /** The stored commits a batch's GitHub signals ran on (the commit itself, or the push it headed). */
+  private async commitsForSignals(client: PoolClient, organizationId: string, signals: NormalizedSignal[]) {
+    const shas = [...new Set(signals.filter((signal) => signal.metadata?.provider === "github" && typeof signal.metadata.sha === "string").map((signal) => String(signal.metadata.sha)))];
+    if (!shas.length) return [];
+    return ((await client.query(`select * from repository_commits where organization_id = $1 and (sha = any($2) or push_after = any($2)) limit 500`, [organizationId, shas])).rows as Row[]).map(mapCommit);
+  }
+
   private async recordDelivery(client: PoolClient, organizationId: string, delivery: ExtractedDelivery | undefined, policy: Pick<IncidentPolicy, "environments" | "releaseBranches">, services: ServiceMapping[]) {
     if (!delivery) return [];
     for (const commit of delivery.commits) {
@@ -1134,7 +1142,8 @@ class PostgresRepository implements Repository {
       let acceptedSignals = 0;
       const services = await workspaceService.servicesForOrganization(integration.organizationId);
       const newChanges = await this.recordDelivery(client, integration.organizationId, batch.delivery, policy, services);
-      for (const placement of batch.signals.map((item) => placeSignal(item, policy, services))) {
+      const commitFiles = commitFilesLookup(await this.commitsForSignals(client, integration.organizationId, batch.signals), newChanges);
+      for (const placement of batch.signals.map((item) => placeSignal(item, policy, services, commitFiles))) {
         if (placement.drop) continue;
         const signal = placement.signal;
         const relatedServices = await workspaceService.relatedServicesForOrganization(integration.organizationId, signal.service);

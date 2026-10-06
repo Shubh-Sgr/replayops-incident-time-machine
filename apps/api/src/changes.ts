@@ -27,6 +27,13 @@ const text = (value: unknown) => typeof value === "string" && value.trim() ? val
 const time = (value: unknown, fallback: string) => { const parsed = Date.parse(String(value ?? "")); return Number.isNaN(parsed) ? fallback : new Date(parsed).toISOString(); };
 const ZERO = /^0+$/;
 
+/** A GitHub deployment's payload: an object, or the JSON string some CD tools send. */
+export function deploymentPayload(deployment: unknown): Json {
+  const payload = object(deployment).payload;
+  if (typeof payload === "string") { try { return object(JSON.parse(payload)); } catch { return {}; } }
+  return object(payload);
+}
+
 const changeKinds: Record<string, ChangeKind> = {
   deploy: "deploy", deployment: "deploy", release: "deploy", rollback: "rollback", revert: "rollback",
   feature_flag: "feature_flag", flag: "feature_flag", "feature-flag": "feature_flag", config: "config", configuration: "config",
@@ -58,10 +65,11 @@ export function extractDelivery(provider: string, payload: Json, eventName: stri
       const changeStatus: ChangeStatus | undefined = state === "success" ? "success" : ["failure", "error"].includes(state) ? "failure" : undefined;
       if (!changeStatus) return { commits: [], changes: [] };
       const sha = text(deployment.sha);
+      const deployed = deploymentPayload(deployment);
       return { commits: [], changes: [{
-        kind: "deploy", status: changeStatus, environment: text(deployment.environment) ?? text(status.environment), sha, repository,
+        kind: "deploy", status: changeStatus, service: text(deployed.service), environment: text(deployment.environment) ?? text(status.environment), sha, repository,
         author: text(object(deployment.creator).login) ?? text(object(payload.sender).login), url: text(status.log_url) ?? text(status.target_url) ?? text(status.environment_url),
-        version: text(object(deployment.payload).version), occurredAt: time(status.created_at, receivedAt), source: "github",
+        version: text(deployed.version), occurredAt: time(status.created_at, receivedAt), source: "github",
         externalId: `github:deployment:${text(deployment.id) ?? deliveryId}:${state}`, metadata: { ref: text(deployment.ref), deploymentId: deployment.id }
       }] };
     }
@@ -152,6 +160,23 @@ export function resolveChange(input: ChangeInput, context: ResolveChangeContext)
       metadata: { ...input.metadata, commitRangeComplete: range.complete }
     };
   });
+}
+
+const sameSha = (a: string | undefined, b: string | undefined) => Boolean(a && b && (a === b || a.startsWith(b) || b.startsWith(a)));
+
+/**
+ * The files a GitHub signal's commit shipped, so a run or deployment in a shared repository can be placed
+ * on the service whose code changed: a just-recorded deployment's release range, else the push that commit
+ * headed, else the commit alone.
+ */
+export function commitFilesLookup(commits: CommitRecord[], changes: Array<Pick<ChangeRecord, "sha" | "files">> = []) {
+  return (sha: string) => {
+    const unique = (files: string[]) => [...new Set(files)];
+    const released = changes.filter((change) => sameSha(change.sha, sha)).flatMap((change) => change.files);
+    if (released.length) return unique(released);
+    const push = commits.filter((commit) => sameSha(commit.pushAfter, sha));
+    return unique((push.length ? push : commits.filter((commit) => sameSha(commit.sha, sha))).flatMap((commit) => commit.files));
+  };
 }
 
 export interface IncidentScope { service: string; relatedServices: string[]; environment: string; startedAt: string }

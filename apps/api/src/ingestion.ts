@@ -5,7 +5,7 @@ import { repository } from "./repository.js";
 import { ingestionQueue } from "./queue.js";
 import { workspaceService } from "./workspace.js";
 import { exceptionFromAttributes, exceptionFromGeneric } from "./exceptions.js";
-import { extractDelivery, isChangeEvent } from "./changes.js";
+import { deploymentPayload, extractDelivery, isChangeEvent } from "./changes.js";
 import type { EventKind, IngestionBatch, IntegrationProvider, NormalizedSignal, Severity } from "./types.js";
 
 type JsonRecord = Record<string, unknown>;
@@ -117,7 +117,7 @@ function normalizeGitHub(payload: JsonRecord, eventName: string, deliveryId: str
       impactScore: failed ? 78 : successful ? 28 : 44,
       severity: failed ? "high" : "low", sourceUrl: environmentUrl, environment,
       correlationKey: `${repositoryName}:${environment}`,
-      metadata: { provider: "github", eventType: "deployment_status", laneOnly: successful || undefined, repositoryId, repository: repositoryName, deploymentId: deployment.id, deploymentEnvironment: environment, branch: textValue(deployment.ref) || undefined, state, sha: deployment.sha, creator: sender, sourceUrl: environmentUrl, logUrl: textValue(deploymentStatus.log_url, textValue(deploymentStatus.target_url)) || undefined, productionHealthMeasured: false }
+      metadata: { provider: "github", eventType: "deployment_status", laneOnly: successful || undefined, serviceHint: textValue(deploymentPayload(deployment).service) || undefined, repositoryId, repository: repositoryName, deploymentId: deployment.id, deploymentEnvironment: environment, branch: textValue(deployment.ref) || undefined, state, sha: deployment.sha, creator: sender, sourceUrl: environmentUrl, logUrl: textValue(deploymentStatus.log_url, textValue(deploymentStatus.target_url)) || undefined, productionHealthMeasured: false }
     })];
   }
 

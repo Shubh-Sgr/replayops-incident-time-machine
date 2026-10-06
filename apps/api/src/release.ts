@@ -59,15 +59,28 @@ const pathMatches = (file: string, prefix: string) => {
 };
 
 /**
- * Which services a change in a repository affects. In a monorepo, changed files decide (only services
- * whose paths were touched); without file information every service mapped to the repository is affected.
+ * Repository plumbing: CI workflows, docs, and repo metadata. Changing them ships no service's code, so they
+ * never make a whole-repository service "affected" on their own.
+ */
+const plumbing = /^(\.github\/|\.gitignore$|\.gitattributes$|\.editorconfig$|docs?\/|LICENSE|CODEOWNERS$|[^/]*\.md$)/i;
+export const isPlumbingFile = (file: string) => plumbing.test(file);
+
+/**
+ * Which services a change in a repository affects. In a monorepo, changed files decide: a service with
+ * paths owns the files under them, and a service mapped to the whole repository (no paths) owns only the
+ * code no path-specific service claims. Without file information every mapped service is affected.
  */
 export function servicesForChange(repository: string | undefined, files: string[], services: ServiceMapping[]) {
   const repo = repositoryName(repository);
   if (!repo) return [];
   const mapped = services.filter((service) => [...service.repositories, service.repositoryUrl ?? ""].map(repositoryName).includes(repo));
   if (!files.length) return mapped.map((service) => service.name);
-  return mapped.filter((service) => !service.paths.length || files.some((file) => service.paths.some((path) => pathMatches(file, path)))).map((service) => service.name);
+  const scoped = mapped.filter((service) => service.paths.length);
+  const owns = (service: ServiceMapping, file: string) => service.paths.some((path) => pathMatches(file, path));
+  const unclaimed = files.filter((file) => !isPlumbingFile(file) && !scoped.some((service) => owns(service, file)));
+  const affected = mapped.filter((service) => service.paths.length ? files.some((file) => owns(service, file)) : unclaimed.length > 0);
+  // Only plumbing changed (a workflow, the README): it belongs to whoever owns the whole repository.
+  return (affected.length ? affected : mapped.filter((service) => !service.paths.length)).map((service) => service.name);
 }
 
 /** Whether a change touched code that belongs to a service, when that can be known. */
@@ -77,9 +90,14 @@ export function changeTouchesService(service: string, files: string[], services:
   return files.some((file) => mapping.paths.some((path) => pathMatches(file, path)));
 }
 
-/** A GitHub signal belongs to the app service its repository is mapped to, so it can meet that service's telemetry. */
-export function serviceForRepository(repository: string | undefined, services: ServiceMapping[]) {
-  const names = servicesForChange(repository, [], services);
+/**
+ * The app service a GitHub signal belongs to, so it can meet that service's telemetry: the service the
+ * deployment names, or the one its repository maps to. When several services share the repository, the
+ * files of the commit it ran on decide; if that is still ambiguous the repository name is kept.
+ */
+export function serviceForRepository(repository: string | undefined, services: ServiceMapping[], files: string[] = [], named?: string) {
+  if (named && services.some((service) => service.name === named)) return named;
+  const names = servicesForChange(repository, files, services);
   return names.length === 1 ? names[0] : undefined;
 }
 
@@ -91,12 +109,13 @@ export interface PlacedSignal<T> { signal: T; mayOpen: boolean; holdReason?: str
  * service a GitHub repository maps to, and whether it is allowed to open an incident at all. Signals that
  * may not open one (staging, QA, previews, feature branches) are still kept as evidence and early warning.
  */
-export function placeSignal<T extends { service: string; environment?: string; metadata: Record<string, unknown> }>(signal: T, model: IntakeModel, services: ServiceMapping[]): PlacedSignal<T> {
+export function placeSignal<T extends { service: string; environment?: string; metadata: Record<string, unknown> }>(signal: T, model: IntakeModel, services: ServiceMapping[], commitFiles: (sha: string) => string[] = () => []): PlacedSignal<T> {
   const meta = signal.metadata ?? {};
   const environment = resolveEnvironment(signal.environment ?? meta.deploymentEnvironment, model.environments);
   const placed = { ...signal, environment: environment.name === "unknown" ? undefined : environment.name, metadata: { ...meta, environmentTier: environment.tier } } as T;
   if (meta.provider === "github") {
-    const service = serviceForRepository(typeof meta.repository === "string" ? meta.repository : undefined, services);
+    const files = typeof meta.sha === "string" ? commitFiles(meta.sha) : [];
+    const service = serviceForRepository(typeof meta.repository === "string" ? meta.repository : undefined, services, files, typeof meta.serviceHint === "string" ? meta.serviceHint : undefined);
     if (service) placed.service = service;
   }
   // Pushes are context for delivery incidents on release branches only; elsewhere their commits are kept in the change log.

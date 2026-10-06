@@ -20,6 +20,9 @@ let sequence = 0;
 beforeAll(async () => {
   await workspaceService.upsertService(ADMIN, "test", { name: "payouts-api", ownerTeam: "Payments", tier: "critical", repositoryUrl: null, runbookUrl: null, dependencies: [], repositories: ["acme/platform"], paths: ["services/payouts"] });
   await workspaceService.upsertService(ADMIN, "test", { name: "web", ownerTeam: "Web", tier: "standard", repositoryUrl: null, runbookUrl: null, dependencies: [], repositories: ["acme/platform"], paths: ["apps/web"] });
+  // One repository, two services: a path-scoped drill service and an app that owns the rest of the repo.
+  await workspaceService.upsertService(ADMIN, "test", { name: "drill-payouts", ownerTeam: "Drill", tier: "critical", repositoryUrl: null, runbookUrl: null, dependencies: [], repositories: ["acme/shop"], paths: ["drill/payouts-api"] });
+  await workspaceService.upsertService(ADMIN, "test", { name: "shop", ownerTeam: "Shop", tier: "critical", repositoryUrl: null, runbookUrl: null, dependencies: [], repositories: ["acme/shop"], paths: [] });
   await workspaceService.upsertService(ADMIN, "test", { name: "ledger-api", ownerTeam: "Ledger", tier: "critical", repositoryUrl: "https://github.com/acme/ledger", runbookUrl: null, dependencies: [], repositories: [] });
 });
 
@@ -219,6 +222,30 @@ describe("real-world scenarios", () => {
     const run = await w.github.ci("acme/ledger", "main", "e5", "failure", 20.05);
     expect(run.opened).toEqual([]);
     expect(run.incidentIds).toEqual([deploy.opened![0]!.id]);
+  });
+
+  it("16. in a repository shared by a path-scoped service and a whole-repo app, releases and failures land on the service whose code changed", async () => {
+    const w = world();
+    await w.github.push("acme/shop", "main", "a0", "s1", [["s1", "Add drill release", [".github/workflows/drill.yml", "drill/payouts-api/release.txt"]]], 1);
+    await w.github.deploy("acme/shop", "production", "s1", "success", 1.1);
+    expect((await w.repository.listChanges(ADMIN, { environment: "production" })).filter((item) => item.sha === "s1").map((item) => item.service)).toEqual(["drill-payouts"]);
+
+    await w.github.push("acme/shop", "main", "s1", "s2", [["s2", "Payouts v2", ["drill/payouts-api/release.txt"]]], 2);
+    const failed = await w.github.deploy("acme/shop", "production", "s2", "failure", 2.1);
+    const opened = await w.incident(failed.opened![0]!.id);
+    expect(opened.service).toBe("drill-payouts");
+    const run = await w.github.ci("acme/shop", "main", "s2", "failure", 2.15);
+    expect(run.opened).toEqual([]);
+    expect(run.incidentIds).toEqual([opened.id]);
+
+    await w.github.push("acme/shop", "main", "s2", "s3", [["s3", "Restyle checkout", ["apps/web/checkout.tsx", "README.md"]]], 3);
+    await w.github.deploy("acme/shop", "production", "s3", "success", 3.1);
+    // s2 never reached production, so the s3 release also ships s2's payouts change.
+    const servicesFor = async (sha: string) => (await w.repository.listChanges(ADMIN, { environment: "production" })).filter((item) => item.sha === sha).map((item) => item.service).sort();
+    expect(await servicesFor("s3")).toEqual(["drill-payouts", "shop"]);
+    await w.github.push("acme/shop", "main", "s3", "s4", [["s4", "Fix checkout copy", ["apps/web/checkout.tsx"]]], 4);
+    await w.github.deploy("acme/shop", "production", "s4", "success", 4.1);
+    expect(await servicesFor("s4")).toEqual(["shop"]);
   });
 
   it("12. with no change recorded, the diagnosis says to look at dependencies, traffic or data", async () => {

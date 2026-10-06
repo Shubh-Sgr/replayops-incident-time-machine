@@ -46,6 +46,19 @@ describe("services and repositories", () => {
     expect(servicesForChange("acme/billing", [], services)).toEqual(["billing-api"]);
   });
 
+  it("gives a whole-repo service only the code no path-scoped service owns, never CI or docs alone", () => {
+    const shared: ServiceMapping[] = [
+      { name: "drill-payouts", repositories: ["acme/shop"], paths: ["drill/payouts-api"] },
+      { name: "shop", repositories: ["acme/shop"], paths: [] }
+    ];
+    expect(servicesForChange("acme/shop", [".github/workflows/drill.yml", "drill/payouts-api/release.txt"], shared)).toEqual(["drill-payouts"]);
+    expect(servicesForChange("acme/shop", ["apps/web/a.tsx", "drill/payouts-api/release.txt"], shared)).toEqual(["drill-payouts", "shop"]);
+    expect(servicesForChange("acme/shop", ["README.md", ".github/workflows/ci.yml"], shared)).toEqual(["shop"]);
+    expect(serviceForRepository("acme/shop", shared, ["drill/payouts-api/release.txt"])).toBe("drill-payouts");
+    expect(serviceForRepository("acme/shop", shared)).toBeUndefined();
+    expect(serviceForRepository("acme/shop", shared, [], "shop")).toBe("shop");
+  });
+
   it("says whether a change touched a service's code, or that it can't tell", () => {
     expect(changeTouchesService("payouts-api", ["docs/runbook.md"], services)).toBe(false);
     expect(changeTouchesService("payouts-api", ["services/payouts/build.ts"], services)).toBe(true);
