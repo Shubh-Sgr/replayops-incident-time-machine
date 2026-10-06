@@ -22,6 +22,12 @@ if (!receiver || !token || !["iban-bug", "db-pool", "db-pool-fix"].includes(scen
   process.exit(1);
 }
 
+if (!/\/ingest\/[0-9a-f-]{36}\/?$/i.test(receiver)) {
+  console.error(`REPLAYOPS_RECEIVER must be the source's full Receiver endpoint, like https://…/ingest/<source-id>. Got: ${receiver}`);
+  console.error("Copy it from Integrations → your Generic webhook source → Receiver endpoint.");
+  process.exit(1);
+}
+
 const run = Date.now().toString(36);
 const ago = (minutes) => new Date(Date.now() - minutes * 60_000).toISOString();
 const service = "drill-payouts";
