@@ -173,7 +173,8 @@ export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = [
   const symptom = events.find((event) => event.kind === "alert" && event.impactScore >= 65)
     ?? events.find((event) => event.impactScore >= 65)
     ?? events.reduce((highest, event) => event.impactScore > highest.impactScore ? event : highest, events[0]!);
-  const eligibleCandidates = events.filter((event) => event.timestamp <= symptom.timestamp && event.kind !== "alert" && event.kind !== "action" && event.kind !== "recovery");
+  // Error occurrences are symptoms, never candidate causes.
+  const eligibleCandidates = events.filter((event) => event.timestamp <= symptom.timestamp && event.kind !== "alert" && event.kind !== "action" && event.kind !== "recovery" && !event.metadata?.exception);
   const sourceCandidates = eligibleCandidates.length ? eligibleCandidates : [events[0]!];
   // An exception type that first appears right after a change (and before any later change) points at it.
   // "First appears" means first in this environment's history, so a chronic error never blames a release.
@@ -214,6 +215,17 @@ export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = [
       preexisting: errors.filter((item) => since(item) < change.timestamp)
     };
   };
+  /** Suspect files: the failing stack runs through code this change modified. */
+  const suspectFor = (event: IncidentEvent) => {
+    const meta = event.metadata ?? {};
+    const changedFiles = event.kind === "deploy" && isCodeChange(event) && Array.isArray(meta.files) ? (meta.files as unknown[]).filter((file): file is string => typeof file === "string") : [];
+    const frame = changedFiles.length ? failingFrames.find((item) => changedFiles.some((file) => frameIsFile(item.file, file))) : undefined;
+    if (!frame) return undefined;
+    const file = changedFiles.find((item) => frameIsFile(frame.file, item))!;
+    const commit = (Array.isArray(meta.commits) ? meta.commits as Array<{ sha?: string; message?: string; files?: string[] }> : []).find((item) => item.files?.includes(file));
+    return { frame, file, commit };
+  };
+  const suspectChange = sourceCandidates.map((event) => ({ event, suspect: suspectFor(event) })).find((item) => item.suspect);
   const changeCandidates = sourceCandidates.map((event) => {
     const meta = event.metadata ?? {};
     const leadTimeSeconds = secondsBetween(event.timestamp, symptom.timestamp);
@@ -234,14 +246,15 @@ export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = [
     const version = text(meta.version);
     const sha = text(meta.sha);
     const releaseLabel = version ?? sha?.slice(0, 7);
-    // Suspect files: the failing stack runs through code this change modified.
-    const changedFiles = event.kind === "deploy" && isCodeChange(event) && Array.isArray(meta.files) ? (meta.files as unknown[]).filter((file): file is string => typeof file === "string") : [];
-    const suspect = changedFiles.length ? failingFrames.find((frame) => changedFiles.some((file) => frameIsFile(frame.file, file))) : undefined;
+    const suspect = suspectFor(event);
     if (suspect) {
-      const file = changedFiles.find((item) => frameIsFile(suspect.file, item))!;
-      const commit = (Array.isArray(meta.commits) ? meta.commits as Array<{ sha?: string; message?: string; files?: string[] }> : []).find((item) => item.files?.includes(file));
-      adjustment += suspect.top ? 18 : 10;
-      notes.push(`The failing stack ${suspect.top ? "frame" : "passes through"} ${file}${suspect.line ? `:${suspect.line}` : ""}${suspect.top ? " is in a file it changed" : ", a file it changed"}${commit?.sha ? ` (${commit.sha.slice(0, 7)} “${commit.message ?? ""}”)` : ""}.`);
+      const { frame, file, commit } = suspect;
+      adjustment += frame.top ? 18 : 10;
+      notes.push(`The failing stack ${frame.top ? "frame" : "passes through"} ${file}${frame.line ? `:${frame.line}` : ""}${frame.top ? " is in a file it changed" : ", a file it changed"}${commit?.sha ? ` (${commit.sha.slice(0, 7)} “${commit.message ?? ""}”)` : ""}.`);
+    } else if (suspectChange && event.kind === "deploy") {
+      // A flag can expose a bug, but the failing code was written elsewhere: that is where the fix goes.
+      adjustment -= 12;
+      notes.push(`The failing code (${suspectChange.suspect!.file.split("/").pop()}) was changed by “${suspectChange.event.title}”, not by this change.`);
     }
     const earlyWarnings = event.kind === "deploy" ? earlyWarningFor(version, event.timestamp) : [];
     if (earlyWarnings.length) { adjustment += 15; notes.push(`The same ${earlyWarnings[0]!.type} appeared in ${earlyWarnings[0]!.environment} on ${version} before it reached ${environment ?? "this environment"}.`); }

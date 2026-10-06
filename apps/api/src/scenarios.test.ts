@@ -269,7 +269,10 @@ describe("real-world scenarios", () => {
     expect(lead.reason).toContain(`The failing stack frame drill/payouts-api/iban.ts:12 is in a file it changed (${v6.slice(0, 7)} “payouts: validate IBAN before sending”).`);
     expect(lead.reason).toContain(`Every failing event reports version ${v6.slice(0, 7)}.`);
     const flag = diagnosis.changeCandidates.find((candidate) => candidate.title.startsWith("Feature flag"))!;
-    expect(flag.score).toBeLessThan(lead.score);
+    expect(lead.score - flag.score).toBeGreaterThanOrEqual(10);
+    expect(flag.reason).toContain(`The failing code (iban.ts) was changed by “Deployed drill-payouts ${v6.slice(0, 7)} to production”, not by this change.`);
+    // Error occurrences are symptoms, not candidate causes.
+    expect(diagnosis.changeCandidates.every((candidate) => candidate.kind === "deploy")).toBe(true);
   });
 
   it("12. with no change recorded, the diagnosis says to look at dependencies, traffic or data", async () => {
