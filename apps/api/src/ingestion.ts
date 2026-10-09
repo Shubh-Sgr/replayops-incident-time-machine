@@ -339,7 +339,10 @@ function normalizeGeneric(payload: JsonRecord, deliveryId: string): NormalizedSi
       const labels = object(item.labels);
       const annotations = object(item.annotations);
       const status = textValue(item.status, textValue(payload.status, "firing")).toLowerCase();
-      const fingerprint = textValue(item.fingerprint, `alert:${index}`);
+      // Alertmanager's fingerprint is a hash of the alert's labels; a sender that omits it gets the same, so one
+      // alert's firing and resolved notices still meet, and two different alerts never share a key.
+      const labelSet = Object.entries(labels).filter(([, value]) => typeof value === "string").sort(([a], [b]) => a.localeCompare(b));
+      const fingerprint = textValue(item.fingerprint, labelSet.length ? `labels:${createHash("sha256").update(JSON.stringify(labelSet)).digest("hex").slice(0, 16)}` : `${deliveryId}:alert:${index}`);
       const startsAt = isoTime(item.startsAt);
       const endsAt = isoTime(item.endsAt);
       const observedAt = status === "resolved" && endsAt !== UNKNOWN_TIME ? endsAt : startsAt;

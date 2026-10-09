@@ -249,6 +249,8 @@ export interface IngestionResult {
   opened?: IncidentHeadline[];
   movedToMonitoring?: IncidentHeadline[];
   escalated?: IncidentHeadline[];
+  /** Open incidents a problem came back to: relapsed while monitoring, or fired again after going quiet. */
+  reopened?: Array<IncidentHeadline & { reason: string }>;
 }
 
 export type WorkspaceRole = "admin" | "responder" | "viewer";

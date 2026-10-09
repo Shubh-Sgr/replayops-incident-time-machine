@@ -3,6 +3,7 @@ import { Pool, type PoolClient } from "pg";
 import { config } from "./config.js";
 import { MEMBERSHIPS } from "./scope.js";
 import { placeSignals, resolveEnvironment, type ServiceMapping } from "./release.js";
+import { chooseIncident, incidentFacts, joinOutcome, type GroupingCandidate } from "./grouping.js";
 import { changeEvidence, commitFilesLookup, resolveChange, selectChangesForIncident, type ChangeRecord, type CommitRecord, type ExtractedDelivery } from "./changes.js";
 import { seedActivities, seedDashboardSeries, seedIncidents, seedReplayRuns } from "./seed.js";
 import type { Activity, DashboardData, Incident, IncidentDecision, IncidentEvent, IncidentHeadline, IncidentPolicy, IngestionBatch, IngestionResult, Integration, IntegrationDelivery, IntegrationProvider, IntegrationTarget, NormalizedSignal, ReplayConfig, ReplayProjection, ReplayResult, ReplayRun, SearchResult, Severity } from "./types.js";
@@ -301,6 +302,7 @@ export class MemoryRepository implements Repository {
     const opened: IncidentHeadline[] = [];
     const movedToMonitoring: IncidentHeadline[] = [];
     const escalatedIncidents = new Map<string, IncidentHeadline>();
+    const reopened = new Map<string, ReopenedHeadline>();
     let acceptedSignals = 0;
     const services = await workspaceService.servicesForOrganization(integration.organizationId);
     const newChanges = this.recordDelivery(batch.delivery, policy, services);
@@ -313,18 +315,14 @@ export class MemoryRepository implements Repository {
       const buffered: NormalizedSignal & { integrationId: string; incidentId?: string } = { ...signal, integrationId: integration.id };
       this.bufferedSignals.push(buffered);
       acceptedSignals += 1;
-      let incident = placement.laneOnly ? undefined : signal.correlationKey
-        ? this.incidents.find((item) => item.status !== "resolved" && item.events.some((event) => event.metadata?.correlationKey === signal.correlationKey))
-        : undefined;
-      const lane = deliveryLaneOf(signal);
-      if (lane) incident ??= this.incidents.find((item) => item.status !== "resolved" && item.events.some((event) => deliveryLaneOf(event) === lane));
-      const commit = githubCommitOf(signal);
-      if (!placement.laneOnly && commit && signal.kind === "alert") incident ??= this.incidents.find((item) => item.status !== "resolved" && item.events.some((event) => event.kind === "alert" && githubCommitOf(event) === commit));
-      const fingerprint = exceptionFingerprintOf(signal);
-      if (!placement.laneOnly && fingerprint) incident ??= this.incidents.find((item) => item.status !== "resolved" && (item.environment ?? "unknown") === (signal.environment ?? "unknown") && item.events.some((event) => exceptionFingerprintOf(event) === fingerprint));
-      if (!placement.laneOnly) incident ??= this.incidents.find((item) => item.status !== "resolved" && sameBranchLane(item.events, signal) && relatedServices.includes(item.service) && (item.environment ?? "unknown") === (signal.environment ?? "unknown") && Math.abs(new Date(item.startedAt).getTime() - new Date(signal.timestamp).getTime()) <= policy.groupingWindowMinutes * 60_000);
       const suppressed = policy.maintenanceMode || (policy.suppressLowSeverity && signal.severity === "low");
-      if (!incident && !suppressed && placement.mayOpen && signal.impactScore >= policy.incidentThreshold) {
+      const context = { relatedServices, windowMinutes: policy.groupingWindowMinutes, laneOnly: Boolean(placement.laneOnly), problem: !suppressed && placement.mayOpen && signal.kind !== "recovery" && signal.impactScore >= policy.incidentThreshold };
+      const keys = groupingKeys(signal, Boolean(placement.laneOnly));
+      const open = this.incidents.filter((item) => item.status !== "resolved");
+      const match = chooseIncident(open.map((item) => incidentFacts(item, keys, eventKeys)), signal, context);
+      let incident = match ? open.find((item) => item.id === match.candidate.id) : undefined;
+      const outcome = match ? joinOutcome(match.candidate, match.reason, signal, context) : undefined;
+      if (!incident && context.problem) {
         const now = new Date().toISOString();
         incident = {
           id: randomUUID(), code: nextManualCode(this.incidents), title: signal.title,
@@ -335,7 +333,7 @@ export class MemoryRepository implements Repository {
         this.incidents.unshift(incident);
         opened.push(headline(incident));
         const triggerTime = new Date(signal.timestamp).getTime();
-        for (const precursor of this.bufferedSignals.filter((item) => !item.incidentId && !item.metadata?.laneOnly && compatibleBranch(branchOf(item), branchOf(signal)) && relatedServices.includes(item.service) && new Date(item.timestamp).getTime() >= triggerTime - 1_800_000 && new Date(item.timestamp).getTime() <= triggerTime)) {
+        for (const precursor of this.bufferedSignals.filter((item) => !item.incidentId && !item.metadata?.laneOnly && (item.environment ?? "unknown") === (signal.environment ?? "unknown") && compatibleBranch(branchOf(item), branchOf(signal)) && relatedServices.includes(item.service) && new Date(item.timestamp).getTime() >= triggerTime - 1_800_000 && new Date(item.timestamp).getTime() <= triggerTime + 300_000)) {
           precursor.incidentId = incident.id;
           incident.events.push(signalToEvent(incident.id, precursor));
         }
@@ -355,7 +353,9 @@ export class MemoryRepository implements Repository {
       if (incident) {
         incident.events.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
         incident.updatedAt = new Date().toISOString(); incident.evidenceRevision = incident.updatedAt;
-        if (signal.kind === "recovery" && incident.status !== "monitoring") { incident.status = "monitoring"; movedToMonitoring.push(headline(incident)); }
+        if (outcome?.monitoring) { incident.status = "monitoring"; movedToMonitoring.push(headline(incident)); }
+        if (outcome?.reopen) incident.status = "investigating";
+        if (outcome?.repage && !opened.some((item) => item.id === incident!.id)) reopened.set(incident.id, { ...headline(incident), reason: outcome.repage });
         incidentIds.add(incident.id);
       }
     }
@@ -370,7 +370,7 @@ export class MemoryRepository implements Repository {
       storedIntegration.deliveries.unshift(delivery);
       storedIntegration.deliveries = storedIntegration.deliveries.slice(0, 8);
     }
-    return { status: "accepted", acceptedSignals, acceptedChanges: newChanges.length, incidentIds: [...incidentIds], opened, movedToMonitoring, escalated: [...escalatedIncidents.values()] } satisfies IngestionResult;
+    return { status: "accepted", acceptedSignals, acceptedChanges: newChanges.length, incidentIds: [...incidentIds], opened, movedToMonitoring, escalated: [...escalatedIncidents.values()], reopened: [...reopened.values()] } satisfies IngestionResult;
   }
   async setIncidentEmbedding(_incidentId: string, _embedding: number[]) {}
   async exceptionHistory(_userId: string, fingerprints: string[]) {
@@ -444,14 +444,46 @@ const DELIVERY_LANE_SQL = `case b.metadata->>'eventType'
   when 'workflow_run' then 'workflow:'||coalesce(b.metadata->>'repository','')||':'||coalesce(b.metadata->>'workflow','')||':'||coalesce(b.metadata->>'branch','')
   when 'deployment_status' then 'deploy:'||coalesce(b.metadata->>'repository','')||':'||coalesce(b.service,'')||':'||lower(coalesce(b.metadata->>'deploymentEnvironment','')) end`;
 
+const RECOVERY_EVIDENCE_SQL = `(b.kind = 'recovery' or b.metadata->>'laneOnly' = 'true' or (b.metadata->>'provider' = 'github' and b.metadata->>'eventType' = 'workflow_run' and b.metadata->>'conclusion' = 'success'))`;
+/** grouping.ts's facts for every open incident in a workspace, from its active ingested evidence. */
+const GROUPING_FACTS_SQL = `select i.id, i.status, i.service, coalesce(i.environment,'unknown') as environment, i.started_at,
+    greatest(i.started_at, coalesce(f.last_signal_at, i.started_at)) as last_signal_at, coalesce(f.recovered, false) as recovered,
+    array(select distinct unnest(array_append(coalesce(f.services, '{}'::text[]), i.service))) as services,
+    ($3::text is null or not coalesce(f.has_branch, false) or coalesce(f.same_branch, false)) as branch_compatible,
+    coalesce(f.by_lane, false) as by_lane, coalesce(f.by_correlation, false) as by_correlation,
+    coalesce(f.by_commit, false) as by_commit, coalesce(f.by_fingerprint, false) as by_fingerprint
+  from incidents i
+  left join lateral (
+    select max(b.timestamp) as last_signal_at, array_agg(distinct b.service) as services,
+      bool_or(b.metadata->>'branch' is not null) as has_branch, bool_or(b.metadata->>'branch' = $3) as same_branch,
+      bool_or($2::text is not null and b.metadata->>'correlationKey' = $2) as by_correlation,
+      bool_or($4::text is not null and b.metadata->>'provider' = 'github' and ${DELIVERY_LANE_SQL} = $4) as by_lane,
+      bool_or($6::text is not null and b.kind = 'alert' and b.metadata->>'provider' = 'github' and b.metadata->>'eventType' in ('workflow_run','deployment_status')
+        and lower(b.metadata->>'repository') || '@' || (b.metadata->>'sha') = $6) as by_commit,
+      bool_or($5::text is not null and b.metadata->'exception'->>'fingerprint' = $5) as by_fingerprint,
+      (array_agg(${RECOVERY_EVIDENCE_SQL} order by b.timestamp desc) filter (where b.kind = 'alert' or ${RECOVERY_EVIDENCE_SQL}))[1] as recovered
+    from incident_events b where b.incident_id = i.id and b.provenance = 'ingested' and coalesce(b.evidence_state, 'active') = 'active'
+  ) f on true
+  where i.organization_id = $1 and i.status <> 'resolved'`;
+const instant = (value: unknown) => (value instanceof Date ? value : new Date(String(value))).toISOString();
+const mapCandidate = (row: Row): GroupingCandidate => ({
+  id: String(row.id), status: row.status as GroupingCandidate["status"], service: String(row.service), environment: String(row.environment),
+  startedAt: instant(row.started_at), lastSignalAt: instant(row.last_signal_at), recovered: Boolean(row.recovered),
+  services: Array.isArray(row.services) ? row.services.map(String) : [], branchCompatible: Boolean(row.branch_compatible),
+  byLane: Boolean(row.by_lane), byCorrelation: Boolean(row.by_correlation), byCommit: Boolean(row.by_commit), byFingerprint: Boolean(row.by_fingerprint)
+});
+
 // GitHub evidence is grouped per branch, so a failure on one branch doesn't absorb pushes and CI runs from others.
 const branchOf = (item: { metadata?: Record<string, unknown> }) => typeof item.metadata?.branch === "string" && item.metadata.branch ? item.metadata.branch : undefined;
 const compatibleBranch = (left?: string, right?: string) => !left || !right || left === right;
-const sameBranchLane = (events: IncidentEvent[], signal: NormalizedSignal) => {
-  const branch = branchOf(signal);
-  const branches = new Set(events.map(branchOf).filter(Boolean));
-  return !branch || !branches.size || branches.has(branch);
-};
+/** The identities a signal can match an open incident by. */
+const groupingKeys = (signal: NormalizedSignal, laneOnly: boolean) => ({
+  lane: deliveryLaneOf(signal), correlationKey: signal.correlationKey, branch: branchOf(signal),
+  commit: !laneOnly && signal.kind === "alert" ? githubCommitOf(signal) : undefined,
+  fingerprint: laneOnly ? undefined : exceptionFingerprintOf(signal)
+});
+const eventKeys = { lane: deliveryLaneOf, commit: githubCommitOf, fingerprint: exceptionFingerprintOf, branch: branchOf };
+type ReopenedHeadline = IncidentHeadline & { reason: string };
 
 const signalToEvent = (incidentId: string, signal: NormalizedSignal): IncidentEvent => ({
   id: randomUUID(), incidentId, timestamp: signal.timestamp, service: signal.service, kind: signal.kind,
@@ -1145,6 +1177,7 @@ class PostgresRepository implements Repository {
       const opened: IncidentHeadline[] = [];
       const movedToMonitoring: IncidentHeadline[] = [];
       const escalatedIncidents = new Map<string, IncidentHeadline>();
+      const reopened = new Map<string, ReopenedHeadline>();
       let acceptedSignals = 0;
       const services = await workspaceService.servicesForOrganization(integration.organizationId);
       const newChanges = await this.recordDelivery(client, integration.organizationId, batch.delivery, policy, services);
@@ -1167,41 +1200,14 @@ class PostgresRepository implements Repository {
         acceptedSignals += 1;
         const signalId = String((insertedSignal.rows[0] as Row).id);
 
-        const match = await client.query(
-          `select i.id from incidents i
-           where i.organization_id = $1 and i.status <> 'resolved'
-           and (
-             ($8::text is not null and exists (select 1 from ingestion_signals b where b.incident_id = i.id and b.metadata->>'provider' = 'github' and ${DELIVERY_LANE_SQL} = $8))
-             -- A failed deployment and the failed workflow run for the same commit are one problem.
-             or (not $9::boolean and $11::text is not null and exists (select 1 from ingestion_signals b where b.incident_id = i.id and b.kind = 'alert'
-               and b.metadata->>'provider' = 'github' and lower(b.metadata->>'repository') || '@' || (b.metadata->>'sha') = $11))
-             -- The same error, wherever and whenever it shows up again, is the same problem while the incident is open.
-             or (not $9::boolean and $10::text is not null and coalesce(i.environment,'unknown')=coalesce($6::text,'unknown')
-               and exists (select 1 from ingestion_signals b where b.incident_id = i.id and b.metadata->'exception'->>'fingerprint' = $10))
-             or (
-               not $9::boolean and coalesce(i.environment,'unknown')=coalesce($6::text,'unknown')
-               and ($7::text is null
-                 or not exists (select 1 from ingestion_signals b where b.incident_id = i.id and b.metadata->>'branch' is not null)
-                 or exists (select 1 from ingestion_signals b where b.incident_id = i.id and b.metadata->>'branch' = $7))
-               and (
-                 ($2::text is not null and exists (
-                   select 1 from ingestion_signals prior where prior.incident_id = i.id and prior.correlation_key = $2
-                 ))
-                 or (i.service = any($3::text[]) and i.started_at between $4::timestamptz - ($5 * interval '1 minute') and $4::timestamptz + ($5 * interval '1 minute'))
-               )
-             )
-           )
-           order by
-             case when $8::text is not null and exists (select 1 from ingestion_signals b where b.incident_id = i.id and b.metadata->>'provider' = 'github' and ${DELIVERY_LANE_SQL} = $8) then 0
-               when $2::text is not null and exists (
-               select 1 from ingestion_signals prior where prior.incident_id = i.id and prior.correlation_key = $2
-             ) then 1 else 2 end,
-             i.started_at desc limit 1`,
-          [integration.organizationId, signal.correlationKey ?? null, relatedServices, signal.timestamp, policy.groupingWindowMinutes, signal.environment ?? "unknown", branchOf(signal) ?? null, deliveryLaneOf(signal) ?? null, Boolean(placement.laneOnly), exceptionFingerprintOf(signal) ?? null, signal.kind === "alert" ? githubCommitOf(signal) ?? null : null]
-        );
-        let incidentId = match.rows[0] ? String((match.rows[0] as Row).id) : undefined;
-
         const suppressed = policy.maintenanceMode || (policy.suppressLowSeverity && signal.severity === "low");
+        const context = { relatedServices, windowMinutes: policy.groupingWindowMinutes, laneOnly: Boolean(placement.laneOnly), problem: !suppressed && placement.mayOpen && signal.kind !== "recovery" && signal.impactScore >= policy.incidentThreshold };
+        const keys = groupingKeys(signal, Boolean(placement.laneOnly));
+        const candidates = await client.query(GROUPING_FACTS_SQL, [integration.organizationId, keys.correlationKey ?? null, keys.branch ?? null, keys.lane ?? null, keys.fingerprint ?? null, keys.commit ?? null]);
+        const match = chooseIncident((candidates.rows as Row[]).map(mapCandidate), signal, context);
+        const outcome = match ? joinOutcome(match.candidate, match.reason, signal, context) : undefined;
+        let incidentId = match?.candidate.id;
+
         if (!incidentId && !suppressed && placement.mayOpen && signal.impactScore >= policy.incidentThreshold) {
           // Same sequence as incidents opened by hand (ROP-2001, ROP-2002, …). A concurrent open that takes the same
           // number rolls back to the savepoint and takes the next one, without failing the whole delivery.
@@ -1284,13 +1290,19 @@ class PostgresRepository implements Repository {
           incidentIds.add(incidentId);
           const touched = await client.query(
             `with previous as (select status from incidents where id = $1)
-             update incidents set updated_at = now(), evidence_revision=now(), status = case when $2 = 'recovery' then 'monitoring' else status end where id = $1
+             update incidents set updated_at = now(), evidence_revision=now(), status = case when $2 then 'monitoring' when $3 then 'investigating' else status end where id = $1
              returning id, code, title, summary, service, environment, severity, status, (select status from previous) as previous_status`,
-            [incidentId, signal.kind]
+            [incidentId, Boolean(outcome?.monitoring), Boolean(outcome?.reopen)]
           );
           const row = touched.rows[0] as Row | undefined;
-          if (row && row.status === "monitoring" && row.previous_status !== "monitoring" && !opened.some((item) => item.id === incidentId)) {
-            movedToMonitoring.push({ id: String(row.id), code: String(row.code), title: String(row.title), summary: String(row.summary), service: String(row.service), environment: row.environment ? String(row.environment) : undefined, severity: row.severity as Severity, status: "monitoring" });
+          const current = row ? { id: String(row.id), code: String(row.code), title: String(row.title), summary: String(row.summary), service: String(row.service), environment: row.environment ? String(row.environment) : undefined, severity: row.severity as Severity, status: row.status as IncidentHeadline["status"] } : undefined;
+          if (current && current.status === "monitoring" && row!.previous_status !== "monitoring" && !opened.some((item) => item.id === incidentId)) movedToMonitoring.push(current);
+          if (current && outcome?.repage && !opened.some((item) => item.id === incidentId)) {
+            reopened.set(current.id, { ...current, reason: outcome.repage });
+            await client.query(
+              `insert into incident_activities (organization_id, incident_id, actor, action, detail, timestamp) values ($1,$2,'Connector',$3,$4,now())`,
+              [integration.organizationId, current.id, outcome.reopen ? "reopened incident" : "problem fired again", `${outcome.repage} “${signal.title}”.`]
+            );
           }
         }
       }
@@ -1315,7 +1327,7 @@ class PostgresRepository implements Repository {
         );
       }
       await client.query("commit");
-      return { status: "accepted", acceptedSignals, acceptedChanges: newChanges.length, incidentIds: incidentIdList, opened, movedToMonitoring, escalated: [...escalatedIncidents.values()] } satisfies IngestionResult;
+      return { status: "accepted", acceptedSignals, acceptedChanges: newChanges.length, incidentIds: incidentIdList, opened, movedToMonitoring, escalated: [...escalatedIncidents.values()], reopened: [...reopened.values()] } satisfies IngestionResult;
     } catch (error) {
       await client.query("rollback");
       throw error;
