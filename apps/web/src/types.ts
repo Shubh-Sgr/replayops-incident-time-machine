@@ -194,7 +194,8 @@ export interface Integration {
   deliveries: IntegrationDelivery[];
   connector: {
     endpoint: string;
-    token: string;
+    /** Only sent to admins and responders; viewers see the endpoint without the secret. */
+    token?: string;
     githubSecret?: string;
     otlpHeaders?: string;
   };

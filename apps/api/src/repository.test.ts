@@ -101,7 +101,7 @@ describe("MemoryRepository", () => {
     const updated=diagnosis.hypotheses.find((item)=>item.id===hypothesis.id);
     expect(updated?.state).toBe("contested");
     expect(updated?.testCount).toBe(2);
-    expect(diagnosis.nextAction.label).toContain("Resolve contradictory");
+    expect(diagnosis.nextAction.label).toContain("Sort out the checks that disagree");
   });
 
   it("moves incorrectly grouped evidence without losing provenance", async () => {

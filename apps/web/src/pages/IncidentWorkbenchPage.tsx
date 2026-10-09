@@ -1,11 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { motion } from "framer-motion";
-import { ArrowLeft, CheckCircle2, Edit3, LoaderCircle, Plus, RotateCcw, Trash2, TriangleAlert, UserRound, Wifi } from "lucide-react";
-import { useEffect, useRef, useState, type FormEvent } from "react";
-import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { ArrowLeft, CheckCircle2, ChevronDown, Edit3, ExternalLink, LoaderCircle, Plus, RotateCcw, Trash2, TriangleAlert, Wrench } from "lucide-react";
+import { useEffect, useState, type FormEvent } from "react";
+import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { CausalTrace } from "../components/CausalTrace";
 import { EvidenceLedger } from "../components/EvidenceLedger";
 import { IncidentEditor, type IncidentDraft } from "../components/IncidentEditor";
+import { LifecycleDialog, type LifecycleAction } from "../components/LifecycleDialog";
 import { Linkified } from "../components/Linkified";
 import { ResponseConsole } from "../components/ResponseConsole";
 import { DebuggingInsights } from "../components/DebuggingInsights";
@@ -14,103 +15,190 @@ import { WhatChanged } from "../components/WhatChanged";
 import { Skeleton } from "../components/Skeleton";
 import { SeverityMark, StatusMark } from "../components/StatusMark";
 import { api } from "../lib/api";
+import { isOpen, isUnowned } from "../lib/incidents";
 import { useIsAdmin } from "../lib/useIsAdmin";
 import { usePersistentDraft } from "../lib/usePersistentDraft";
 import { cn, durationBetween, formatRelative, toLocalDateTimeInput } from "../lib/utils";
 import type { TimelineWindow } from "../lib/timeline";
 import { useTimeZone } from "../providers/TimeZoneProvider";
-import type { EventKind, Incident, IncidentDiagnosis, IncidentEvent, IncidentStatus } from "../types";
+import type { EventKind, Incident, IncidentEvent } from "../types";
 
 type EventDraft = Omit<IncidentEvent, "id" | "incidentId">;
 type EditorDraft = { timestamp: string; service: string; kind: EventKind; title: string; detail: string };
 
-function EventEditor({ incidentId, event, saving, error, onCancel, onSave }: { incidentId: string; event?: IncidentEvent | null; saving: boolean; error?: string; onCancel(): void; onSave(value: EventDraft): void }) {
-  const initial: EditorDraft = { timestamp: toLocalDateTimeInput(event?.timestamp ?? new Date().toISOString()), service: event?.service ?? "", kind: event?.kind ?? "metric", title: event?.title ?? "", detail: event?.detail ?? "" };
+const kindLabel: Record<EventKind, string> = { alert: "Alert", deploy: "Change", dependency: "Dependency", metric: "Signal", action: "Action", recovery: "Recovered" };
+const kindTone: Record<EventKind, string> = { alert: "bg-danger/12 text-danger", deploy: "bg-info/12 text-info", dependency: "bg-warning/14 text-warning", metric: "bg-elevated text-muted", action: "bg-elevated text-ink", recovery: "bg-success/12 text-success" };
+
+function EventEditor({ incidentId, defaultService, event, saving, error, onCancel, onSave }: { incidentId: string; defaultService: string; event?: IncidentEvent | null; saving: boolean; error?: string; onCancel(): void; onSave(value: EventDraft): void }) {
+  const initial: EditorDraft = { timestamp: toLocalDateTimeInput(event?.timestamp ?? new Date().toISOString()), service: event?.service ?? defaultService, kind: event?.kind ?? "action", title: event?.title ?? "", detail: event?.detail ?? "" };
   const draft = usePersistentDraft(`replayops:${incidentId}:evidence:${event?.id ?? "new"}`, initial);
   useEffect(() => { if (event) draft.setValue({ timestamp: toLocalDateTimeInput(event.timestamp), service: event.service, kind: event.kind, title: event.title, detail: event.detail }); }, [event?.id]);
   const set = (key: keyof EditorDraft, value: string) => draft.setValue((current) => ({ ...current, [key]: value }));
   function submit(formEvent: FormEvent) {
     formEvent.preventDefault();
     const inferredImpact: Record<EventKind, number> = { alert: 75, deploy: 35, dependency: 55, metric: 50, action: 25, recovery: 15 };
-    onSave({ timestamp: new Date(draft.value.timestamp).toISOString(), service: draft.value.service.trim(), kind: draft.value.kind, title: draft.value.title.trim(), detail: draft.value.detail.trim(), impactScore: event?.impactScore ?? inferredImpact[draft.value.kind], evidenceState: event?.evidenceState ?? "active", provenance: event?.provenance ?? "manual", correctionReason: event ? "Corrected by responder; previous values remain in the audit trail." : null, correctedFromId: event?.id ?? null, metadata: event?.metadata ?? {} });
+    const title = draft.value.title.trim();
+    const detail = draft.value.detail.trim();
+    onSave({ timestamp: new Date(draft.value.timestamp).toISOString(), service: draft.value.service.trim(), kind: draft.value.kind, title, detail: detail.length >= 8 ? detail : detail ? `${detail} — ${title}` : title.length >= 8 ? title : `Note: ${title}`, impactScore: event?.impactScore ?? inferredImpact[draft.value.kind], evidenceState: event?.evidenceState ?? "active", provenance: event?.provenance ?? "manual", correctionReason: event ? "Corrected by responder; previous values remain in the audit trail." : null, correctedFromId: event?.id ?? null, metadata: event?.metadata ?? {} });
   }
-  return <motion.form className="surface-lined p-5 sm:p-6" initial={{ opacity:.5, height:0 }} animate={{ opacity:1, height:"auto" }} onSubmit={submit}><div className="flex items-start justify-between gap-4"><div><h2 className="section-title">{event ? "Correct evidence" : "Add an observation"}</h2><p className="mt-1 text-sm text-muted">Record what was observed. Triage priority is inferred from type; it is not a measured customer-impact score.</p></div><button type="button" className="control-quiet !min-h-9" onClick={onCancel}>Cancel</button></div><div className="mt-5 grid gap-4 sm:grid-cols-2"><label className="text-sm font-semibold">Timestamp<input type="datetime-local" className="field mt-2" value={draft.value.timestamp} onChange={(event) => set("timestamp", event.target.value)} required /></label><label className="text-sm font-semibold">Service<input className="field mt-2" value={draft.value.service} onChange={(event) => set("service", event.target.value)} required placeholder="inventory-api" /></label><label className="text-sm font-semibold">Observation type<select className="field mt-2" value={draft.value.kind} onChange={(event) => set("kind", event.target.value)}><option value="alert">Alert</option><option value="deploy">Deployment / change</option><option value="dependency">Dependency</option><option value="metric">Metric / trace / log</option><option value="action">Responder action</option><option value="recovery">Recovery signal</option></select></label><div className="rounded-control bg-elevated p-3 text-xs leading-5 text-muted">{event ? "Saving creates an audited correction to this evidence revision." : "Manual observations are labeled separately from ingested telemetry."}</div><label className="text-sm font-semibold sm:col-span-2">Title<input className="field mt-2" value={draft.value.title} onChange={(event) => set("title", event.target.value)} required minLength={3} /></label><label className="text-sm font-semibold sm:col-span-2">Observed detail<textarea className="field mt-2 min-h-28 resize-y py-3" value={draft.value.detail} onChange={(event) => set("detail", event.target.value)} required minLength={8} /></label></div><p className="mt-3 text-xs text-muted">{draft.savedAt ? `Draft saved ${formatRelative(draft.savedAt)}` : "Draft autosaves locally."}</p>{error && <p role="alert" className="mt-4 rounded-control bg-danger/10 p-3 text-sm text-danger">{error}</p>}<div className="mt-5 flex justify-end"><button type="submit" className="control-primary min-w-36" disabled={saving}>{saving ? <span className="inline-flex items-center gap-2"><LoaderCircle className="h-4 w-4 animate-spin" />Saving</span> : event ? "Save correction" : "Add observation"}</button></div></motion.form>;
+  return <motion.form className="surface-lined p-5" initial={{ opacity: .5, height: 0 }} animate={{ opacity: 1, height: "auto" }} onSubmit={submit}>
+    <div className="flex items-start justify-between gap-4"><h3 className="section-title">{event ? "Correct this entry" : "Add to the timeline"}</h3><button type="button" className="control-quiet !min-h-9" onClick={onCancel}>Cancel</button></div>
+    <div className="mt-4 grid gap-4 sm:grid-cols-3">
+      <label className="text-sm font-semibold">Type<select className="field mt-2" value={draft.value.kind} onChange={(item) => set("kind", item.target.value)}><option value="action">Something we did</option><option value="alert">Alert or error</option><option value="deploy">Deploy or change</option><option value="dependency">Dependency problem</option><option value="metric">Metric, log or trace</option><option value="recovery">Sign of recovery</option></select></label>
+      <label className="text-sm font-semibold">When<input type="datetime-local" className="field mt-2" value={draft.value.timestamp} onChange={(item) => set("timestamp", item.target.value)} required /></label>
+      <label className="text-sm font-semibold">Service<input className="field mt-2" value={draft.value.service} onChange={(item) => set("service", item.target.value)} required minLength={2} /></label>
+      <label className="text-sm font-semibold sm:col-span-3">What happened<input className="field mt-2" value={draft.value.title} onChange={(item) => set("title", item.target.value)} required minLength={3} maxLength={140} placeholder="Restarted the checkout pods" /></label>
+      <label className="text-sm font-semibold sm:col-span-3">Details <span className="font-normal text-muted">(optional)</span><textarea className="field mt-2 min-h-20 resize-y py-3" value={draft.value.detail} onChange={(item) => set("detail", item.target.value)} maxLength={1200} /></label>
+    </div>
+    {error && <p role="alert" className="mt-3 rounded-control bg-danger/10 p-3 text-sm text-danger">{error}</p>}
+    <div className="mt-4 flex justify-end"><button type="submit" className="control-primary min-w-32" disabled={saving}>{saving ? <span className="inline-flex items-center gap-2"><LoaderCircle className="h-4 w-4 animate-spin" />Saving</span> : event ? "Save" : "Add"}</button></div>
+  </motion.form>;
+}
+
+/** The plain timeline: newest first, most recent 30 unless expanded. */
+function Timeline({ incident, onAdd }: { incident: Incident; onAdd(): void }) {
+  const { formatDateTime } = useTimeZone();
+  const [showAll, setShowAll] = useState(false);
+  const events = incident.events.filter((event) => event.evidenceState !== "excluded").slice().sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+  const hidden = incident.events.length - events.length;
+  const visible = showAll ? events : events.slice(0, 30);
+  return <section className="surface-lined overflow-hidden" aria-labelledby="timeline-title">
+    <div className="flex items-center justify-between gap-3 px-5 py-4"><div><h2 id="timeline-title" className="section-title">Timeline</h2><p className="mt-1 text-sm text-muted">{events.length} {events.length === 1 ? "entry" : "entries"}, newest first{hidden ? ` · ${hidden} hidden as not relevant` : ""}</p></div><button className="control-secondary inline-flex items-center gap-2 !min-h-9" onClick={onAdd}><Plus className="h-4 w-4" />Add</button></div>
+    <ol className="divide-y divide-line border-t border-line">{visible.map((event) => {
+      const link = typeof event.metadata?.sourceUrl === "string" && /^https:\/\//.test(event.metadata.sourceUrl) ? event.metadata.sourceUrl : undefined;
+      return <li key={event.id} id={`event-${event.id}`} className="grid gap-1 px-5 py-3 sm:grid-cols-[150px_minmax(0,1fr)] sm:gap-4">
+        <time className="measurement-number text-xs text-muted" dateTime={event.timestamp}>{formatDateTime(event.timestamp)}</time>
+        <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><span className={cn("rounded-full px-2 py-0.5 text-xs font-semibold", kindTone[event.kind])}>{kindLabel[event.kind]}</span><span className="measurement-number text-xs text-muted">{event.service}</span>{event.provenance === "derived" && <span className="text-xs text-muted">· linked automatically</span>}</div>
+          <p className="mt-1 text-sm font-semibold">{event.title}</p>
+          {event.detail && event.detail !== event.title && <p className="mt-0.5 break-words text-sm text-muted"><Linkified text={event.detail} /></p>}
+          {link && <a href={link} target="_blank" rel="noreferrer noopener" className="mt-1 inline-flex items-center gap-1 text-xs font-semibold text-info hover:underline">Open source<ExternalLink className="h-3 w-3" /></a>}
+        </div>
+      </li>;
+    })}{!events.length && <li className="px-5 py-10 text-center text-sm text-muted">Nothing recorded yet. Add what you've seen or done.</li>}</ol>
+    {events.length > 30 && <button className="w-full border-t border-line px-5 py-3 text-sm font-semibold text-info hover:bg-elevated" onClick={() => setShowAll((value) => !value)}>{showAll ? "Show fewer" : `Show all ${events.length}`}</button>}
+  </section>;
 }
 
 export function IncidentWorkbenchPage() {
   const { id = "" } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const [params, setParams] = useSearchParams();
   const queryClient = useQueryClient();
   const isAdmin = useIsAdmin();
-  const { mode, setMode, zoneLabel, formatClock, formatDateTime } = useTimeZone();
   const [editingIncident, setEditingIncident] = useState(false);
   const [editingEvent, setEditingEvent] = useState<IncidentEvent | null | undefined>(undefined);
+  const [action, setAction] = useState<LifecycleAction | null>(null);
+  // Links into the detailed tools (an `area` or an anchor) open them; otherwise they start closed.
+  const [toolsOpen, setToolsOpen] = useState(() => Boolean(params.get("area") || params.get("event") || location.hash));
   const [timelineWindow, setTimelineWindow] = useState<TimelineWindow | null>(null);
-  const [evidenceChange, setEvidenceChange] = useState("");
   const [movingEvent, setMovingEvent] = useState<IncidentEvent | null>(null);
   const [targetIncidentId, setTargetIncidentId] = useState("");
-  const [lastMove,setLastMove]=useState<{event:IncidentEvent;from:string;to:string}|null>(null);
-  const previousVersion = useRef<string | undefined>(undefined);
-  const incident = useQuery({ queryKey: ["incident", id], queryFn: () => api.incident(id), enabled:Boolean(id), refetchInterval:10_000, refetchIntervalInBackground:true });
-  const diagnosis = useQuery({ queryKey: ["diagnosis", id, incident.data?.evidenceRevision, incident.data?.status], queryFn: () => api.diagnosis(id), enabled:Boolean(incident.data) });
-  const incidentOptions = useQuery({ queryKey: ["incidents"], queryFn: api.incidents });
-  const members=useQuery({queryKey:["team-members"],queryFn:api.teamMembers});
-  const selectedEventId = params.get("event");
-  useEffect(() => {
-    if (!incident.data) return;
-    const revision = incident.data.evidenceRevision ?? incident.data.updatedAt;
-    if (previousVersion.current && previousVersion.current !== revision) setEvidenceChange(`New evidence arrived at ${formatDateTime(revision)}. Explanations and candidate validity were recalculated.`);
-    previousVersion.current = revision;
-  }, [incident.data?.evidenceRevision, incident.data?.updatedAt]);
+  const incident = useQuery({ queryKey: ["incident", id], queryFn: () => api.incident(id), enabled: Boolean(id), refetchInterval: 10_000 });
+  const diagnosis = useQuery({ queryKey: ["diagnosis", id, incident.data?.evidenceRevision, incident.data?.status], queryFn: () => api.diagnosis(id), enabled: Boolean(incident.data) });
+  const casework = useQuery({ queryKey: ["casework", id, incident.data?.evidenceRevision, incident.data?.status], queryFn: () => api.casework(id), enabled: Boolean(incident.data) && incident.data?.status !== "resolved" });
+  const members = useQuery({ queryKey: ["team-members"], queryFn: api.teamMembers });
+  const incidentOptions = useQuery({ queryKey: ["incidents"], queryFn: api.incidents, enabled: Boolean(movingEvent) });
 
-  const invalidateIncident = () => { void queryClient.invalidateQueries({ queryKey:["incident", id] }); void queryClient.invalidateQueries({ queryKey:["diagnosis", id] }); void queryClient.invalidateQueries({ queryKey:["dashboard"] }); void queryClient.invalidateQueries({ queryKey:["incidents"] }); };
-  const updateIncident = useMutation({ mutationFn:(draft: IncidentDraft) => api.updateIncident(id, draft), onSuccess:(value) => { queryClient.setQueryData(["incident", id], value); setEditingIncident(false); }, onSettled:invalidateIncident });
-  const lifecycle = useMutation({ mutationFn:(action:"start_monitoring"|"reopen") => { const current=incident.data;if(!current)throw new Error("Incident is not loaded.");return api.transitionIncident(id,{action,reason:action==="start_monitoring"?"Responder started a bounded recovery observation window.":"Responder reopened the incident after a regression or new evidence.",expectedEvidenceRevision:current.evidenceRevision??current.updatedAt}); }, onSuccess:(value) => queryClient.setQueryData(["incident", id], value), onSettled:invalidateIncident });
-  const assign=useMutation({mutationFn:(owner:string)=>api.updateIncident(id,{owner}),onSuccess:(next)=>queryClient.setQueryData(["incident",id],next),onSettled:invalidateIncident});
-  const deleteIncident = useMutation({ mutationFn:() => api.deleteIncident(id), onSuccess:() => { void queryClient.invalidateQueries({ queryKey:["incidents"] }); navigate("/incidents"); } });
-  const saveEvent = useMutation({ mutationFn:(draft: EventDraft) => editingEvent ? api.updateEvent(id, editingEvent.id, draft) : api.createEvent(id, draft), onSuccess:() => setEditingEvent(undefined), onSettled:invalidateIncident });
-  const updateEvidenceState = useMutation({ mutationFn:({ event, state }:{ event: IncidentEvent; state:"active"|"excluded" }) => api.updateEvent(id, event.id, { evidenceState:state, correctionReason:state === "excluded" ? "Excluded from diagnosis by responder; retained for provenance and undo." : "Restored to active evidence by responder." }), onSettled:invalidateIncident });
-  const moveEvent = useMutation({ mutationFn:() => { if (!movingEvent || !targetIncidentId) throw new Error("Choose a target incident."); return api.moveEvent(id, movingEvent.id, targetIncidentId); }, onSuccess:(event) => { void api.recordProductOutcome("grouping_corrected",{incidentId:id,eventId:event.id});setLastMove({event,from:id,to:targetIncidentId});setMovingEvent(null); setTargetIncidentId(""); invalidateIncident(); } });
-  const undoMove=useMutation({mutationFn:()=>{if(!lastMove)throw new Error("No grouping correction to undo.");return api.moveEvent(lastMove.to,lastMove.event.id,lastMove.from);},onSuccess:()=>{setLastMove(null);invalidateIncident();}});
+  const invalidate = () => { for (const key of ["incident", "diagnosis", "casework"]) void queryClient.invalidateQueries({ queryKey: [key, id] }); void queryClient.invalidateQueries({ queryKey: ["incidents"] }); };
+  const updateIncident = useMutation({ mutationFn: ({ intakeLink: _link, ...draft }: IncidentDraft) => api.updateIncident(id, draft), onSuccess: (value) => { queryClient.setQueryData(["incident", id], value); setEditingIncident(false); }, onSettled: invalidate });
+  const lifecycle = useMutation({
+    mutationFn: (input: { reason: string; confirmed?: boolean }) => { const current = incident.data; if (!current || !action) throw new Error("Incident is not loaded."); return api.transitionIncident(id, { action, ...input, expectedEvidenceRevision: current.evidenceRevision ?? current.updatedAt }); },
+    onSuccess: (value) => { queryClient.setQueryData(["incident", id], value); setAction(null); },
+    onError: () => void incident.refetch(),
+    onSettled: invalidate
+  });
+  const assign = useMutation({ mutationFn: (owner: string) => api.updateIncident(id, { owner }), onSuccess: (next) => queryClient.setQueryData(["incident", id], next), onSettled: invalidate });
+  const deleteIncident = useMutation({ mutationFn: () => api.deleteIncident(id), onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["incidents"] }); navigate("/"); } });
+  const saveEvent = useMutation({ mutationFn: (draft: EventDraft) => editingEvent ? api.updateEvent(id, editingEvent.id, draft) : api.createEvent(id, draft), onSuccess: () => setEditingEvent(undefined), onSettled: invalidate });
+  const updateEvidenceState = useMutation({ mutationFn: ({ event, state }: { event: IncidentEvent; state: "active" | "excluded" }) => api.updateEvent(id, event.id, { evidenceState: state, correctionReason: state === "excluded" ? "Marked not relevant by a responder." : "Marked relevant again by a responder." }), onSettled: invalidate });
+  const moveEvent = useMutation({ mutationFn: () => { if (!movingEvent || !targetIncidentId) throw new Error("Choose an incident to move it to."); return api.moveEvent(id, movingEvent.id, targetIncidentId); }, onSuccess: () => { setMovingEvent(null); setTargetIncidentId(""); invalidate(); } });
 
-  if (incident.isLoading) return <div className="space-y-5"><Skeleton className="h-8 w-40" /><Skeleton className="h-36 w-full rounded-panel" /><Skeleton className="h-[520px] w-full rounded-panel" /></div>;
-  if (incident.error || !incident.data) return <div className="surface-lined mx-auto max-w-xl p-6 text-center"><TriangleAlert className="mx-auto h-7 w-7 text-danger" /><h1 className="mt-3 font-heading text-2xl font-semibold">Investigation unavailable</h1><p className="mt-2 text-sm text-muted">{incident.error instanceof Error ? incident.error.message : "This record may have been removed."}</p><Link to="/incidents" className="control-primary mt-5 inline-flex items-center gap-2"><ArrowLeft className="h-4 w-4" />Return to investigations</Link></div>;
+  if (incident.isLoading) return <div className="space-y-5"><Skeleton className="h-8 w-40" /><Skeleton className="h-40 w-full rounded-panel" /><Skeleton className="h-96 w-full rounded-panel" /></div>;
+  if (incident.error || !incident.data) return <div className="surface-lined mx-auto max-w-xl p-6 text-center"><TriangleAlert className="mx-auto h-7 w-7 text-danger" /><h1 className="mt-3 font-heading text-2xl font-semibold">Incident not found</h1><p className="mt-2 text-sm text-muted">{incident.error instanceof Error ? incident.error.message : "It may have been deleted."}</p><Link to="/" className="control-primary mt-5 inline-flex items-center gap-2"><ArrowLeft className="h-4 w-4" />Back to incidents</Link></div>;
 
   const value = incident.data;
-  const diagnostic = diagnosis.data as IncidentDiagnosis | undefined;
-  const selectEvent = (eventId: string, revealInspector = false) => { const next = new URLSearchParams(params); next.set("event", eventId); setParams(next, { replace:true }); if (revealInspector) window.setTimeout(() => document.getElementById("evidence-selected")?.scrollIntoView({ behavior:"smooth", block:"center" }), 80); };
-  const sectionTarget = (anchor:string, area?:"investigate"|"validate"|"handoff") => { const next = new URLSearchParams(params); if (area) next.set("area",area); return { search:next.toString(), hash:`#${anchor}` }; };
-  const sectionLinks = [
-    { label:"Overview", anchor:"investigation-overview" },
-    { label:"Timeline", anchor:"event-timeline" },
-    { label:"Evidence", anchor:"evidence" },
-    { label:"Debugging", anchor:"debugging-insights" },
-    { label:"Investigate", anchor:"investigation-workspace", area:"investigate" as const },
-    { label:"Fix & verify", anchor:"investigation-workspace", area:"validate" as const },
-    { label:"Activity & handoff", anchor:"investigation-workspace", area:"handoff" as const }
-  ];
+  const recovery = casework.data?.recovery;
+  const ownerLabel = (owner: string) => isUnowned({ owner }) ? "No owner" : members.data?.find((member) => member.email === owner)?.displayName ?? owner;
+  const selectEvent = (eventId: string) => { const next = new URLSearchParams(params); next.set("event", eventId); setParams(next, { replace: true }); };
+  const next = diagnosis.data?.nextAction;
 
-  return <div className="space-y-6">
-    <div className="flex flex-wrap items-center justify-between gap-3"><Link to="/incidents" className="inline-flex items-center gap-2 text-sm font-semibold text-muted hover:text-ink"><ArrowLeft className="h-4 w-4" />Investigations</Link><div className="flex items-center gap-2"><span className="inline-flex items-center gap-2 text-xs text-muted"><Wifi className={cn("h-3.5 w-3.5", incident.fetchStatus === "fetching" ? "animate-pulse text-info" : "text-success")} />{incident.fetchStatus === "fetching" ? "Checking for evidence" : `Updated ${formatRelative(new Date(incident.dataUpdatedAt).toISOString())}`}</span><div className="flex rounded-control bg-rail p-1"><button className={cn("rounded px-2 py-1 text-xs font-semibold", mode === "local" && "bg-panel")} onClick={() => setMode("local")}>Local</button><button className={cn("rounded px-2 py-1 text-xs font-semibold", mode === "utc" && "bg-panel")} onClick={() => setMode("utc")}>UTC</button></div></div></div>
-    {evidenceChange && <div className="rounded-control bg-info/10 px-4 py-3 text-sm text-info" role="status">{evidenceChange}<button className="ml-3 font-semibold underline" onClick={() => setEvidenceChange("")}>Dismiss</button></div>}
-    {lastMove&&<div className="flex flex-wrap items-center gap-3 rounded-control bg-success/10 px-4 py-3 text-sm text-success" role="status"><CheckCircle2 className="h-4 w-4"/>Evidence moved with provenance preserved.<button className="font-semibold underline" onClick={()=>undoMove.mutate()} disabled={undoMove.isPending}>Undo grouping correction</button></div>}
-    <nav className="sticky top-3 z-20 -mx-1 overflow-x-auto rounded-control border border-line bg-canvas/95 p-1 backdrop-blur" aria-label="Investigation sections"><div className="flex min-w-max gap-1">{sectionLinks.map((item)=><Link key={item.label} to={sectionTarget(item.anchor,item.area)} className="rounded-[8px] px-3 py-2 text-xs font-semibold text-muted transition-colors hover:bg-elevated hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-info" onClick={()=>window.setTimeout(()=>document.getElementById(item.anchor)?.scrollIntoView({behavior:"smooth",block:"start"}),80)}>{item.label}</Link>)}</div></nav>
-    <header id="investigation-overview" className="surface-lined scroll-mt-28 p-5 sm:p-6"><div className="flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between"><div className="min-w-0 max-w-4xl"><div className="flex flex-wrap items-center gap-2"><span className="measurement-number text-xs text-muted">{value.code}</span><SeverityMark value={value.severity} /><StatusMark value={value.status} /><span className={cn("rounded-full bg-elevated px-2.5 py-1 text-xs font-semibold", (!value.environment || value.environment === "unknown") && "text-muted")} title={!value.environment || value.environment === "unknown" ? "Set the environment with Edit facts" : undefined}>{value.environment && value.environment !== "unknown" ? value.environment : "environment not set"}</span></div><h1 className="mt-3 font-heading text-3xl font-semibold tracking-[-.03em] sm:text-4xl">{value.title}</h1><p className="mt-3 max-w-3xl text-sm leading-7 text-muted">{value.summary}</p></div><div className="flex flex-wrap gap-2"><label className="sr-only" htmlFor="direct-owner">Assign owner</label><select id="direct-owner" className="field !min-h-10 w-auto max-w-52" value={value.owner} onChange={(event)=>assign.mutate(event.target.value)} disabled={assign.isPending}>{members.data?.map((member)=><option key={member.userId} value={member.email}>Assign · {member.displayName}</option>)}{!members.data?.some((member)=>member.email===value.owner)&&<option value={value.owner}>{value.owner}</option>}</select><button className="control-secondary inline-flex items-center gap-2" onClick={() => setEditingIncident(true)}><Edit3 className="h-4 w-4" />Edit facts</button>{value.status !== "monitoring" && value.status!=="resolved" && <button className="control-secondary" onClick={() => lifecycle.mutate("start_monitoring")} disabled={lifecycle.isPending}>Start monitoring</button>}{value.status === "monitoring" && <button className="control-primary" onClick={() => {const next=new URLSearchParams(params);next.set("area","validate");setParams(next);window.setTimeout(()=>document.getElementById("investigation-workspace")?.scrollIntoView({behavior:"smooth",block:"start"}),80);}}>Review recovery & resolve</button>}{value.status === "resolved" && <button className="control-secondary inline-flex items-center gap-2" onClick={() => lifecycle.mutate("reopen")} disabled={lifecycle.isPending}><RotateCcw className="h-4 w-4" />Reopen</button>}{isAdmin && <button className="control-quiet text-danger hover:text-danger" aria-label={`Delete ${value.code}`} onClick={() => { if (window.prompt(`This permanently deletes ${value.code} and all of its evidence. Type ${value.code} to confirm.`)?.trim() === value.code) deleteIncident.mutate(); }}><Trash2 className="h-4 w-4" /></button>}</div></div>
-      <div className="mt-5 grid gap-4 rounded-control bg-elevated p-4 lg:grid-cols-[1.2fr_1fr]"><div><p className="text-xs font-semibold uppercase tracking-[.12em] text-muted">Customer symptom / impact</p><p className="mt-1 text-sm font-semibold">{value.customerImpact || "Unknown — add a measured rate and denominator."}</p></div><div><p className="text-xs font-semibold uppercase tracking-[.12em] text-muted">One useful next action</p>{diagnosis.isLoading ? <p className="mt-1 text-sm text-muted">Deriving from current evidence…</p> : <a className="mt-1 block text-sm font-semibold text-info hover:underline" href={diagnostic?.nextAction.href ?? "?area=investigate"}>{diagnostic?.nextAction.label ?? "Acquire timestamped evidence"}</a>}<p className="mt-1 break-words text-xs text-muted">{diagnostic?.nextAction.reason && <Linkified text={diagnostic.nextAction.reason} />}</p></div></div>
-      <dl className="mt-5 grid gap-4 border-t border-line pt-5 sm:grid-cols-2 lg:grid-cols-5"><div><dt className="text-xs text-muted">Duration</dt><dd className="measurement-number mt-1 text-sm font-semibold">{durationBetween(value.startedAt, value.resolvedAt ?? undefined)}</dd></div><div><dt className="text-xs text-muted">Service</dt><dd className="measurement-number mt-1 text-sm">{value.service}</dd></div><div><dt className="text-xs text-muted">Owner</dt><dd className="mt-1 text-sm font-semibold">{members.data?.find((member)=>member.email===value.owner)?.displayName ?? (value.owner || "Unassigned")}</dd></div><div><dt className="text-xs text-muted">Evidence freshness</dt><dd className="measurement-number mt-1 text-sm font-semibold">{formatRelative(value.evidenceRevision ?? value.updatedAt)}</dd></div><div><dt className="text-xs text-muted">Evidence state</dt><dd className="mt-1 text-sm font-semibold capitalize">{diagnostic?.evidenceStatus ?? "checking"}</dd></div></dl>{lifecycle.error && <p role="alert" className="mt-4 text-sm text-danger">{/Evidence changed/i.test(lifecycle.error.message) ? "New evidence arrived just before your click, so nothing was changed. The page now shows the latest evidence; review it and click again." : `${lifecycle.error.message} See Fix & verify for the recovery check.`}</p>}</header>
+  // The one thing to do now, and the button that does it.
+  const banner = value.status === "resolved"
+    ? { tone: "bg-success/10", title: `Resolved ${value.resolvedAt ? formatRelative(value.resolvedAt) : ""}`.trim(), detail: "If it comes back, reopen it so everyone sees it again.", button: { action: "reopen" as const, label: "Reopen", icon: RotateCcw, primary: false } }
+    : value.status === "monitoring"
+      ? recovery?.state === "verified"
+        ? { tone: "bg-success/10", title: "Your sources confirm it's fixed", detail: recovery.reason, button: { action: "resolve" as const, label: "Resolve", icon: CheckCircle2, primary: true } }
+        : { tone: recovery?.state === "failed" ? "bg-warning/12" : "bg-info/10", title: recovery?.state === "failed" ? "It doesn't look fixed yet" : "Fixed — watching to make sure it stays fixed", detail: recovery?.automatic || recovery?.state === "failed" ? recovery.reason : "Resolve when you're satisfied it's fixed. If your alerts or CI report recovery, this updates by itself.", button: { action: "resolve" as const, label: "Resolve", icon: CheckCircle2, primary: true } }
+      : { tone: "bg-elevated", title: next ? `Next: ${next.label.charAt(0).toLowerCase()}${next.label.slice(1)}` : "Next: find the cause", detail: next?.reason ?? "Look at what changed and the timeline below.", button: { action: "start_monitoring" as const, label: "Mark fixed", icon: Wrench, primary: true } };
 
-    <section id="event-timeline" className="scroll-mt-28" aria-labelledby="timeline-title"><div className="mb-3 flex flex-wrap items-center justify-between gap-3"><div><h2 id="timeline-title" className="section-title">Event timeline</h2><p className="mt-1 text-sm text-muted">Zoom from the complete incident into a precise window · {zoneLabel}. The evidence ledger follows the visible range.</p></div><button className="control-primary inline-flex items-center gap-2" onClick={() => setEditingEvent(null)}><Plus className="h-4 w-4" />Add observation</button></div><CausalTrace incident={value} selectedEventId={selectedEventId} onSelectEvent={selectEvent} onWindowChange={setTimelineWindow} /></section>
+  return <div className="space-y-5">
+    <Link to="/" className="inline-flex items-center gap-2 text-sm font-semibold text-muted hover:text-ink"><ArrowLeft className="h-4 w-4" />Incidents</Link>
 
-    <EvidenceLedger incident={value} selectedEventId={selectedEventId} visibleWindow={timelineWindow} updating={updateEvidenceState.isPending} onSelect={(eventId) => selectEvent(eventId, true)} onEdit={(event) => setEditingEvent(event)} onMove={(event) => setMovingEvent(event)} onEvidenceState={(event, state) => updateEvidenceState.mutate({ event, state })} />
+    <header className="surface-lined p-5 sm:p-6">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2"><SeverityMark value={value.severity} /><StatusMark value={value.status} /><span className="measurement-number text-xs text-muted">{value.code}</span></div>
+          <h1 className="mt-3 font-heading text-2xl font-semibold tracking-[-.02em] sm:text-3xl">{value.title}</h1>
+          {value.summary && !value.summary.startsWith("Reported by a responder:") && <p className="mt-2 max-w-3xl text-sm leading-6 text-muted">{value.summary}</p>}
+          <dl className="mt-4 flex flex-wrap gap-x-6 gap-y-2 text-sm">
+            <div><dt className="sr-only">Service</dt><dd className="measurement-number">{value.service}{value.environment && value.environment !== "unknown" ? ` · ${value.environment}` : ""}</dd></div>
+            <div><dt className="inline text-muted">{value.status === "resolved" ? "Lasted " : "Going for "}</dt><dd className="inline font-semibold">{durationBetween(value.startedAt, value.resolvedAt ?? undefined)}</dd></div>
+            {value.customerImpact && !/^unknown/i.test(value.customerImpact) && <div><dt className="inline text-muted">Impact: </dt><dd className="inline">{value.customerImpact}</dd></div>}
+          </dl>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <label className="sr-only" htmlFor="incident-owner">Owner</label>
+          <select id="incident-owner" className="field !min-h-10 w-auto max-w-56" value={value.owner} onChange={(event) => assign.mutate(event.target.value)} disabled={assign.isPending || value.status === "resolved"}>
+            {isUnowned(value) && <option value={value.owner}>No owner — assign</option>}
+            {members.data?.map((member) => <option key={member.userId} value={member.email}>Owner: {member.displayName}</option>)}
+            {!isUnowned(value) && !members.data?.some((member) => member.email === value.owner) && <option value={value.owner}>Owner: {ownerLabel(value.owner)}</option>}
+          </select>
+          <button className="control-secondary inline-flex items-center gap-2" onClick={() => setEditingIncident(true)}><Edit3 className="h-4 w-4" />Edit</button>
+          {isAdmin && <button className="control-quiet text-danger hover:text-danger" aria-label={`Delete ${value.code}`} onClick={() => { if (window.prompt(`This permanently deletes ${value.code} and everything in it. Type ${value.code} to confirm.`)?.trim() === value.code) deleteIncident.mutate(); }}><Trash2 className="h-4 w-4" /></button>}
+        </div>
+      </div>
 
-    <div id="what-changed" className="scroll-mt-28"><WhatChanged incident={value} /></div>
-    <div id="error-groups" className="scroll-mt-28 empty:hidden"><ErrorGroups incident={value} onSelectEvent={(eventId) => selectEvent(eventId, true)} /></div>
-    <div id="debugging-insights" className="scroll-mt-28"><DebuggingInsights incident={value} onSelectEvent={(eventId) => selectEvent(eventId, true)} /></div>
-    <ResponseConsole incident={value} />
-    {editingEvent !== undefined && <EventEditor incidentId={id} event={editingEvent} saving={saveEvent.isPending} error={saveEvent.error instanceof Error ? saveEvent.error.message : undefined} onCancel={() => setEditingEvent(undefined)} onSave={(draft) => saveEvent.mutate(draft)} />}
-    {movingEvent && <section className="surface-lined p-5 sm:p-6"><div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between"><div><h2 className="section-title">Correct automatic grouping</h2><p className="mt-1 text-sm text-muted">Preview: “{movingEvent.title}” will leave {value.code} and join the chosen investigation. Both evidence revisions and the audit trail update.</p></div><div className="flex flex-col gap-2 sm:flex-row"><select className="field min-w-64" value={targetIncidentId} onChange={(event) => setTargetIncidentId(event.target.value)}><option value="">Choose target</option>{incidentOptions.data?.filter((item) => item.id !== id && item.environment === value.environment).map((item) => <option key={item.id} value={item.id}>{item.code} · {item.title}</option>)}</select><button className="control-primary" disabled={!targetIncidentId || moveEvent.isPending} onClick={() => moveEvent.mutate()}>Confirm move</button><button className="control-quiet" onClick={() => setMovingEvent(null)}>Cancel</button></div></div>{moveEvent.error && <p className="mt-3 text-sm text-danger">{moveEvent.error.message}</p>}</section>}
-    {(deleteIncident.error || updateEvidenceState.error) && <p role="alert" className="rounded-control bg-danger/10 p-3 text-sm text-danger">{(deleteIncident.error ?? updateEvidenceState.error)?.message}</p>}
-    <IncidentEditor open={editingIncident} incident={value} saving={updateIncident.isPending} error={updateIncident.error instanceof Error ? updateIncident.error.message : undefined} onClose={() => setEditingIncident(false)} onSave={(draft) => updateIncident.mutate(draft)} />
+      <div className={cn("mt-5 flex flex-col gap-3 rounded-control p-4 sm:flex-row sm:items-center sm:justify-between", banner.tone)}>
+        <div className="min-w-0"><p className="text-sm font-semibold">{banner.title}</p><p className="mt-1 break-words text-sm text-muted"><Linkified text={banner.detail} /></p></div>
+        <div className="flex shrink-0 gap-2">
+          {isOpen(value) && <button className="control-secondary" onClick={() => setAction("resolve")}>Resolve</button>}
+          <button className={cn("inline-flex items-center gap-2", banner.button.primary ? "control-primary" : "control-secondary")} onClick={() => setAction(banner.button.action)}><banner.button.icon className="h-4 w-4" />{banner.button.label}</button>
+        </div>
+      </div>
+      {(assign.error || deleteIncident.error) && <p role="alert" className="mt-3 text-sm text-danger">{(assign.error ?? deleteIncident.error)?.message}</p>}
+    </header>
+
+    {diagnosis.data && diagnosis.data.hypotheses.length > 0 && <section className="surface-lined p-5" aria-labelledby="cause-title">
+      <h2 id="cause-title" className="section-title">Likely cause</h2>
+      <p className="mt-2 text-sm leading-6">{diagnosis.data.currentExplanation}</p>
+      {diagnosis.data.servicePath.length > 1 && <p className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted">{diagnosis.data.servicePath.map((service, index) => <span key={service} className="inline-flex items-center gap-2"><span className="measurement-number rounded-full bg-elevated px-2 py-0.5">{service}</span>{index < diagnosis.data!.servicePath.length - 1 && "→"}</span>)}</p>}
+      <p className="mt-3 text-xs text-muted">A best guess from the evidence so far, not proof. Check it before acting on it.</p>
+    </section>}
+
+    <div id="what-changed" className="scroll-mt-6"><WhatChanged incident={value} /></div>
+    <div className="empty:hidden"><ErrorGroups incident={value} onSelectEvent={(eventId) => { setToolsOpen(true); selectEvent(eventId); }} /></div>
+
+    {editingEvent === null && <EventEditor incidentId={id} defaultService={value.service} saving={saveEvent.isPending} error={saveEvent.error?.message} onCancel={() => setEditingEvent(undefined)} onSave={(draft) => saveEvent.mutate(draft)} />}
+    <Timeline incident={value} onAdd={() => setEditingEvent(null)} />
+
+    <section className="surface-lined overflow-hidden">
+      <button className="flex w-full items-center justify-between gap-3 px-5 py-4 text-left hover:bg-elevated" aria-expanded={toolsOpen} onClick={() => setToolsOpen((open) => !open)}>
+        <span><span className="section-title block">Investigation tools</span><span className="mt-1 block text-sm text-muted">Zoomable timeline, evidence corrections, request comparisons, checks, recovery readings, and handoff notes.</span></span>
+        <ChevronDown className={cn("h-5 w-5 shrink-0 text-muted transition-transform", toolsOpen && "rotate-180")} />
+      </button>
+      {toolsOpen && <div className="space-y-6 border-t border-line p-4 sm:p-5">
+        <CausalTrace incident={value} selectedEventId={params.get("event")} onSelectEvent={selectEvent} onWindowChange={setTimelineWindow} />
+        <EvidenceLedger incident={value} selectedEventId={params.get("event")} visibleWindow={timelineWindow} updating={updateEvidenceState.isPending} onSelect={selectEvent} onEdit={(event) => setEditingEvent(event)} onMove={(event) => setMovingEvent(event)} onEvidenceState={(event, state) => updateEvidenceState.mutate({ event, state })} />
+        {editingEvent && <EventEditor incidentId={id} defaultService={value.service} event={editingEvent} saving={saveEvent.isPending} error={saveEvent.error?.message} onCancel={() => setEditingEvent(undefined)} onSave={(draft) => saveEvent.mutate(draft)} />}
+        {movingEvent && <div className="surface-lined p-5"><h3 className="section-title">Move to another incident</h3><p className="mt-1 text-sm text-muted">“{movingEvent.title}” will move to the incident you choose.</p><div className="mt-3 flex flex-col gap-2 sm:flex-row"><select className="field min-w-64" value={targetIncidentId} onChange={(event) => setTargetIncidentId(event.target.value)}><option value="">Choose an incident</option>{incidentOptions.data?.filter((item) => item.id !== id && item.environment === value.environment).map((item) => <option key={item.id} value={item.id}>{item.code} · {item.title}</option>)}</select><button className="control-primary" disabled={!targetIncidentId || moveEvent.isPending} onClick={() => moveEvent.mutate()}>Move</button><button className="control-quiet" onClick={() => setMovingEvent(null)}>Cancel</button></div>{moveEvent.error && <p className="mt-3 text-sm text-danger">{moveEvent.error.message}</p>}</div>}
+        {updateEvidenceState.error && <p role="alert" className="text-sm text-danger">{updateEvidenceState.error.message}</p>}
+        <DebuggingInsights incident={value} onSelectEvent={selectEvent} />
+        <ResponseConsole incident={value} />
+      </div>}
+    </section>
+
+    <IncidentEditor open={editingIncident} incident={value} saving={updateIncident.isPending} error={updateIncident.error?.message} onClose={() => { setEditingIncident(false); updateIncident.reset(); }} onSave={(draft) => updateIncident.mutate(draft)} />
+    <LifecycleDialog action={action} recovery={recovery} saving={lifecycle.isPending} error={lifecycle.error?.message} onClose={() => { setAction(null); lifecycle.reset(); }} onSubmit={(input) => lifecycle.mutate(input)} />
   </div>;
 }

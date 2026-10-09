@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, CircleDot, Clock3, FileCheck2, GitBranch, LoaderCircle, RotateCcw, ShieldCheck, TriangleAlert } from "lucide-react";
+import { CheckCircle2, CircleDot, Clock3, FileCheck2, GitBranch, LoaderCircle, ShieldCheck, TriangleAlert } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 import { api } from "../lib/api";
 import { usePersistentDraft } from "../lib/usePersistentDraft";
@@ -51,7 +51,6 @@ export function FixAndVerify({ incident, advancedReplay }: { incident: Incident;
   const [testedHow, setTestedHow] = useState("");
   const [reading, setReading] = useState("");
   const [readingNote, setReadingNote] = useState("");
-  const [reason, setReason] = useState("");
   const refresh = () => void client.invalidateQueries({ queryKey: ["casework", incident.id] });
 
   const snapshot = data.data as (CaseworkSnapshot | undefined);
@@ -83,19 +82,6 @@ export function FixAndVerify({ incident, advancedReplay }: { incident: Incident;
     },
     onSuccess: () => { setReading(""); setReadingNote(""); refresh(); }
   });
-  const lifecycle = useMutation({
-    mutationFn: async (action: "start_monitoring" | "resolve" | "reopen" | "monitor_and_resolve") => {
-      const revision = incident.evidenceRevision ?? incident.updatedAt;
-      const text = (fallback: string) => reason.trim().length >= 8 ? reason.trim() : fallback;
-      if (action === "monitor_and_resolve") {
-        // The API only resolves from Monitoring; when recovery is already confirmed, do both in one click.
-        const monitored = await api.transitionIncident(incident.id, { action: "start_monitoring", reason: "The fix is live and recovery is already confirmed.", expectedEvidenceRevision: revision });
-        return api.transitionIncident(incident.id, { action: "resolve", reason: reason.trim(), expectedEvidenceRevision: monitored.evidenceRevision ?? monitored.updatedAt });
-      }
-      return api.transitionIncident(incident.id, { action, reason: text(action === "start_monitoring" ? "The fix is live; watching for recovery." : action === "reopen" ? "Reopened after new evidence or a regression." : ""), expectedEvidenceRevision: revision });
-    },
-    onSuccess: (value) => { client.setQueryData(["incident", incident.id], value); refresh(); }
-  });
 
   if (data.isLoading) return <div className="min-h-72 p-6 text-sm text-muted">Loading fix and recovery status…</div>;
   if (data.error || !snapshot || !recovery) return <div className="p-6 text-sm text-danger">{data.error?.message ?? "Fix and recovery status is unavailable."}</div>;
@@ -114,8 +100,8 @@ export function FixAndVerify({ incident, advancedReplay }: { incident: Incident;
     : !verified && (delivery || fromAlerts) ? { text: recovery.reason, tone: "info" }
     : !verified && !criterion ? { text: "Pick the one number that tells you it's fixed (for example error rate ≤ 1%).", tone: "info" }
     : !verified ? { text: `${recovery.reason} Record another reading below.`, tone: "info" }
-    : !monitoring ? { text: "Recovery is confirmed. Add a one-line reason and resolve.", tone: "success" }
-    : { text: "Everything checks out. Add a short reason and resolve the incident.", tone: "success" };
+    : !monitoring ? { text: "Recovery is confirmed. Use Resolve at the top of the page.", tone: "success" }
+    : { text: "Everything checks out. Use Resolve at the top of the page.", tone: "success" };
 
   const fixState: StepState = proposal ? (approved ? "done" : "current") : "optional";
   const confirmState: StepState = verified ? "done" : "current";
@@ -189,18 +175,7 @@ export function FixAndVerify({ incident, advancedReplay }: { incident: Incident;
       </form>}
     </Step>
 
-    <Step number={3} title="Resolve" state={resolveState} summary={resolved ? "This incident is resolved." : monitoring ? "The incident is in Monitoring. Resolve it once recovery is confirmed." : verified && !approvalBlocks ? "Recovery is already confirmed, so you can resolve now. Or start monitoring to keep watching first." : "Start monitoring once the fix is live, so the team knows you're watching for recovery."}>
-      {!resolved && <label className="block text-sm font-semibold lg:max-w-3xl">{monitoring || (verified && !approvalBlocks) ? "Why is it resolved?" : "Note"} <span className="font-normal text-faint">{monitoring || (verified && !approvalBlocks) ? "(one line, required to resolve)" : "(optional)"}</span><input className="field mt-1.5" value={reason} onChange={(event) => setReason(event.target.value)} placeholder={monitoring ? "e.g. Redeployed 25171f6; error rate back under 1% for 15 minutes." : "e.g. Rollback deployed at 14:05"} /></label>}
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        {!monitoring && !resolved && verified && !approvalBlocks && <button className="inline-flex items-center control-primary" disabled={reason.trim().length < 8 || lifecycle.isPending} onClick={() => lifecycle.mutate("monitor_and_resolve")}><CheckCircle2 className="mr-2 h-4 w-4" />Resolve incident</button>}
-        {!monitoring && !resolved && <button className={cn("inline-flex items-center", verified && !approvalBlocks ? "control-quiet" : "control-primary")} onClick={() => lifecycle.mutate("start_monitoring")} disabled={lifecycle.isPending}><Clock3 className="mr-2 h-4 w-4" />Start monitoring</button>}
-        {monitoring && <button className="inline-flex items-center control-primary" disabled={!verified || approvalBlocks || reason.trim().length < 8 || lifecycle.isPending} onClick={() => lifecycle.mutate("resolve")}><CheckCircle2 className="mr-2 h-4 w-4" />Resolve incident</button>}
-        {resolved && <button className="inline-flex items-center control-secondary" onClick={() => lifecycle.mutate("reopen")} disabled={lifecycle.isPending}><RotateCcw className="mr-2 h-4 w-4" />Reopen</button>}
-      </div>
-      {monitoring && blockers.length > 0 && <p className="mt-2 text-xs text-warning">Can't resolve yet: {blockers.join("; ")}.</p>}
-      {monitoring && !blockers.length && reason.trim().length < 8 && <p className="mt-2 text-xs text-muted">Add a one-line reason to resolve.</p>}
-      <Saving pending={lifecycle.isPending} error={lifecycle.error && /Evidence changed/i.test(lifecycle.error.message) ? new Error("New evidence arrived just before your click, so nothing changed. Review it and try again.") : lifecycle.error} />
-    </Step>
+    <Step number={3} title="Resolve" state={resolveState} summary={resolved ? "This incident is resolved." : verified ? "Recovery is confirmed. Use Resolve at the top of the page." : "Use Mark fixed at the top of the page once the fix is live, then Resolve when you're satisfied."}>{null}</Step>
 
     {advancedReplay && <details className="border-t border-line"><summary className="cursor-pointer list-none px-5 py-4 text-sm font-semibold sm:px-6"><span className="inline-flex items-center gap-2"><FileCheck2 className="h-4 w-4 text-info" />Advanced: replay one HTTP request against a candidate build</span><span className="ml-2 text-xs font-normal text-muted">For reproducible HTTP failures in a local or CI environment</span></summary>{advancedReplay}</details>}
   </div>;

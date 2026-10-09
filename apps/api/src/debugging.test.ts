@@ -11,11 +11,21 @@ const testWith = (hypothesisId: string, status: HypothesisTest["status"]): Hypot
 });
 
 describe("debugging guidance", () => {
+  it("never names a responder's own action or a recovery as the cause", () => {
+    const incident = { ...seedIncidents[0]!, events: [
+      { id: "a", incidentId: "inc-1842", timestamp: "2026-09-20T06:00:00Z", service: "auth-api", kind: "action" as const, title: "Restarted auth pods", detail: "Restarted auth pods", impactScore: 25, provenance: "manual" as const },
+      { id: "r", incidentId: "inc-1842", timestamp: "2026-09-20T06:05:00Z", service: "auth-api", kind: "recovery" as const, title: "Login works again", detail: "Login works again", impactScore: 15, provenance: "manual" as const }
+    ] };
+    const diagnosis = diagnoseIncident(incident);
+    expect(diagnosis.hypotheses).toEqual([]);
+    expect(diagnosis.nextAction.label).toBe("Add what you're seeing");
+  });
+
   it("moves on to fix validation once the leading explanation is supported", () => {
     const initial = diagnoseIncident(seedIncidents[0]!);
     const leadingId = initial.hypotheses[0]!.id;
     const supported = diagnoseIncident(seedIncidents[0]!, [testWith(leadingId, "supported")]);
-    expect(supported.nextAction.label).toBe("Validate a bounded fix");
+    expect(supported.nextAction.label).toBe("Try a fix");
     expect(supported.nextAction.href).toBe("?area=validate");
     expect(supported.hypotheses[0]!.nextTest).not.toBe(initial.hypotheses[0]!.nextTest);
   });

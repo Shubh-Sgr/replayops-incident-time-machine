@@ -120,7 +120,7 @@ const validationSchema=z.object({proposalId:z.string().uuid(),kind:z.enum(["ci",
 const proposalReviewSchema=z.object({status:z.enum(["approved","rejected"]),reason:z.string().min(8).max(2000)});
 const criterionSchema=z.object({kind:z.enum(["runtime","delivery"]),name:z.string().min(3).max(180),source:z.string().min(2).max(240),query:z.string().max(4000),unit:z.string().min(1).max(40),comparison:z.enum(["lte","gte"]),targetValue:z.number(),minConsecutiveWindows:z.number().int().min(1).max(20),maxAgeMinutes:z.number().int().min(1).max(10080),observationMinutes:z.number().int().min(1).max(10080),deliveryIdentity:z.record(z.unknown()).nullable()});
 const measurementSchema=z.object({criterionId:z.string().uuid(),value:z.number().nullable(),unit:z.string().min(1).max(40),source:z.string().min(2).max(240),query:z.string().max(4000),windowStartedAt:z.string().datetime(),windowEndedAt:z.string().datetime(),observedAt:z.string().datetime(),state:z.enum(["valid","missing","invalid"]),note:z.string().max(2000).default("")}).refine((value)=>Date.parse(value.windowEndedAt)>Date.parse(value.windowStartedAt),{path:["windowEndedAt"],message:"Measurement window must end after it starts."});
-const lifecycleSchema=z.object({action:z.enum(["start_monitoring","resolve","reopen"]),reason:z.string().min(8).max(2000),expectedEvidenceRevision:z.string().datetime()});
+const lifecycleSchema=z.object({action:z.enum(["start_monitoring","resolve","reopen"]),reason:z.string().trim().min(8,"Say in a sentence what was done or how you confirmed it.").max(2000),expectedEvidenceRevision:z.string().datetime().optional(),confirmed:z.boolean().optional()});
 
 const parseOrReply = <T>(schema: z.ZodSchema<T>, value: unknown) => {
   const result = schema.safeParse(value);
@@ -152,24 +152,28 @@ apiRouter.use(async (req: AuthenticatedRequest, res, next) => {
     });
     next();
   } catch (error) {
-    res.status(error instanceof HttpError ? error.status : 403).json({ error: error instanceof Error ? error.message : "Your workspace role does not allow this action." });
+    if (!(error instanceof HttpError)) { next(error); return; }
+    res.status(error.status).json({ error: error.message });
   }
 });
 
-const integrationView = (req: Request, integration: Integration) => {
+// A connector's token lets anyone send evidence that opens incidents and pages people, so only people who can
+// manage sources (admins and responders, not viewers or API tokens) ever receive it.
+const integrationView = (req: Request, integration: Integration, revealSecret: boolean) => {
   const origin = config.publicApiUrl ?? `${req.protocol}://${req.get("host")}`;
   const endpoint = `${origin}/ingest/${integration.id}`;
-  const token = deriveIntegrationToken(integration.id);
+  const token = revealSecret ? deriveIntegrationToken(integration.id) : undefined;
   return {
     ...integration,
     connector: {
       endpoint,
       token,
       githubSecret: integration.provider === "github" ? token : undefined,
-      otlpHeaders: integration.provider === "otel" ? `x-replayops-token=${token}` : undefined
+      otlpHeaders: integration.provider === "otel" && token ? `x-replayops-token=${token}` : undefined
     }
   };
 };
+const mayManageSources = async (req: AuthenticatedRequest) => !req.user?.token && ["admin", "responder"].includes((await workspaceService.context(userId(req))).role);
 
 apiRouter.get("/dashboard", async (req, res) => {
   res.json(await repository.dashboard(userId(req)));
@@ -285,13 +289,13 @@ apiRouter.post("/incidents/:id/validations",async(req:AuthenticatedRequest,res)=
 apiRouter.post("/incidents/:id/proposals/:proposalId/review-request",async(req:AuthenticatedRequest,res)=>{
   const incident=await repository.getIncident(userId(req),String(req.params.id));if(!incident){res.status(404).json({error:"Incident not found."});return;}
   const snapshot=await caseworkService.snapshot(userId(req),incident);const proposal=snapshot.proposals.find((item)=>item.id===String(req.params.proposalId));if(!proposal){res.status(404).json({error:"Proposal version not found."});return;}
-  try{res.status(201).json(await caseworkService.requestReview(userId(req),incident,proposal,actor(req)));}catch(error){res.status(error instanceof HttpError?error.status:409).json({error:error instanceof Error?error.message:"Review request failed."});}
+  try{res.status(201).json(await caseworkService.requestReview(userId(req),incident,proposal,actor(req)));}catch(error){if(!(error instanceof HttpError))throw error;res.status(error.status).json({error:error.message});}
 });
 
 apiRouter.patch("/incidents/:id/proposal-reviews/:reviewId",async(req:AuthenticatedRequest,res)=>{
   const parsed=parseOrReply(proposalReviewSchema,req.body);if("error" in parsed){res.status(400).json(parsed);return;}
   const incident=await repository.getIncident(userId(req),String(req.params.id));if(!incident){res.status(404).json({error:"Incident not found."});return;}
-  try{const context=await workspaceService.context(userId(req));res.json(await caseworkService.reviewProposal(userId(req),incident,String(req.params.reviewId),actor(req),context.role,parsed.data));}catch(error){res.status(error instanceof HttpError?error.status:409).json({error:error instanceof Error?error.message:"Proposal review failed."});}
+  try{const context=await workspaceService.context(userId(req));res.json(await caseworkService.reviewProposal(userId(req),incident,String(req.params.reviewId),actor(req),context.role,parsed.data));}catch(error){if(!(error instanceof HttpError))throw error;res.status(error.status).json({error:error.message});}
 });
 
 apiRouter.post("/incidents/:id/recovery-criteria",async(req,res)=>{
@@ -316,7 +320,7 @@ apiRouter.post("/incidents/:id/lifecycle",async(req:AuthenticatedRequest,res)=>{
     const type=parsed.data.action==="start_monitoring"?"monitoring":parsed.data.action==="resolve"?"resolved":"reopened";
     // Alert on real status changes only: a repeated click or retried request must not page twice.
     if(incident&&before&&incident.status!==before.status)void alertService.dispatch(context.organizationId,{type,incident,detail:parsed.data.reason,actor:actor(req)});}
-  catch(error){res.status(error instanceof HttpError?error.status:409).json({error:error instanceof Error?error.message:"Lifecycle transition failed."});}
+  catch(error){if(!(error instanceof HttpError))throw error;res.status(error.status).json({error:error.message});}
 });
 
 apiRouter.post("/incidents/:id/evidence-bundle", async (req: AuthenticatedRequest, res) => {
@@ -344,7 +348,14 @@ apiRouter.patch("/incidents/:id", async (req, res) => {
     res.status(400).json(parsed);
     return;
   }
-  if (parsed.data.status === "resolved") { res.status(409).json({ error:"Resolve through the monitored recovery workflow so the latest evidence is re-evaluated and audited atomically." }); return; }
+  // Fixed, Resolved and Reopen go through /lifecycle, which checks the rules and audits the change; an edit may only
+  // move an open incident between Investigating and Identified.
+  if (parsed.data.status === "monitoring" || parsed.data.status === "resolved") { res.status(409).json({ error: parsed.data.status === "resolved" ? "Use Resolve on the incident so the change is checked and recorded." : "Use Mark fixed on the incident so the change is checked and recorded." }); return; }
+  if (parsed.data.status) {
+    const current = await repository.getIncident(userId(req), req.params.id);
+    if (!current) { res.status(404).json({ error: "Incident not found." }); return; }
+    if (current.status === "monitoring" || current.status === "resolved") { res.status(409).json({ error: "Use Reopen on the incident to make it active again." }); return; }
+  }
   const privacy=await workspaceService.getPrivacy(userId(req));
   const embedding = parsed.data.title || parsed.data.summary || parsed.data.service
     ? await embedText(`${parsed.data.title ?? ""}\n${parsed.data.summary ?? ""}\n${parsed.data.service ?? ""}`,privacy.externalAiEnabled)
@@ -526,22 +537,23 @@ apiRouter.post("/assistant", async (req, res) => {
   res.json(await answerQuestion(parsed.data.question, [...selectedResult, ...matches.filter((item) => item.incident.id !== selected?.id)], privacy.externalAiEnabled, context));
 });
 
-apiRouter.get("/integrations", async (req, res) => {
+apiRouter.get("/integrations", async (req: AuthenticatedRequest, res) => {
   const integrations = await repository.listIntegrations(userId(req));
-  res.json(integrations.map((integration) => integrationView(req, integration)));
+  const reveal = await mayManageSources(req);
+  res.json(integrations.map((integration) => integrationView(req, integration, reveal)));
 });
 
-apiRouter.post("/integrations", async (req, res) => {
+apiRouter.post("/integrations", async (req: AuthenticatedRequest, res) => {
   const parsed = parseOrReply(integrationSchema, req.body);
   if ("error" in parsed) {
     res.status(400).json(parsed);
     return;
   }
   const integration = await repository.createIntegration(userId(req), parsed.data);
-  res.status(201).json(integrationView(req, integration));
+  res.status(201).json(integrationView(req, integration, await mayManageSources(req)));
 });
 
-apiRouter.patch("/integrations/:id/config",async(req,res)=>{const parsed=parseOrReply(integrationConfigSchema,req.body);if("error" in parsed){res.status(400).json(parsed);return;}const value=await repository.updateIntegrationConfig(userId(req),String(req.params.id),parsed.data);if(!value){res.status(404).json({error:"Connector not found."});return;}res.json(integrationView(req,value));});
+apiRouter.patch("/integrations/:id/config",async(req:AuthenticatedRequest,res)=>{const parsed=parseOrReply(integrationConfigSchema,req.body);if("error" in parsed){res.status(400).json(parsed);return;}const value=await repository.updateIntegrationConfig(userId(req),String(req.params.id),parsed.data);if(!value){res.status(404).json({error:"Connector not found."});return;}res.json(integrationView(req,value,await mayManageSources(req)));});
 
 apiRouter.delete("/integrations/:id", async (req: AuthenticatedRequest, res) => {
   await workspaceService.assertRole(userId(req), ["admin"]);

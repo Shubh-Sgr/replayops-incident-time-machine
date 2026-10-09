@@ -1,7 +1,7 @@
 // End-to-end smoke test for a running demo-mode ReplayOps API (ENABLE_DEMO_MODE=true, no DATABASE_URL).
 // Usage: npm run dev (in another terminal), then: npm run smoke   — or API=http://host:port node scripts/smoke-api.mjs
 // It walks ingestion, incident CRUD, search, the check → proposal → validation → independent review →
-// recovery → monitoring → resolve journey, and error handling, then removes what it created.
+// recovery → fixed → resolve journey, and error handling, then removes what it created.
 const BASE = process.env.API ?? "http://localhost:8787";
 const tok = (id, email) => "demo-session." + Buffer.from(JSON.stringify({ id, email })).toString("base64url");
 const OP = tok("00000000-0000-4000-8000-000000000001", "operator@replayops.dev");
@@ -85,13 +85,11 @@ r = await call("POST", `/api/incidents/${inc.id}/measurements`, meas(300, 5)); c
 r = await call("POST", `/api/incidents/${inc.id}/measurements`, { ...meas(300, 5), windowEndedAt: iso(now - 20 * 60000) }); check("inverted window rejected 4xx", r.status >= 400 && r.status < 500, `got ${r.status}`);
 r = await call("GET", `/api/incidents/${inc.id}/casework`); check("recovery verified", r.body.recovery.state === "verified", r.body.recovery.reason);
 let cur = (await call("GET", `/api/incidents/${inc.id}`)).body; const rev = cur.evidenceRevision ?? cur.updatedAt;
-r = await call("POST", `/api/incidents/${inc.id}/lifecycle`, { action: "resolve", reason: "Recovered after revert", expectedEvidenceRevision: rev }); check("resolve before monitoring blocked", r.status === 409, r.body?.error);
-r = await call("POST", `/api/incidents/${inc.id}/lifecycle`, { action: "start_monitoring", reason: "Revert deployed, observing", expectedEvidenceRevision: "2020-01-01T00:00:00.000Z" }); check("stale revision rejected", r.status === 409);
-r = await call("POST", `/api/incidents/${inc.id}/lifecycle`, { action: "start_monitoring", reason: "Revert deployed, observing", expectedEvidenceRevision: rev }); check("start monitoring", r.status === 200 && r.body.status === "monitoring", `got ${r.status} ${r.body?.error ?? ""}`);
-cur = (await call("GET", `/api/incidents/${inc.id}`)).body;
-r = await call("POST", `/api/incidents/${inc.id}/lifecycle`, { action: "resolve", reason: "Recovered after revert", expectedEvidenceRevision: cur.evidenceRevision ?? cur.updatedAt }); check("resolve", r.status === 200 && r.body.status === "resolved", `got ${r.status} ${r.body?.error ?? ""}`);
+r = await call("POST", `/api/incidents/${inc.id}/lifecycle`, { action: "start_monitoring", reason: "Revert deployed, observing" }); check("mark fixed", r.status === 200 && r.body.status === "monitoring", `got ${r.status} ${r.body?.error ?? ""}`);
+r = await call("POST", `/api/incidents/${inc.id}/lifecycle`, { action: "start_monitoring", reason: "Revert deployed, observing" }); check("mark fixed twice rejected", r.status === 409);
+r = await call("POST", `/api/incidents/${inc.id}/lifecycle`, { action: "resolve", reason: "Recovered after revert" }); check("resolve on verified recovery", r.status === 200 && r.body.status === "resolved", `got ${r.status} ${r.body?.error ?? ""}`);
 r = await call("GET", "/api/audit"); const audits = r.body.map((a) => a.action);
-check("audit has lifecycle transitions", audits.some((a) => /monitoring/i.test(a)) && audits.some((a) => /resolved/i.test(a)), audits.slice(0, 8).join(" | "));
+check("audit has lifecycle transitions", audits.some((a) => /fixed/i.test(a)) && audits.some((a) => /resolved/i.test(a)), audits.slice(0, 8).join(" | "));
 cur = (await call("GET", `/api/incidents/${inc.id}`)).body;
 r = await call("POST", `/api/incidents/${inc.id}/lifecycle`, { action: "reopen", reason: "Regression seen again", expectedEvidenceRevision: cur.evidenceRevision ?? cur.updatedAt }); check("reopen", r.status === 200 && r.body.status === "investigating" && !r.body.resolvedAt);
 

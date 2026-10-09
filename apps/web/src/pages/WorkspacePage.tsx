@@ -10,16 +10,20 @@ import { defaultEnvironments, defaultReleaseBranches, policyWarnings, recommende
 import { cn, formatRelative } from "../lib/utils";
 import type { EnvironmentConfig, IncidentPolicy, PrivacySettings, ServiceDefinition, TeamInvitation, WorkspaceRole } from "../types";
 
-type Mode = "services" | "alerts" | "tokens" | "intake" | "privacy" | "team" | "audit" | "queue";
+type Mode = "alerts" | "team" | "services" | "advanced";
+type AdvancedSection = "intake" | "privacy" | "tokens" | "audit" | "queue";
 const modes = [
-  { id: "services" as const, label: "Service map", icon: Boxes },
   { id: "alerts" as const, label: "Alerts", icon: BellRing },
-  { id: "intake" as const, label: "Intake policy", icon: Wrench },
-  { id: "privacy" as const, label: "Privacy & AI", icon: LockKeyhole },
-  { id: "team" as const, label: "Team access", icon: UsersRound },
-  { id: "tokens" as const, label: "API tokens", icon: KeyRound },
-  { id: "audit" as const, label: "Audit trail", icon: BookOpenCheck },
-  { id: "queue" as const, label: "Delivery queue", icon: DatabaseZap }
+  { id: "team" as const, label: "Team", icon: UsersRound },
+  { id: "services" as const, label: "Services", icon: Boxes },
+  { id: "advanced" as const, label: "Advanced", icon: Wrench }
+];
+const advancedSections: Array<{ id: AdvancedSection; label: string; detail: string; icon: typeof Wrench }> = [
+  { id: "intake", label: "Incident rules", detail: "When an incident opens automatically, and how signals are grouped.", icon: Wrench },
+  { id: "privacy", label: "Privacy & AI", detail: "External AI, request bodies, and analytics.", icon: LockKeyhole },
+  { id: "tokens", label: "API tokens", detail: "Keys for scripts, CI and the CLI.", icon: KeyRound },
+  { id: "audit", label: "Activity log", detail: "Who changed what, and when.", icon: BookOpenCheck },
+  { id: "queue", label: "Delivery queue", detail: "Incoming deliveries that are retrying or failed.", icon: DatabaseZap }
 ];
 
 function ServiceMap() {
@@ -224,12 +228,21 @@ function QueueHealth() {
   </div>;
 }
 
+function Advanced({ initial }: { initial?: AdvancedSection }) {
+  const panel = (id: AdvancedSection) => id === "intake" ? <IntakePolicyPanel /> : id === "privacy" ? <PrivacyPanel /> : id === "tokens" ? <ApiTokens /> : id === "audit" ? <AuditTrail /> : <QueueHealth />;
+  return <div className="space-y-3">{advancedSections.map((section) => <details key={section.id} className="surface-lined group overflow-hidden" open={section.id === initial}>
+    <summary className="flex cursor-pointer list-none items-center gap-3 px-5 py-4 hover:bg-elevated"><section.icon className="h-4 w-4 shrink-0 text-muted" /><span className="min-w-0 flex-1"><span className="block text-sm font-semibold">{section.label}</span><span className="block text-xs text-muted">{section.detail}</span></span><span className="text-xs font-semibold text-muted group-open:hidden">Open</span></summary>
+    <div className="border-t border-line p-4 sm:p-5">{panel(section.id)}</div>
+  </details>)}</div>;
+}
+
 export function WorkspacePage() {
-  const [mode, setMode] = useState<Mode>(() => { const tab = new URLSearchParams(window.location.search).get("tab"); return modes.some((item) => item.id === tab) ? tab as Mode : "services"; });
+  const requested = new URLSearchParams(window.location.search).get("tab") ?? "";
+  const [mode, setMode] = useState<Mode>(() => modes.some((item) => item.id === requested) ? requested as Mode : advancedSections.some((item) => item.id === requested) ? "advanced" : "alerts");
   const workspace = useQuery({ queryKey: ["workspace"], queryFn: api.workspace });
-  return <div className="space-y-6"><header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between"><div><h1 className="font-heading text-3xl font-semibold tracking-[-0.03em] sm:text-4xl">Operational workspace</h1><p className="mt-2 max-w-3xl text-sm leading-6 text-muted">Define what ReplayOps observes, how it groups evidence, who can act, and how every change is reviewed.</p></div><span className="measurement-number w-fit rounded-full bg-elevated px-3 py-1.5 text-xs text-muted">{workspace.data?.organizationName ?? "Loading workspace"} · {workspace.data?.role ?? "member"}</span></header>
-    <div className="overflow-x-auto"><div className="inline-flex min-w-full gap-1 rounded-panel bg-rail p-1 sm:min-w-0" role="tablist" aria-label="Workspace controls">{modes.map((item) => <button key={item.id} role="tab" aria-selected={mode === item.id} className={cn("flex min-h-11 items-center gap-2 whitespace-nowrap rounded-control px-3 text-sm font-semibold transition-colors", mode === item.id ? "bg-ink text-panel" : "text-muted hover:bg-elevated hover:text-ink")} onClick={() => setMode(item.id)}><item.icon className="h-4 w-4" />{item.label}</button>)}</div></div>
+  return <div className="space-y-6"><header className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between"><div><h1 className="font-heading text-3xl font-semibold tracking-[-0.03em] sm:text-4xl">Settings</h1><p className="mt-1 text-sm text-muted">Who gets alerted, who's on the team, and what your services are.</p></div>{workspace.data && <span className="w-fit rounded-full bg-elevated px-3 py-1.5 text-xs text-muted">{workspace.data.organizationName} · you're {workspace.data.role === "admin" ? "an admin" : `a ${workspace.data.role}`}</span>}</header>
+    <div className="overflow-x-auto"><div className="inline-flex gap-1 rounded-panel bg-rail p-1" role="tablist" aria-label="Settings sections">{modes.map((item) => <button key={item.id} role="tab" aria-selected={mode === item.id} className={cn("flex min-h-10 items-center gap-2 whitespace-nowrap rounded-control px-3 text-sm font-semibold transition-colors", mode === item.id ? "bg-ink text-panel" : "text-muted hover:bg-elevated hover:text-ink")} onClick={() => setMode(item.id)}><item.icon className="h-4 w-4" />{item.label}</button>)}</div></div>
     {workspace.error && <p role="alert" className="rounded-control bg-danger/10 p-3 text-sm text-danger"><TriangleAlert className="mr-2 inline h-4 w-4" />{workspace.error.message}</p>}
-    <AnimatePresence mode="wait"><motion.div key={mode} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.18 }}>{mode === "services" ? <ServiceMap /> : mode === "alerts" ? <AlertDestinations /> : mode === "tokens" ? <ApiTokens /> : mode === "intake" ? <IntakePolicyPanel /> : mode === "privacy" ? <PrivacyPanel/> : mode === "team" ? <TeamAccess /> : mode === "audit" ? <AuditTrail /> : <QueueHealth />}</motion.div></AnimatePresence>
+    <AnimatePresence mode="wait"><motion.div key={mode} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.18 }}>{mode === "alerts" ? <AlertDestinations /> : mode === "team" ? <TeamAccess /> : mode === "services" ? <ServiceMap /> : <Advanced initial={advancedSections.find((item) => item.id === requested)?.id} />}</motion.div></AnimatePresence>
   </div>;
 }

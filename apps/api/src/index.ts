@@ -18,6 +18,15 @@ import { Pool } from "pg";
 const app = express();
 
 app.disable("x-powered-by");
+// The API only serves JSON: forbid sniffing, framing, and referrer leaks of incident URLs.
+app.use((_req, res, next) => {
+  res.setHeader("x-content-type-options", "nosniff");
+  res.setHeader("x-frame-options", "DENY");
+  res.setHeader("referrer-policy", "no-referrer");
+  res.setHeader("cache-control", "no-store");
+  if (process.env.NODE_ENV === "production") res.setHeader("strict-transport-security", "max-age=31536000; includeSubDomains");
+  next();
+});
 app.set("trust proxy", 1);
 app.use(cors({ origin: config.webOrigin.split(",").map((origin) => origin.trim()), credentials: true, exposedHeaders: ["x-request-id"] }));
 
@@ -61,7 +70,8 @@ const errorHandler: ErrorRequestHandler = (error, req, res, _next) => {
   const parseFailure = (error as { type?: string }).type === "entity.parse.failed";
   if (status >= 500) console.error(`[${requestId}] ${req.method} ${req.originalUrl} failed`, error);
   res.status(status).json({
-    error: parseFailure ? "The request body is not valid JSON." : error instanceof Error ? error.message : "An unexpected server error occurred.",
+    // Server faults can carry database or provider internals; the log keeps them, the caller gets the request ID.
+    error: parseFailure ? "The request body is not valid JSON." : status >= 500 ? "Something went wrong on our side. Try again; if it keeps happening, share the request ID." : error instanceof Error ? error.message : "The request could not be completed.",
     requestId
   });
 };

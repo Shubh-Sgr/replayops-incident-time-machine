@@ -26,12 +26,15 @@ export function SeverityMark({ value }: { value: Severity }) {
   );
 }
 
+/** Plain names for the lifecycle: Open → Fixed (watching for recovery) → Resolved. */
+export const statusLabel: Record<IncidentStatus, string> = { investigating: "Open", identified: "Cause found", monitoring: "Fixed", resolved: "Resolved" };
+
 export function StatusMark({ value }: { value: IncidentStatus }) {
   const Icon = value === "resolved" ? CheckCircle2 : value === "monitoring" ? Radar : Clock3;
   return (
-    <span className={cn("inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold capitalize", statusStyles[value])}>
+    <span className={cn("inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold", statusStyles[value])} title={value === "monitoring" ? "Fixed — watching to confirm it stays fixed" : undefined}>
       <Icon aria-hidden="true" className="h-3.5 w-3.5" />
-      {value}
+      {statusLabel[value]}
     </span>
   );
 }

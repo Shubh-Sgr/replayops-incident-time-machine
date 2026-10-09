@@ -43,8 +43,32 @@ describe("demo-mode casework lifecycle",()=>{
     const updated=await service.transition(userId,incident.id,"operator@replayops.dev","admin",{action:"start_monitoring",reason:"Observing after rollback",expectedEvidenceRevision:incident.evidenceRevision??incident.updatedAt});
     expect(updated?.status).toBe("monitoring");
     const audit=await workspaceService.listAudit(userId);
-    expect(audit.some((entry)=>entry.action==="started recovery monitoring"&&entry.targetId===incident.id)).toBe(true);
+    expect(audit.some((entry)=>entry.action==="marked incident fixed"&&entry.targetId===incident.id)).toBe(true);
     await expect(service.transition(userId,incident.id,"operator@replayops.dev","admin",{action:"resolve",reason:"No criterion defined yet",expectedEvidenceRevision:updated!.evidenceRevision??updated!.updatedAt})).rejects.toMatchObject({status:409});
+    // Without source-confirmed recovery, resolving needs the responder to confirm and say how.
+    const resolved=await service.transition(userId,incident.id,"operator@replayops.dev","admin",{action:"resolve",reason:"Error rate back to baseline for 30 minutes in Grafana",confirmed:true});
+    expect(resolved?.status).toBe("resolved");
+    await expect(service.transition(userId,incident.id,"operator@replayops.dev","viewer",{action:"reopen",reason:"Viewer tries to reopen"})).rejects.toMatchObject({status:403});
     await expect(service.updateCheck(userId,"missing-check",{status:"planned",result:"",evidenceIds:[]},incident)).rejects.toBeInstanceOf(HttpError);
+  });
+});
+
+describe("lifecycle rules", () => {
+  const unverified = { state: "insufficient" as const, reason: "No recovery signal yet.", criterionVersion: null, evaluatedAt: "2026-10-01T00:00:00.000Z", supportingMeasurementIds: [] };
+  const verified = { ...unverified, state: "verified" as const, reason: "Recovered." };
+  it("is Open → Fixed → Resolved, with Reopen from Fixed or Resolved", async () => {
+    const { lifecycleTarget } = await import("./casework.js");
+    expect(lifecycleTarget("investigating", { action: "start_monitoring", reason: "Rolled back" }, unverified, "r1")).toBe("monitoring");
+    expect(() => lifecycleTarget("monitoring", { action: "start_monitoring", reason: "Again please" }, unverified, "r1")).toThrow(/already marked fixed/);
+    expect(() => lifecycleTarget("investigating", { action: "reopen", reason: "Reopen it now" }, unverified, "r1")).toThrow(/already open/);
+    expect(lifecycleTarget("resolved", { action: "reopen", reason: "It came back" }, unverified, "r1")).toBe("investigating");
+  });
+  it("resolves on source-confirmed recovery, or on a responder's confirmation against the latest evidence", async () => {
+    const { lifecycleTarget } = await import("./casework.js");
+    expect(lifecycleTarget("investigating", { action: "resolve", reason: "Source says fixed" }, verified, "r1")).toBe("resolved");
+    expect(() => lifecycleTarget("monitoring", { action: "resolve", reason: "I think so" }, unverified, "r1")).toThrow(/confirm/);
+    expect(lifecycleTarget("monitoring", { action: "resolve", reason: "Checked dashboards", confirmed: true, expectedEvidenceRevision: "r1" }, unverified, "r1")).toBe("resolved");
+    expect(() => lifecycleTarget("monitoring", { action: "resolve", reason: "Checked dashboards", confirmed: true, expectedEvidenceRevision: "r0" }, unverified, "r1")).toThrow(/New evidence/);
+    expect(() => lifecycleTarget("resolved", { action: "resolve", reason: "Resolve twice" }, verified, "r1")).toThrow(/already resolved/);
   });
 });

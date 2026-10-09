@@ -53,7 +53,7 @@ Real teams ship feature branch → PR → main → staging → production, flip 
 - **Services ↔ repositories** (Settings → Service map): map `owner/name` repos and monorepo paths to services, so GitHub events count as the app service and a monorepo deploy only affects the services whose files changed. A service with paths owns the files under them; a service mapped to the whole repo (no paths) owns only the code no path-scoped service claims, and CI/docs files (`.github/`, `docs/`, `*.md`) never count as service code on their own. A failed run or deployment lands on the service whose files its commit changed. A CD job can also name the service outright with `payload: { service: "payouts-api", version: "v3.2.0" }` on the GitHub Deployment.
 - **Recovery confirmed by the source**: a failed GitHub deploy or run is recovered by a later success in the same lane. A runtime incident is recovered when every Grafana/Alertmanager alert in it reports resolved and stays quiet for 5 minutes with no new errors. A recovery check you set by hand (e.g. p95 ≤ 800 ms) takes precedence.
 - **Change log** (Releases page): GitHub deployment statuses (Vercel and GitHub Actions deployments report these), generic change events and CLI `change` record deploys, rollbacks, flags, config, migrations and infra per service and environment. Each deploy gets its **commit range** (previous deployed SHA → this SHA) from push webhooks, with files and authors, however many days the commits spent before shipping.
-- **Grouping**: signals join an open incident when they share an identity (same alert, same error fingerprint, same trace, or the same GitHub workflow/deploy lane), or the same service and environment within the grouping window. Changes are never grouped by time: when an incident opens, ReplayOps links **the release that was live** in that environment (however old) plus changes from the previous day; changes made during the incident (rollbacks, fixes) are linked as responses, not suspects.
+- **Grouping**: signals join an open incident when they share an identity (same alert, same error fingerprint, same trace, or the same GitHub workflow/deploy lane), or when they come from a service connected in the catalog to any service already in the incident, in the same environment, within the grouping window of the incident's **latest** evidence (so a four-hour outage or a database → inventory → checkout cascade stays one incident). Once the source reports recovery and the incident stays quiet for the window, it is settled: the same problem later opens a new incident. If it comes back inside the window, the incident goes back to Investigating and pages again ("reopened"). An incident nobody resolved still takes its own recurring error, and pages again when the error returns after going quiet. A neighbour's recovery never moves an incident to Monitoring. Changes are never grouped by time: when an incident opens, ReplayOps links **the release that was live** in that environment (however old) plus changes from the previous day; changes made during the incident (rollbacks, fixes) are linked as responses, not suspects.
 - **Diagnosis**: each linked change is scored on evidence: time decay over hours, live release, version attribution (errors only on the new version vs on both), error fingerprints that are new in that environment since the change, the **same error seen in staging on that release before promotion**, and whether the change touched the failing service's code. Changes that didn't touch the service, or whose errors pre-date them, are marked "likely unrelated". "Rule out" on a change removes it from the diagnosis.
 
 `apps/api/src/scenarios.test.ts` encodes 14 real-world scenarios (latent bugs found days after deploy, unrelated merges, staging noise, feature-branch CI, canaries, flags vs releases, rollbacks, late webhooks, failed deploys, staging early warning).
@@ -70,7 +70,7 @@ Real teams ship feature branch → PR → main → staging → production, flip 
   npm run replayops -- incidents              # open incidents with their next step
   npm run replayops -- show AUTO-1234         # facts, leading explanation, errors, latest evidence
   npm run replayops -- note AUTO-1234 "Rolled back canary"
-  npm run replayops -- status AUTO-1234 monitoring --reason "Rolled back to v1.4.1"
+  npm run replayops -- status AUTO-1234 fixed --reason "Rolled back to v1.4.1"
   npm run replayops -- change --service checkout-api --version v1.4.2 --previous v1.4.1   # needs a Generic connector URL/token
   ```
 - **Destructive actions:** only admins can delete an incident or a connector; the audit entry keeps the code, title, and evidence count of what was removed.
@@ -109,16 +109,17 @@ In demo mode, sign in with either local persona (password `ReplayOps!2026`): `op
 - **Smoke test:** with `npm run dev` running, `npm run smoke` walks ingestion, incident CRUD, search, the full check → proposal → validation → independent review → recovery → monitoring → resolve journey, and error handling against the demo API, then cleans up. Set `API=http://host:port` to target another demo-mode instance.
 - **Port conflicts:** the API reads `PORT` (default 8787). If your shell or tooling exports `PORT` for the web server, start with `PORT=8787 npm run dev` so the API does not bind the Vite port.
 
-## How an investigation works
+## How an incident works
 
-Each incident page has three tabs that follow the order you'd work in:
+An incident page shows, top to bottom: what's broken and **the one thing to do next**, the likely cause, what changed, and a plain timeline. Everything else (zoomable timeline, evidence corrections, request comparisons, checks, recovery readings, handoff notes) is under **Investigation tools**.
 
-1. **Investigate.** ReplayOps proposes the most likely explanation from the evidence and a *recommended next check*: one concrete thing to look at, such as a log, a commit diff, or a trace. Click **Start this check**, write what you saw, and mark it **Confirms it**, **Rules it out**, or **Unclear**. The explanation and next step update from your answers, and every result is kept under **Already checked**.
-2. **Fix & verify.** Guided steps with a "What to do now" line at the top:
-   - *Record the fix* (optional): the exact change, how to undo it, and how it was tested. A recorded fix needs a teammate's approval before resolving.
-   - *Confirm it's fixed*: for GitHub incidents this happens automatically when a later deploy or run succeeds. For runtime incidents, pick one number (for example error rate ≤ 1%) and record readings after the fix is live.
-   - *Resolve*: start monitoring, then resolve once recovery is confirmed.
-3. **Activity & handoff.** A generated summary of what was known, checked, ruled out, changed, and confirmed, plus the learning record.
+The lifecycle is three steps:
+
+1. **Open** — something is broken. Assign an owner, look at what changed, add what you see or do to the timeline.
+2. **Mark fixed** — say what you did. The incident is now *Fixed* and watched: if the problem comes back, it reopens and pages again.
+3. **Resolve** — one click when your sources confirm recovery (a later passing CI run or good deploy, or every Grafana alert resolved and quiet for 5 minutes). If they haven't, you can still resolve: say how you confirmed it, and that is recorded in the audit log. **Reopen** brings it back.
+
+Only admins and responders can change an incident's status; every change is audited.
 
 ## Debugging an incident in ReplayOps
 

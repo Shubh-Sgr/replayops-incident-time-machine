@@ -151,7 +151,9 @@ const releaseOf = (event: IncidentEvent) => event.kind === "deploy" ? undefined 
 export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = [], context: DiagnosisContext = {}): IncidentDiagnosis {
   // Evidence a responder excluded (for example a change ruled out as unrelated) no longer counts.
   const events = incident.events.filter((event) => event.evidenceState !== "excluded").sort((left, right) => left.timestamp.localeCompare(right.timestamp));
-  if (!events.length) {
+  // What responders did, and signs of recovery, are never a cause; with nothing else recorded there is nothing to rank.
+  const causeEvidence = events.filter((event) => event.kind !== "action" && event.kind !== "recovery");
+  if (!causeEvidence.length) {
     return {
       incidentId: incident.id,
       generatedAt: new Date().toISOString(),
@@ -159,14 +161,14 @@ export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = [
       confidence: 12,
       evidenceCompleteness: 0,
       causalConfidence: 12,
-      scoreExplanation: ["No timestamped evidence is available."],
+      scoreExplanation: [events.length ? "Only responder actions or recovery signals are recorded." : "No timestamped evidence is available."],
       changeCandidates: [],
       signalDeltas: [],
       hypotheses: [],
-      evidenceGaps: ["No timestamped evidence is attached, so causal ordering cannot be evaluated."],
+      evidenceGaps: [events.length ? "No error, alert, or change is attached, so there is nothing to explain yet." : "No timestamped evidence is attached, so there is nothing to explain yet."],
       evidenceStatus: "insufficient",
-      currentExplanation: "No explanation is defensible until timestamped evidence is attached.",
-      nextAction: { label: "Add the first evidence", reason: "A timestamped observation is required before ReplayOps can rank explanations.", href: "?area=evidence&action=add" }
+      currentExplanation: "Not enough to go on yet. Add what you're seeing to the timeline.",
+      nextAction: { label: "Add what you're seeing", reason: "Add an error, alert, or anything you noticed to the timeline. Connected sources add this by themselves.", href: "?area=evidence&action=add" }
     };
   }
 
@@ -175,7 +177,7 @@ export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = [
     ?? events.reduce((highest, event) => event.impactScore > highest.impactScore ? event : highest, events[0]!);
   // Error occurrences are symptoms, never candidate causes.
   const eligibleCandidates = events.filter((event) => event.timestamp <= symptom.timestamp && event.kind !== "alert" && event.kind !== "action" && event.kind !== "recovery" && !event.metadata?.exception);
-  const sourceCandidates = eligibleCandidates.length ? eligibleCandidates : [events[0]!];
+  const sourceCandidates = eligibleCandidates.length ? eligibleCandidates : [causeEvidence[0]!];
   // An exception type that first appears right after a change (and before any later change) points at it.
   // "First appears" means first in this environment's history, so a chronic error never blames a release.
   const environment = incident.environment && incident.environment !== "unknown" ? incident.environment : undefined;
@@ -331,7 +333,7 @@ export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = [
     id: `origin-${topCandidate.id}`,
     rank: 1,
     title: topCandidate.id === symptom.id ? `What led to “${symptom.title}”?` : `Did “${topCandidate.title}” cause this?`,
-    claim: `“${topCandidate.title}” occurred before the first high-impact symptom in ${symptom.service}; the current evidence does not by itself establish cause.`,
+    claim: `“${topCandidate.title}” happened just before ${symptom.service} started failing, so it may be the cause.`,
     confidence: Math.min(confidence, clamp(changeCandidates[0]?.score ?? confidence, 20, 94)),
     supportingEvidence: [
       `${topCandidate.title} was recorded ${evidenceSpan ? `${humanLead(evidenceSpan)} before` : "at"} the first high-impact symptom.`,
@@ -404,20 +406,20 @@ export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = [
   const evidenceStatus: IncidentDiagnosis["evidenceStatus"] = evidenceCompleteness < 35 ? "insufficient" : evidenceCompleteness < 75 ? "partial" : "substantial";
   const automaticRecovery = incident.status === "resolved" ? null : evaluateAutomaticRecovery(incident);
   const nextAction = automaticRecovery?.state === "verified"
-    ? { label: "Recovered: resolve it", reason: automaticRecovery.reason.replace(/ This verifies delivery, not runtime health\.$/, ""), href: "?area=validate" }
+    ? { label: "Resolve it — it recovered", reason: automaticRecovery.reason.replace(/ This verifies delivery, not runtime health\.$/, ""), href: "?area=validate" }
     : incident.status === "monitoring"
-    ? { label: "Verify recovery, then resolve", reason: automaticRecovery?.reason ?? "The incident is in Monitoring. Confirm the recovery check passes in Fix & verify, then resolve it.", href: "?area=validate" }
+    ? { label: "Confirm it stays fixed, then resolve", reason: automaticRecovery?.reason ?? "Resolve once you're satisfied it's fixed.", href: "?area=validate" }
     : incident.status === "resolved"
-      ? { label: "Write the learning record", reason: "The incident is resolved. Capture what was learned and any follow-ups in Activity & handoff.", href: "?area=handoff" }
+      ? { label: "Write down what you learned", reason: "Note the cause and any follow-ups in Investigation tools → Activity & handoff.", href: "?area=handoff" }
     : activeTest
-    ? { label: activeTest.status === "running" ? "Record the test outcome" : "Start the assigned test", reason: activeTest.title, href: `?area=investigate&test=${activeTest.id}` }
+    ? { label: activeTest.status === "running" ? "Record what the check showed" : "Do the assigned check", reason: activeTest.title, href: `?area=investigate&test=${activeTest.id}` }
     : contested
-      ? { label: "Resolve contradictory test results", reason: contested.outcomeSummary, href: `?area=investigate&hypothesis=${encodeURIComponent(contested.id)}` }
+      ? { label: "Sort out the checks that disagree", reason: contested.outcomeSummary, href: `?area=investigate&hypothesis=${encodeURIComponent(contested.id)}` }
     : leading?.state === "supported"
-      ? { label: leading.nextTest.startsWith("Fix it:") ? "Fix it, then confirm recovery" : "Validate a bounded fix", reason: leading.nextTest, href: "?area=validate" }
+      ? { label: leading.nextTest.startsWith("Fix it:") ? "Fix it, then mark it fixed" : "Try a fix", reason: leading.nextTest, href: "?area=validate" }
     : leading
-      ? { label: leading.testCount ? "Run a different test" : "Run the next test", reason: leading.nextTest, href: `?area=investigate&hypothesis=${encodeURIComponent(leading.id)}` }
-      : { label: "Add missing evidence", reason: evidenceGaps[0] ?? "Every current explanation has been disproved.", href: "?area=evidence&gap=missing" };
+      ? { label: leading.testCount ? "Try a different check" : "Check the likely cause", reason: leading.nextTest, href: `?area=investigate&hypothesis=${encodeURIComponent(leading.id)}` }
+      : { label: "Add more of what you're seeing", reason: evidenceGaps[0] ?? "Every explanation so far has been ruled out.", href: "?area=evidence&gap=missing" };
 
   return {
     incidentId: incident.id,
@@ -435,8 +437,8 @@ export function diagnoseIncident(incident: Incident, tests: HypothesisTest[] = [
     evidenceGaps,
     evidenceStatus,
     currentExplanation: leading
-      ? `${leading.claim} ${leading.state === "supported" ? "A bounded test supports it under the recorded conditions." : leading.state === "contested" ? "The recorded tests conflict." : "It remains an explanation to test, not a proven root cause."}`
-      : "Every recorded explanation has been disproved. Gather new evidence before selecting another cause.",
+      ? `${leading.claim} ${leading.state === "supported" ? "A check you ran supports it." : leading.state === "contested" ? "The checks you ran disagree." : "It hasn't been checked yet."}`
+      : "Every explanation so far has been ruled out. Add more of what you're seeing to find another.",
     nextAction
   };
 }

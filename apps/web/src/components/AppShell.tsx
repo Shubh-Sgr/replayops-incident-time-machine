@@ -1,7 +1,7 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { Activity, Bell, CircleUserRound, LogOut, Menu, Moon, RadioTower, Rocket, Search, Settings2, Sun, X } from "lucide-react";
 import { useEffect, useState } from "react";
-import { Link, NavLink, Outlet } from "react-router-dom";
+import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { cn } from "../lib/utils";
 import { api } from "../lib/api";
@@ -11,13 +11,14 @@ import { CommandSearch } from "./CommandSearch";
 import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
 
 const navigation = [
-  { to: "/", label: "Investigations", icon: Activity, end: true },
+  { to: "/", label: "Incidents", icon: Activity, end: true },
   { to: "/releases", label: "Releases", icon: Rocket, end: false },
   { to: "/integrations", label: "Sources", icon: RadioTower, end: false },
   { to: "/workspace", label: "Settings", icon: Settings2, end: false }
 ];
 
 export function AppShell() {
+  const location = useLocation();
   const [mobileNav, setMobileNav] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
@@ -63,7 +64,7 @@ export function AppShell() {
             onClick={() => setMobileNav(false)}
             className={({ isActive }) => cn(
               "flex min-h-11 items-center gap-3 rounded-control px-3 text-sm font-semibold transition-colors",
-              isActive ? "bg-ink text-panel" : "text-muted hover:bg-elevated hover:text-ink"
+              isActive || (item.to === "/" && location.pathname.startsWith("/incidents/")) ? "bg-ink text-panel" : "text-muted hover:bg-elevated hover:text-ink"
             )}
           >
             <item.icon className="h-[18px] w-[18px]" />

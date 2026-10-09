@@ -127,7 +127,7 @@ function ConnectorInstructions({ integration }: { integration: Integration }) {
 
       <div className="min-w-0 space-y-4">
         <CredentialField value={integration.connector.endpoint} label="Receiver endpoint" concealable={false} />
-        <CredentialField value={integration.provider === "github" ? integration.connector.githubSecret ?? integration.connector.token : integration.connector.token} label={integration.provider === "github" ? "GitHub webhook secret" : "Connector token"} />
+        {integration.connector.token ? <CredentialField value={integration.provider === "github" ? integration.connector.githubSecret ?? integration.connector.token : integration.connector.token} label={integration.provider === "github" ? "GitHub webhook secret" : "Connector token"} /> : <p className="rounded-control bg-elevated p-3 text-sm text-muted">Only admins and responders can see this source's secret.</p>}
         <div className="rounded-control bg-elevated p-3 text-xs leading-5 text-muted">
           Secrets are generated server-side and never stored in the repository. Rotate the deployment signing secret to invalidate every connector token.
         </div>

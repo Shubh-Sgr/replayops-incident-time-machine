@@ -3,7 +3,6 @@ import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { AppShell } from "./components/AppShell";
 import { useAuth } from "./providers/AuthProvider";
 
-const DashboardPage = lazy(() => import("./pages/DashboardPage").then((module) => ({ default: module.DashboardPage })));
 const IncidentWorkbenchPage = lazy(() => import("./pages/IncidentWorkbenchPage").then((module) => ({ default: module.IncidentWorkbenchPage })));
 const IncidentsPage = lazy(() => import("./pages/IncidentsPage").then((module) => ({ default: module.IncidentsPage })));
 const IntegrationsPage = lazy(() => import("./pages/IntegrationsPage").then((module) => ({ default: module.IntegrationsPage })));
@@ -13,7 +12,7 @@ const AcceptInvitePage = lazy(() => import("./pages/AcceptInvitePage").then((mod
 const LoginPage = lazy(() => import("./pages/LoginPage").then((module) => ({ default: module.LoginPage })));
 
 function RouteFallback() {
-  return <div className="flex min-h-[45dvh] items-center justify-center text-sm text-muted">Calibrating workspace…</div>;
+  return <div className="flex min-h-[45dvh] items-center justify-center text-sm text-muted">Loading…</div>;
 }
 
 function ProtectedApp() {
@@ -30,8 +29,8 @@ export function App() {
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route element={<ProtectedApp />}>
-          <Route index element={<DashboardPage />} />
-          <Route path="incidents" element={<IncidentsPage />} />
+          <Route index element={<IncidentsPage />} />
+          <Route path="incidents" element={<Navigate to="/" replace />} />
           <Route path="incidents/:id" element={<IncidentWorkbenchPage />} />
           <Route path="integrations" element={<IntegrationsPage />} />
           <Route path="releases" element={<ReleasesPage />} />

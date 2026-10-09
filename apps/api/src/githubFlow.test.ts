@@ -47,7 +47,7 @@ describe("GitHub delivery incidents", () => {
     const open = { ...incident([drillPush, runFailed]), status: "investigating" as const };
     const leading = diagnoseIncident(open).hypotheses[0]!;
     const confirmed = diagnoseIncident(open, [{ ...testWith(leading.id, "supported") }]);
-    expect(confirmed.nextAction.label).toBe("Fix it, then confirm recovery");
+    expect(confirmed.nextAction.label).toBe("Fix it, then mark it fixed");
     expect(confirmed.nextAction.reason).toContain("on drill");
     expect(confirmed.nextAction.reason).not.toContain("production");
   });

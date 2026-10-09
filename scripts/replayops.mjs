@@ -18,8 +18,9 @@ Usage: replayops <command> [options]
   note <code|id> <text…>                Add a comment to the incident
   open --title T --service S [--severity high] [--summary …] [--env production]
                                         Open an incident by hand
-  status <code|id> monitoring|resolve|reopen --reason "…"
-                                        Move an incident through its lifecycle
+  status <code|id> fixed|resolve|reopen --reason "…" [--confirmed]
+                                        Mark fixed, resolve (--confirmed when your sources
+                                        haven't confirmed recovery), or reopen
   change --service S [--type deploy|feature_flag|config|migration|infra|rollback]
          [--version V] [--previous V] [--sha SHA] [--flag KEY --from X --to Y] [--env production]
                                         Record a change so it becomes a suspect (needs a connector)
@@ -125,11 +126,11 @@ async function openCommand() {
 
 async function statusCommand() {
   const incident = await findIncident(rest[0]);
-  const action = { monitoring: "start_monitoring", resolve: "resolve", reopen: "reopen" }[rest[1]];
-  if (!action) fail("status needs monitoring, resolve, or reopen");
+  const action = { fixed: "start_monitoring", monitoring: "start_monitoring", resolve: "resolve", reopen: "reopen" }[rest[1]];
+  if (!action) fail("status needs fixed, resolve, or reopen");
   const reason = String(flags.reason ?? "");
   if (reason.length < 8) fail('give a --reason of at least 8 characters, e.g. --reason "Rolled back to v1.4.1"');
-  await api("POST", `/incidents/${incident.id}/lifecycle`, { action, reason, expectedEvidenceRevision: incident.evidenceRevision ?? incident.updatedAt });
+  await api("POST", `/incidents/${incident.id}/lifecycle`, { action, reason, expectedEvidenceRevision: incident.evidenceRevision ?? incident.updatedAt, ...(flags.confirmed ? { confirmed: true } : {}) });
   console.log(`${incident.code} → ${rest[1]}.`);
 }
 
