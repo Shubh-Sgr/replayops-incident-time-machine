@@ -101,6 +101,8 @@ process.once("SIGTERM", () => {
 
 const queueTimer = setInterval(() => void ingestionQueue.processReady(), 30_000);
 queueTimer.unref();
+// Alerts waiting for a later retry, or left mid-send by a crashed or restarted server.
+setInterval(() => void alertService.processOutbox().catch((error) => console.error("Alert outbox failed", error instanceof Error ? error.message : error)), 30_000).unref();
 
 // Forget raw evidence, finished queue entries and delivery receipts once each source's retention period passes,
 // including for sources that have gone quiet. Incident timelines keep their own copy.

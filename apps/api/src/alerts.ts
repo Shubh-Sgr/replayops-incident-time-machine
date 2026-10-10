@@ -152,6 +152,10 @@ const mapRow = (row: Row): StoredChannel => ({
   lastStatus: (row.last_status as AlertChannel["lastStatus"]) ?? null, lastError: row.last_error ? String(row.last_error) : null,
   lastSentAt: row.last_sent_at ? new Date(String(row.last_sent_at)).toISOString() : null, createdAt: new Date(String(row.created_at)).toISOString()
 });
+const mapOutbox = (row: Row): OutboxEntry => ({
+  id: String(row.id), organizationId: String(row.organization_id), channelId: String(row.channel_id), event: row.event as AlertEvent, attempts: Number(row.attempts),
+  status: row.status as OutboxEntry["status"], nextAttemptAt: new Date(String(row.next_attempt_at)).toISOString(), createdAt: new Date(String(row.created_at)).toISOString(), updatedAt: new Date(String(row.updated_at)).toISOString()
+});
 const publicView = ({ url, organizationId: _org, ...channel }: StoredChannel, revealSecret = false): AlertChannel => ({
   ...channel, target: maskUrl(url), ...(channel.kind === "webhook" && revealSecret ? { signingSecret: alertSigningSecret(channel.id) } : {})
 });
@@ -178,12 +182,18 @@ export function describeDeliveryError(error: unknown): { message: string; retrya
   return { message: error.message, retryable: false };
 }
 
+/** An alert waiting to be delivered. Written before the first send, so a crash or restart never loses it. */
+interface OutboxEntry { id: string; organizationId: string; channelId: string; event: AlertEvent; attempts: number; status: "pending" | "sending"; nextAttemptAt: string; createdAt: string; updatedAt: string }
+
 class AlertService {
-  /** Waits between attempts; a test can shorten them. */
+  /** Quick in-process retries for blips; a test can shorten them. */
   retryDelaysMs = [1_000, 4_000];
+  /** Later retries from the outbox, after the quick ones fail: 30 s, 2 min, 10 min, 30 min, 2 h. */
+  outboxDelaysMs = [30_000, 120_000, 600_000, 1_800_000, 7_200_000];
   private inFlight = new Set<Promise<unknown>>();
   private pool?: Pool;
   private memory: StoredChannel[] = [];
+  private memoryOutbox: OutboxEntry[] = [];
 
   constructor() {
     if (config.databaseUrl) this.pool = new Pool({ connectionString: config.databaseUrl, ssl: config.databaseUrl.includes("localhost") ? false : { rejectUnauthorized: false }, max: 2 });
@@ -203,6 +213,14 @@ class AlertService {
       alter table alert_channels drop constraint if exists alert_channels_kind_check;
       alter table alert_channels add constraint alert_channels_kind_check check (kind in ('email','ntfy','slack','discord','webhook'));
       alter table alert_channels enable row level security;
+      create table if not exists alert_outbox (
+        id uuid primary key default gen_random_uuid(), organization_id uuid not null references organizations(id) on delete cascade,
+        channel_id uuid not null references alert_channels(id) on delete cascade, event jsonb not null,
+        attempts integer not null default 0, status text not null default 'pending' check (status in ('pending','sending')),
+        next_attempt_at timestamptz not null default now(), created_at timestamptz not null default now(), updated_at timestamptz not null default now()
+      );
+      create index if not exists alert_outbox_due_idx on alert_outbox(status, next_attempt_at);
+      alter table alert_outbox enable row level security;
     `);
   }
 
@@ -254,7 +272,8 @@ class AlertService {
     const context = await workspaceService.assertRole(userId, ["admin", "responder"]);
     const channel = await this.find(context.organizationId, id);
     const sample: AlertIncident = { id: "00000000-0000-4000-8000-000000000000", code: "TEST", title: "ReplayOps alert destination check", service: "replayops", environment: "test", severity: "low", status: "investigating" };
-    const outcome = await this.deliver(channel, { type: "test", incident: sample, detail: "If you can read this, incident alerts will arrive here.", actor });
+    // A test is sent directly, never queued for later: the admin is waiting for the answer.
+    const { retryable: _retryable, ...outcome } = await this.deliver(channel, { type: "test", incident: sample, detail: "If you can read this, incident alerts will arrive here.", actor });
     return { ...publicView({ ...channel, ...outcome }, context.role === "admin"), delivered: outcome.lastStatus === "delivered" };
   }
 
@@ -264,10 +283,77 @@ class AlertService {
       const channels = !this.pool
         ? this.memory.filter((item) => item.organizationId === organizationId)
         : ((await this.pool.query(`select * from alert_channels where organization_id=$1 and enabled`, [organizationId])).rows as Row[]).map(mapRow);
-      await Promise.all(channels.filter((channel) => channelWantsEvent(channel, event)).map((channel) => this.track(this.deliver(channel, event))));
+      await Promise.all(channels.filter((channel) => channelWantsEvent(channel, event)).map(async (channel) => this.track(this.attempt(await this.enqueue(channel, event), channel))));
     } catch (error) {
       console.error("Alert dispatch failed", error instanceof Error ? error.message : error);
     }
+  }
+
+  private async enqueue(channel: StoredChannel, event: AlertEvent): Promise<OutboxEntry> {
+    const now = new Date().toISOString();
+    if (!this.pool) {
+      const entry: OutboxEntry = { id: randomUUID(), organizationId: channel.organizationId, channelId: channel.id, event, attempts: 0, status: "sending", nextAttemptAt: now, createdAt: now, updatedAt: now };
+      this.memoryOutbox.push(entry);
+      return entry;
+    }
+    const row = (await this.pool.query(`insert into alert_outbox(organization_id,channel_id,event,status) values($1,$2,$3,'sending') returning *`, [channel.organizationId, channel.id, event])).rows[0] as Row;
+    return mapOutbox(row);
+  }
+
+  /**
+   * One delivery round for an outbox entry: the quick in-process retries, then either done (delivered, or a
+   * failure retrying can't fix) or scheduled for a later round. Every alert is delivered at least once.
+   */
+  private async attempt(entry: OutboxEntry, channel: StoredChannel) {
+    const outcome = await this.deliver(channel, entry.event, entry.createdAt, entry.id);
+    const attempts = entry.attempts + 1;
+    const delay = outcome.lastStatus === "failed" && outcome.retryable ? this.outboxDelaysMs[attempts - 1] : undefined;
+    if (delay === undefined) {
+      if (outcome.lastStatus === "failed" && outcome.retryable) await this.recordStatus(channel, { ...outcome, lastError: `${outcome.lastError} Gave up after ${attempts} delivery rounds.` });
+      if (!this.pool) this.memoryOutbox = this.memoryOutbox.filter((item) => item.id !== entry.id);
+      else await this.pool.query(`delete from alert_outbox where id=$1`, [entry.id]).catch(() => undefined);
+      return outcome;
+    }
+    const nextAttemptAt = new Date(Date.now() + delay).toISOString();
+    await this.recordStatus(channel, { ...outcome, lastError: `${outcome.lastError} Retrying at ${nextAttemptAt.slice(11, 16)} UTC.` });
+    if (!this.pool) Object.assign(entry, { attempts, status: "pending", nextAttemptAt, updatedAt: new Date().toISOString() });
+    else await this.pool.query(`update alert_outbox set attempts=$2,status='pending',next_attempt_at=$3,updated_at=now() where id=$1`, [entry.id, attempts, nextAttemptAt]).catch(() => undefined);
+    return outcome;
+  }
+
+  /**
+   * Sends alerts whose retry time has come, and picks up any a crashed or restarted server left mid-send.
+   * Runs on a timer; safe to run on several API instances at once.
+   */
+  async processOutbox(limit = 20, now = new Date()) {
+    let due: OutboxEntry[];
+    if (!this.pool) {
+      for (const entry of this.memoryOutbox) if (entry.status === "sending" && now.getTime() - Date.parse(entry.updatedAt) > 120_000) entry.status = "pending";
+      due = this.memoryOutbox.filter((entry) => entry.status === "pending" && Date.parse(entry.nextAttemptAt) <= now.getTime()).slice(0, limit);
+      for (const entry of due) Object.assign(entry, { status: "sending", updatedAt: now.toISOString() });
+    } else {
+      await this.pool.query(`update alert_outbox set status='pending' where status='sending' and updated_at < now() - interval '2 minutes'`);
+      due = ((await this.pool.query(
+        `update alert_outbox set status='sending',updated_at=now() where id in (
+           select id from alert_outbox where status='pending' and next_attempt_at <= $2 order by next_attempt_at limit $1 for update skip locked
+         ) returning *`, [limit, now.toISOString()])).rows as Row[]).map(mapOutbox);
+    }
+    for (const entry of due) {
+      const channel = await this.find(entry.organizationId, entry.channelId).catch(() => undefined);
+      if (!channel || !channel.enabled) {
+        if (!this.pool) this.memoryOutbox = this.memoryOutbox.filter((item) => item.id !== entry.id);
+        else await this.pool.query(`delete from alert_outbox where id=$1`, [entry.id]);
+        continue;
+      }
+      await this.track(this.attempt(entry, channel)).catch(() => undefined);
+    }
+    return due.length;
+  }
+
+  /** Alerts still waiting for a later delivery round (for tests and diagnostics). */
+  async pendingAlerts() {
+    if (!this.pool) return structuredClone(this.memoryOutbox);
+    return ((await this.pool.query(`select * from alert_outbox order by next_attempt_at`)).rows as Row[]).map(mapOutbox);
   }
 
   /** Lets a shutting-down server finish sending alerts it has already started, up to a time limit. */
@@ -298,7 +384,7 @@ class AlertService {
   }
 
   /** Sends one alert; throws with a human-readable reason when the destination did not accept it. */
-  private async send(channel: StoredChannel, event: AlertEvent, sentAt: string) {
+  private async send(channel: StoredChannel, event: AlertEvent, sentAt: string, deliveryId?: string) {
     if (channel.kind === "email") {
       const plain = plainAlert(event);
       const sent = await sendAlertEmail({ to: parseRecipients(channel.url), subject: plain.subject, text: plain.text, heading: plain.heading, lines: plain.lines, linkUrl: plain.link, linkLabel: "Open the investigation", idempotencyKey: `replayops-alert/${channel.id}/${event.incident.id}/${event.type}/${sentAt}` });
@@ -318,33 +404,40 @@ class AlertService {
     } else {
       body = JSON.stringify(formatAlert(channel.kind, event, sentAt));
       headers["content-type"] = "application/json";
-      if (channel.kind === "webhook") { headers["x-replayops-event"] = event.type; headers["x-replayops-signature"] = signAlertBody(channel.id, body); }
+      if (channel.kind === "webhook") { headers["x-replayops-event"] = event.type; headers["x-replayops-signature"] = signAlertBody(channel.id, body); if (deliveryId) headers["x-replayops-delivery"] = deliveryId; }
     }
     const response = await fetch(url, { method: "POST", headers, body, redirect: "error", signal: AbortSignal.timeout(5000) });
     if (!response.ok) throw new DeliveryError(`${response.status} ${(await response.text().catch(() => "")).slice(0, 160) || response.statusText}`.trim(), response.status === 429 || response.status >= 500);
   }
 
-  private async deliver(channel: StoredChannel, event: AlertEvent) {
-    const sentAt = new Date().toISOString();
+  private async deliver(channel: StoredChannel, event: AlertEvent, sentAt = new Date().toISOString(), deliveryId?: string) {
     let lastStatus: "delivered" | "failed" = "failed";
     let lastError: string | null = null;
+    let retryable = false;
     for (let attempt = 0; attempt <= this.retryDelaysMs.length; attempt += 1) {
       try {
-        await this.send(channel, event, sentAt);
+        await this.send(channel, event, sentAt, deliveryId);
         lastStatus = "delivered";
         lastError = null;
+        retryable = false;
         break;
       } catch (error) {
         const described = describeDeliveryError(error);
         lastError = attempt ? `${described.message} (after ${attempt + 1} attempts)` : described.message;
+        retryable = described.retryable;
         if (!described.retryable || attempt === this.retryDelaysMs.length) break;
         await new Promise((resolve) => setTimeout(resolve, this.retryDelaysMs[attempt]));
       }
     }
     if (lastStatus === "failed") console.warn(`Alert to ${channel.kind} destination ${channel.id} failed: ${lastError}`);
-    if (!this.pool) Object.assign(channel, { lastStatus, lastError, lastSentAt: sentAt });
-    else await this.pool.query(`update alert_channels set last_status=$2,last_error=$3,last_sent_at=$4 where id=$1`, [channel.id, lastStatus, lastError, sentAt]).catch(() => undefined);
-    return { lastStatus, lastError, lastSentAt: sentAt };
+    const outcome = { lastStatus, lastError, lastSentAt: new Date().toISOString(), retryable };
+    await this.recordStatus(channel, outcome);
+    return outcome;
+  }
+
+  private async recordStatus(channel: StoredChannel, outcome: { lastStatus: "delivered" | "failed"; lastError: string | null; lastSentAt: string }) {
+    if (!this.pool) Object.assign(channel, { lastStatus: outcome.lastStatus, lastError: outcome.lastError, lastSentAt: outcome.lastSentAt });
+    else await this.pool.query(`update alert_channels set last_status=$2,last_error=$3,last_sent_at=$4 where id=$1`, [channel.id, outcome.lastStatus, outcome.lastError, outcome.lastSentAt]).catch(() => undefined);
   }
 }
 

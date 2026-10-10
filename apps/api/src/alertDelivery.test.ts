@@ -106,6 +106,62 @@ describe("delivery retries", () => {
     await alertService.remove(admin, "operator@replayops.dev", channel.id);
   });
 
+  it("keeps a failed alert in the outbox and delivers it on a later round", async () => {
+    alertService.retryDelaysMs = [0, 0];
+    let up = false;
+    const calls: Array<Record<string, string>> = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: URL, init: RequestInit) => { calls.push(init.headers as Record<string, string>); return up ? new Response("{}", { status: 200 }) : new Response("unavailable", { status: 503 }); }));
+    const channel = await alertService.create(admin, "operator@replayops.dev", { name: "Flaky hook", kind: "webhook", url: "https://flaky.example.com/hook", events: ["opened"], minSeverity: "low" });
+    await alertService.dispatch("demo-organization", { type: "opened", incident });
+    expect(calls).toHaveLength(3);
+    const [waiting] = await alertService.pendingAlerts();
+    expect(waiting).toMatchObject({ channelId: channel.id, attempts: 1, status: "pending" });
+    expect((await alertService.list(admin)).find((item) => item.id === channel.id)?.lastError).toMatch(/503 .*Retrying at/);
+
+    // Not due yet: nothing is sent.
+    expect(await alertService.processOutbox()).toBe(0);
+    up = true;
+    expect(await alertService.processOutbox(20, new Date(Date.now() + 31_000))).toBe(1);
+    expect(await alertService.pendingAlerts()).toEqual([]);
+    expect((await alertService.list(admin)).find((item) => item.id === channel.id)).toMatchObject({ lastStatus: "delivered", lastError: null });
+    // Every round carries the same delivery ID, so a receiver can drop duplicates.
+    expect(new Set(calls.map((headers) => headers["x-replayops-delivery"])).size).toBe(1);
+    await alertService.remove(admin, "operator@replayops.dev", channel.id);
+  });
+
+  it("gives up after the last round and says so on the destination", async () => {
+    alertService.retryDelaysMs = [0, 0];
+    const delays = alertService.outboxDelaysMs;
+    alertService.outboxDelaysMs = [1_000];
+    try {
+      vi.stubGlobal("fetch", vi.fn(async () => new Response("unavailable", { status: 503 })));
+      const channel = await alertService.create(admin, "operator@replayops.dev", { name: "Dead hook", kind: "webhook", url: "https://dead.example.com/hook", events: ["opened"], minSeverity: "low" });
+      await alertService.dispatch("demo-organization", { type: "opened", incident });
+      expect(await alertService.processOutbox(20, new Date(Date.now() + 2_000))).toBe(1);
+      expect(await alertService.pendingAlerts()).toEqual([]);
+      expect((await alertService.list(admin)).find((item) => item.id === channel.id)?.lastError).toMatch(/Gave up after 2 delivery rounds/);
+      await alertService.remove(admin, "operator@replayops.dev", channel.id);
+    } finally {
+      alertService.outboxDelaysMs = delays;
+    }
+  });
+
+  it("picks up an alert a crashed server left mid-send", async () => {
+    alertService.retryDelaysMs = [0, 0];
+    let release: () => void = () => undefined;
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((resolve) => { release = () => resolve(new Response("{}", { status: 200 })); })));
+    const channel = await alertService.create(admin, "operator@replayops.dev", { name: "Crash hook", kind: "webhook", url: "https://crash.example.com/hook", events: ["opened"], minSeverity: "low" });
+    void alertService.dispatch("demo-organization", { type: "opened", incident });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    // The send never finishes (the server "died"). After the 2-minute lease, the next round takes it over.
+    expect((await alertService.pendingAlerts())[0]).toMatchObject({ status: "sending" });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 200 })));
+    expect(await alertService.processOutbox(20, new Date(Date.now() + 121_000))).toBe(1);
+    expect(await alertService.pendingAlerts()).toEqual([]);
+    release();
+    await alertService.remove(admin, "operator@replayops.dev", channel.id);
+  });
+
   it("drains alerts already in flight before shutdown", async () => {
     alertService.retryDelaysMs = [0, 0];
     let finished = false;
