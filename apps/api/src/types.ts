@@ -199,6 +199,8 @@ export interface Integration {
   healthySampleRate: number;
   acceptedToday: number;
   droppedToday: number;
+  /** Bumped by "Rotate secret"; part of the connector token, so rotating invalidates the old one at once. */
+  tokenVersion: number;
   deliveries: IntegrationDelivery[];
 }
 
@@ -209,6 +211,7 @@ export interface IntegrationTarget {
   provider: IntegrationProvider;
   status: IntegrationStatus;
   healthySampleRate?: number;
+  tokenVersion?: number;
 }
 
 export interface NormalizedSignal {

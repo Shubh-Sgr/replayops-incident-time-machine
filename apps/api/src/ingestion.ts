@@ -44,8 +44,12 @@ const configuredSecret = () => {
   throw new Error("Automated ingestion is unavailable until INGESTION_SIGNING_SECRET is configured.");
 };
 
-export function deriveIntegrationToken(integrationId: string) {
-  return createHmac("sha256", configuredSecret()).update(`replayops:${integrationId}`).digest("hex");
+/**
+ * A connector's token: an HMAC of its ID (and secret version) under the server's signing secret, so it is never stored.
+ * Version 0 is the original formula, so connectors created before rotation existed keep working unchanged.
+ */
+export function deriveIntegrationToken(integrationId: string, version = 0) {
+  return createHmac("sha256", configuredSecret()).update(version ? `replayops:${integrationId}:v${version}` : `replayops:${integrationId}`).digest("hex");
 }
 
 const constantTimeMatch = (actual: string, expected: string) => {
@@ -54,8 +58,8 @@ const constantTimeMatch = (actual: string, expected: string) => {
   return left.length === right.length && timingSafeEqual(left, right);
 };
 
-export function verifyGitHubSignature(rawBody: Buffer, integrationId: string, signature: string) {
-  const expected = `sha256=${createHmac("sha256", deriveIntegrationToken(integrationId)).update(rawBody).digest("hex")}`;
+export function verifyGitHubSignature(rawBody: Buffer, integrationId: string, signature: string, version = 0) {
+  const expected = `sha256=${createHmac("sha256", deriveIntegrationToken(integrationId, version)).update(rawBody).digest("hex")}`;
   return constantTimeMatch(signature, expected);
 }
 
@@ -399,11 +403,11 @@ async function receive(req: RawRequest, res: Response) {
   const rawBody = req.rawBody ?? Buffer.from(JSON.stringify(req.body ?? {}));
   if (integration.provider === "github") {
     const signature = req.get("x-hub-signature-256") ?? "";
-    if (!signature || !verifyGitHubSignature(rawBody, integration.id, signature)) {
+    if (!signature || !verifyGitHubSignature(rawBody, integration.id, signature, integration.tokenVersion ?? 0)) {
       res.status(401).json({ error: "GitHub signature verification failed." });
       return;
     }
-  } else if (!constantTimeMatch(requestToken(req), deriveIntegrationToken(integration.id))) {
+  } else if (!constantTimeMatch(requestToken(req), deriveIntegrationToken(integration.id, integration.tokenVersion ?? 0))) {
     res.status(401).json({ error: "Connector token is missing or invalid." });
     return;
   }

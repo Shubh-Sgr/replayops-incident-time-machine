@@ -162,7 +162,7 @@ apiRouter.use(async (req: AuthenticatedRequest, res, next) => {
 const integrationView = (req: Request, integration: Integration, revealSecret: boolean) => {
   const origin = config.publicApiUrl ?? `${req.protocol}://${req.get("host")}`;
   const endpoint = `${origin}/ingest/${integration.id}`;
-  const token = revealSecret ? deriveIntegrationToken(integration.id) : undefined;
+  const token = revealSecret ? deriveIntegrationToken(integration.id, integration.tokenVersion) : undefined;
   return {
     ...integration,
     connector: {
@@ -565,6 +565,15 @@ apiRouter.delete("/integrations/:id", async (req: AuthenticatedRequest, res) => 
   }
   await workspaceService.audit(userId(req), actor(req), "removed evidence source", "integration", existing.id, { name: existing.name, provider: existing.provider, signalCount: existing.signalCount });
   res.status(204).send();
+});
+
+// Rotating issues a new secret and kills the old one at once, so only admins may do it, and it is audited.
+apiRouter.post("/integrations/:id/rotate-token", async (req: AuthenticatedRequest, res) => {
+  await workspaceService.assertRole(userId(req), ["admin"]);
+  const rotated = await repository.rotateIntegrationToken(userId(req), String(req.params.id));
+  if (!rotated) { res.status(404).json({ error: "Connector not found." }); return; }
+  await workspaceService.audit(userId(req), actor(req), "rotated source secret", "integration", rotated.id, { name: rotated.name, provider: rotated.provider, tokenVersion: rotated.tokenVersion });
+  res.json(integrationView(req, rotated, true));
 });
 
 const alertChannelSchema = z.object({

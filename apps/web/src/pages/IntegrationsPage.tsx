@@ -72,6 +72,24 @@ function CredentialField({ value, label, concealable = true }: { value: string; 
   );
 }
 
+/** Gives one source a new secret. The old one stops working at once, so the admin must update the tool right after. */
+function RotateSecret({ integration }: { integration: Integration }) {
+  const isAdmin = useIsAdmin();
+  const queryClient = useQueryClient();
+  const [confirming, setConfirming] = useState(false);
+  const rotate = useMutation({
+    mutationFn: () => api.rotateIntegrationToken(integration.id),
+    onSuccess: (value) => { setConfirming(false); queryClient.setQueryData<Integration[]>(["integrations"], (current) => (current ?? []).map((item) => item.id === value.id ? { ...item, ...value, deliveries: item.deliveries } : item)); }
+  });
+  return <div className="rounded-control bg-elevated p-3 text-xs leading-5 text-muted">
+    <p>The secret is never stored; it's calculated on the server. It doesn't expire. If it leaks, rotate it: the old one stops working immediately.</p>
+    {isAdmin && !confirming && <button type="button" className="control-secondary mt-2 !min-h-9" onClick={() => setConfirming(true)}>Rotate secret</button>}
+    {isAdmin && confirming && <div className="mt-2 flex flex-wrap items-center gap-2"><span className="font-semibold text-ink">Your tool will be rejected until you paste the new secret into it.</span><button type="button" className="control-primary !min-h-9" disabled={rotate.isPending} onClick={() => rotate.mutate()}>{rotate.isPending ? "Rotating…" : "Rotate now"}</button><button type="button" className="control-quiet !min-h-9" onClick={() => setConfirming(false)}>Cancel</button></div>}
+    {rotate.isSuccess && <p role="status" className="mt-2 font-semibold text-success">New secret ready. Copy it above and update your tool now.</p>}
+    {rotate.error && <p role="alert" className="mt-2 text-danger">{rotate.error.message}</p>}
+  </div>;
+}
+
 function ConnectorInstructions({ integration }: { integration: Integration }) {
   const snippet = useMemo(() => {
     if (integration.provider === "otel") {
@@ -128,9 +146,7 @@ function ConnectorInstructions({ integration }: { integration: Integration }) {
       <div className="min-w-0 space-y-4">
         <CredentialField value={integration.connector.endpoint} label="Receiver endpoint" concealable={false} />
         {integration.connector.token ? <CredentialField value={integration.provider === "github" ? integration.connector.githubSecret ?? integration.connector.token : integration.connector.token} label={integration.provider === "github" ? "GitHub webhook secret" : "Connector token"} /> : <p className="rounded-control bg-elevated p-3 text-sm text-muted">Only admins and responders can see this source's secret.</p>}
-        <div className="rounded-control bg-elevated p-3 text-xs leading-5 text-muted">
-          Secrets are generated server-side and never stored in the repository. Rotate the deployment signing secret to invalidate every connector token.
-        </div>
+        <RotateSecret integration={integration} />
       </div>
     </div>
   );

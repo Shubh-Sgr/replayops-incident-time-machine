@@ -12,6 +12,24 @@ describe("automated ingestion", () => {
     expect(verifyGitHubSignature(body, integrationId, `${signature.slice(0, -1)}0`)).toBe(false);
   });
 
+  it("rotating a source's secret kills its old token and leaves other sources alone", async () => {
+    const integrationId = "9d75f834-f399-4b38-9c42-854c16204174";
+    // Version 0 is the original formula, so sources created before rotation existed keep their token.
+    expect(deriveIntegrationToken(integrationId, 0)).toBe(deriveIntegrationToken(integrationId));
+    expect(deriveIntegrationToken(integrationId, 1)).not.toBe(deriveIntegrationToken(integrationId, 0));
+    const body = Buffer.from("{}");
+    const oldSignature = `sha256=${createHmac("sha256", deriveIntegrationToken(integrationId, 0)).update(body).digest("hex")}`;
+    expect(verifyGitHubSignature(body, integrationId, oldSignature, 1)).toBe(false);
+
+    const repository = new MemoryRepository();
+    const first = await repository.createIntegration("demo", { name: "Grafana prod", provider: "generic" });
+    const second = await repository.createIntegration("demo", { name: "GitHub", provider: "github" });
+    const rotated = await repository.rotateIntegrationToken("demo", first.id);
+    expect(rotated?.tokenVersion).toBe(1);
+    expect((await repository.getIntegrationTarget(first.id))?.tokenVersion).toBe(1);
+    expect((await repository.getIntegrationTarget(second.id))?.tokenVersion).toBe(0);
+  });
+
   it("normalizes failed GitHub workflows as incident-grade evidence", () => {
     const signals = normalizePayload("github", {
       repository: { full_name: "acme/checkout", html_url: "https://github.com/acme/checkout" },

@@ -191,6 +191,7 @@ export interface Integration {
   healthySampleRate: number;
   acceptedToday: number;
   droppedToday: number;
+  tokenVersion?: number;
   deliveries: IntegrationDelivery[];
   connector: {
     endpoint: string;

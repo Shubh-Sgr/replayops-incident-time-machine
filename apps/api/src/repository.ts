@@ -44,6 +44,8 @@ export interface Repository {
   createIntegration(userId: string, input: IntegrationInput): Promise<Integration>;
   updateIntegrationConfig(userId: string, integrationId: string, input: IntegrationConfigInput): Promise<Integration | null>;
   deleteIntegration(userId: string, integrationId: string): Promise<boolean>;
+  /** Issues a new connector secret; the old one stops working immediately. Admins only. */
+  rotateIntegrationToken(userId: string, integrationId: string): Promise<Integration | null>;
   getIntegrationTarget(integrationId: string): Promise<IntegrationTarget | null>;
   ingest(integration: IntegrationTarget, batch: IngestionBatch): Promise<IngestionResult>;
 }
@@ -270,7 +272,7 @@ export class MemoryRepository implements Repository {
       id: randomUUID(), name: input.name, provider: input.provider, status: "active", createdAt: new Date().toISOString(),
       lastDeliveryAt: null, lastDeliveryStatus: null, signalCount: 0,
       expectedCadenceMinutes: input.provider === "otel" ? 15 : input.provider === "github" ? 10080 : 180,
-      retentionDays: 14, dailyQuota: 10000, healthySampleRate: .05, acceptedToday: 0, droppedToday: 0, deliveries: []
+      retentionDays: 14, dailyQuota: 10000, healthySampleRate: .05, acceptedToday: 0, droppedToday: 0, tokenVersion: 0, deliveries: []
     };
     this.integrations.unshift(integration);
     return clone(integration);
@@ -284,9 +286,15 @@ export class MemoryRepository implements Repository {
     this.bufferedSignals = this.bufferedSignals.filter((signal) => signal.integrationId !== integrationId);
     return this.integrations.length < before;
   }
+  async rotateIntegrationToken(_userId: string, integrationId: string) {
+    const integration = this.integrations.find((item) => item.id === integrationId);
+    if (!integration) return null;
+    integration.tokenVersion += 1;
+    return clone(integration);
+  }
   async getIntegrationTarget(integrationId: string) {
     const integration = this.integrations.find((item) => item.id === integrationId);
-    return integration ? { id: integration.id, organizationId: "demo-organization", name: integration.name, provider: integration.provider, status: integration.status, healthySampleRate: integration.healthySampleRate } : null;
+    return integration ? { id: integration.id, organizationId: "demo-organization", name: integration.name, provider: integration.provider, status: integration.status, healthySampleRate: integration.healthySampleRate, tokenVersion: integration.tokenVersion } : null;
   }
   async ingest(integration: IntegrationTarget, batch: IngestionBatch) {
     const policy = await workspaceService.policyForOrganization(integration.organizationId);
@@ -571,7 +579,7 @@ const mapIntegration = (row: Row, deliveries: IntegrationDelivery[] = []): Integ
   lastDeliveryStatus: row.last_delivery_status ? row.last_delivery_status as IntegrationDelivery["status"] : null,
   signalCount: Number(row.signal_count ?? 0), expectedCadenceMinutes:Number(row.expected_cadence_minutes ?? (row.provider === "otel" ? 15 : row.provider === "github" ? 10080 : 180)),
   retentionDays:Number(row.retention_days ?? 14), dailyQuota:Number(row.daily_quota ?? 10000), healthySampleRate:Number(row.healthy_sample_rate ?? .05),
-  acceptedToday:Number(row.accepted_today ?? 0), droppedToday:Number(row.dropped_today ?? 0), deliveries
+  acceptedToday:Number(row.accepted_today ?? 0), droppedToday:Number(row.dropped_today ?? 0), tokenVersion:Number(row.token_version ?? 0), deliveries
 });
 
 class PostgresRepository implements Repository {
@@ -605,6 +613,7 @@ class PostgresRepository implements Repository {
       alter table integrations add column if not exists retention_days integer not null default 14;
       alter table integrations add column if not exists daily_quota integer not null default 10000;
       alter table integrations add column if not exists healthy_sample_rate numeric not null default 0.05;
+      alter table integrations add column if not exists token_version integer not null default 0;
       alter table integrations add column if not exists accepted_today integer not null default 0;
       alter table integrations add column if not exists dropped_today integer not null default 0;
       alter table integrations add column if not exists counter_date date not null default current_date;
@@ -1041,13 +1050,23 @@ class PostgresRepository implements Repository {
       [userId, integrationId]
     )).rowCount === 1;
   }
+  async rotateIntegrationToken(userId: string, integrationId: string) {
+    const result = await this.pool.query(
+      `update integrations x set token_version = token_version + 1, updated_at = now() where x.id = $2
+       and exists (select 1 from ${MEMBERSHIPS} m where m.organization_id = x.organization_id and m.user_id = $1 and m.role = 'admin')
+       returning x.*`,
+      [userId, integrationId]
+    );
+    return result.rows[0] ? mapIntegration(result.rows[0] as Row) : null;
+  }
+
   async getIntegrationTarget(integrationId: string) {
-    const result = await this.pool.query("select id, organization_id, name, provider, status, healthy_sample_rate from integrations where id = $1", [integrationId]);
+    const result = await this.pool.query("select id, organization_id, name, provider, status, healthy_sample_rate, token_version from integrations where id = $1", [integrationId]);
     const row = result.rows[0] as Row | undefined;
     return row ? {
       id: String(row.id), organizationId: String(row.organization_id), name: String(row.name),
       provider: row.provider as IntegrationTarget["provider"], status: row.status as IntegrationTarget["status"],
-      healthySampleRate: Number(row.healthy_sample_rate ?? .05)
+      healthySampleRate: Number(row.healthy_sample_rate ?? .05), tokenVersion: Number(row.token_version ?? 0)
     } : null;
   }
   /** Stores the delivery's commits and changes (inside the ingest transaction); returns the changes that are new. */

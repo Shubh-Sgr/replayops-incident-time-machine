@@ -82,6 +82,7 @@ export const api = {
   integrations: () => request<Integration[]>("/integrations"),
   createIntegration: (input: { name: string; provider: IntegrationProvider }) => request<Integration>("/integrations", { method: "POST", body: JSON.stringify(input) }),
   updateIntegrationConfig: (id:string,input:Pick<Integration,"expectedCadenceMinutes"|"retentionDays"|"dailyQuota"|"healthySampleRate">)=>request<Integration>(`/integrations/${id}/config`,{method:"PATCH",body:JSON.stringify(input)}),
+  rotateIntegrationToken: (id: string) => request<Integration>(`/integrations/${id}/rotate-token`, { method: "POST" }),
   deleteIntegration: (id: string) => request<void>(`/integrations/${id}`, { method: "DELETE" }),
   testIntegration: (id: string) => request<IngestionResult>(`/integrations/${id}/test`, { method: "POST" }),
   workspace: () => request<WorkspaceContext>("/workspace"),
