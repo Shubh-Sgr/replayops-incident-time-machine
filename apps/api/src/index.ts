@@ -101,3 +101,11 @@ process.once("SIGTERM", () => {
 
 const queueTimer = setInterval(() => void ingestionQueue.processReady(), 30_000);
 queueTimer.unref();
+
+// Forget raw evidence, finished queue entries and delivery receipts once each source's retention period passes,
+// including for sources that have gone quiet. Incident timelines keep their own copy.
+const purgeExpired = () => repository.purgeExpired()
+  .then((purged) => { if (purged.signals || purged.queueJobs || purged.deliveries) console.log(`Retention cleanup removed ${purged.signals} signals, ${purged.queueJobs} queue entries, ${purged.deliveries} delivery receipts.`); })
+  .catch((error) => console.error("Retention cleanup failed", error instanceof Error ? error.message : error));
+void purgeExpired();
+setInterval(purgeExpired, 60 * 60_000).unref();

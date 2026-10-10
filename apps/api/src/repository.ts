@@ -44,6 +44,11 @@ export interface Repository {
   createIntegration(userId: string, input: IntegrationInput): Promise<Integration>;
   updateIntegrationConfig(userId: string, integrationId: string, input: IntegrationConfigInput): Promise<Integration | null>;
   deleteIntegration(userId: string, integrationId: string): Promise<boolean>;
+  /**
+   * Deletes what each source's retention setting says to forget: unattached-or-not raw signals, finished queue
+   * entries (they hold the original delivery) and delivery receipts. Incident timelines are the permanent copy.
+   */
+  purgeExpired(): Promise<{ signals: number; queueJobs: number; deliveries: number }>;
   /** Issues a new connector secret; the old one stops working immediately. Admins only. */
   rotateIntegrationToken(userId: string, integrationId: string): Promise<Integration | null>;
   getIntegrationTarget(integrationId: string): Promise<IntegrationTarget | null>;
@@ -108,7 +113,7 @@ export class MemoryRepository implements Repository {
   private replayRuns = clone(seedReplayRuns);
   private integrations: Integration[] = [];
   private deliveries = new Set<string>();
-  private bufferedSignals: Array<NormalizedSignal & { integrationId: string; incidentId?: string }> = [];
+  private bufferedSignals: Array<NormalizedSignal & { integrationId: string; incidentId?: string; receivedAt?: string }> = [];
   private changes: ChangeRecord[] = [];
   private commits: CommitRecord[] = [];
 
@@ -286,6 +291,13 @@ export class MemoryRepository implements Repository {
     this.bufferedSignals = this.bufferedSignals.filter((signal) => signal.integrationId !== integrationId);
     return this.integrations.length < before;
   }
+  async purgeExpired() {
+    const before = this.bufferedSignals.length;
+    const now = Date.now();
+    const retention = new Map(this.integrations.map((item) => [item.id, item.retentionDays * 86_400_000]));
+    this.bufferedSignals = this.bufferedSignals.filter((signal) => now - Date.parse(signal.receivedAt ?? signal.timestamp) <= (retention.get(signal.integrationId) ?? 14 * 86_400_000));
+    return { signals: before - this.bufferedSignals.length, queueJobs: 0, deliveries: 0 };
+  }
   async rotateIntegrationToken(_userId: string, integrationId: string) {
     const integration = this.integrations.find((item) => item.id === integrationId);
     if (!integration) return null;
@@ -320,7 +332,7 @@ export class MemoryRepository implements Repository {
       const signal = placement.signal;
       const relatedServices = await workspaceService.relatedServicesForOrganization(integration.organizationId, signal.service);
       if (this.bufferedSignals.some((item) => item.integrationId === integration.id && item.externalId === signal.externalId)) continue;
-      const buffered: NormalizedSignal & { integrationId: string; incidentId?: string } = { ...signal, integrationId: integration.id };
+      const buffered: NormalizedSignal & { integrationId: string; incidentId?: string; receivedAt?: string } = { ...signal, integrationId: integration.id, receivedAt: new Date().toISOString() };
       this.bufferedSignals.push(buffered);
       acceptedSignals += 1;
       const suppressed = policy.maintenanceMode || (policy.suppressLowSeverity && signal.severity === "low");
@@ -1050,6 +1062,18 @@ class PostgresRepository implements Repository {
       [userId, integrationId]
     )).rowCount === 1;
   }
+  async purgeExpired() {
+    const expired = (table: string, column: string, extra = "") => this.pool.query(
+      `delete from ${table} t using integrations x where x.id = t.integration_id and t.${column} < now() - make_interval(days => x.retention_days)${extra}`
+    ).then((result) => result.rowCount ?? 0);
+    return {
+      signals: await expired("ingestion_signals", "created_at"),
+      // Only finished entries: a queued or retrying delivery still has work to do.
+      queueJobs: await expired("ingestion_queue", "updated_at", " and t.status in ('completed','dead_letter')"),
+      deliveries: await expired("ingestion_deliveries", "received_at")
+    };
+  }
+
   async rotateIntegrationToken(userId: string, integrationId: string) {
     const result = await this.pool.query(
       `update integrations x set token_version = token_version + 1, updated_at = now() where x.id = $2
@@ -1337,7 +1361,6 @@ class PostgresRepository implements Repository {
          signal_count = signal_count + $2,counter_date=current_date,accepted_today=case when counter_date=current_date then accepted_today+$2 else $2 end,dropped_today=case when counter_date=current_date then dropped_today else 0 end, updated_at = now() where id = $1`,
         [integration.id, acceptedSignals]
       );
-      await client.query(`delete from ingestion_signals where integration_id=$1 and created_at<now()-((select retention_days from integrations where id=$1)||' days')::interval`,[integration.id]);
       if (incidentIdList[0]) {
         await client.query(
           `insert into incident_activities (organization_id, incident_id, actor, action, detail, timestamp)

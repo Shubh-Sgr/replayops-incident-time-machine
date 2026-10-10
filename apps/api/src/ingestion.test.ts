@@ -1,5 +1,5 @@
 import { createHmac } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { deriveIntegrationToken, normalizePayload, verifyGitHubSignature } from "./ingestion.js";
 import { MemoryRepository } from "./repository.js";
 
@@ -168,5 +168,20 @@ describe("automated ingestion", () => {
     const production=await repository.ingest(target!,{externalId:"prod",signals:[{externalId:"prod-alert",timestamp:"2026-09-20T12:00:00Z",service:"checkout-api",environment:"production",kind:"alert",title:"Production checkout errors",detail:"Production failures crossed the threshold.",impactScore:82,severity:"high",metadata:{}}]});
     const staging=await repository.ingest(target!,{externalId:"stage",signals:[{externalId:"stage-alert",timestamp:"2026-09-20T12:01:00Z",service:"checkout-api",environment:"staging",kind:"alert",title:"Staging checkout errors",detail:"Staging failures crossed the threshold.",impactScore:82,severity:"high",metadata:{}}]});
     expect(staging.incidentIds[0]).not.toBe(production.incidentIds[0]);
+  });
+
+  it("forgets raw signals after the source's retention period, even when the source goes quiet", async () => {
+    const repository = new MemoryRepository();
+    const integration = await repository.createIntegration("demo", { name: "Quiet source", provider: "generic" });
+    const target = (await repository.getIntegrationTarget(integration.id))!;
+    await repository.ingest(target, { externalId: "old", signals: [{ externalId: "old-1", timestamp: new Date().toISOString(), service: "orders-v2", kind: "metric", title: "Queue depth sample", detail: "Depth 12.", impactScore: 20, severity: "low", metadata: {} }] });
+    expect(await repository.purgeExpired()).toMatchObject({ signals: 0 });
+    vi.useFakeTimers({ now: Date.now() + 15 * 86_400_000 });
+    try {
+      // Default retention is 14 days; nothing new arrived, and the signal is still forgotten.
+      expect(await repository.purgeExpired()).toMatchObject({ signals: 1 });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

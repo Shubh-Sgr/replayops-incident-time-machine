@@ -139,6 +139,8 @@ class DurableIngestionQueue {
     const ids = this.pool
       ? (await this.pool.query(`select id from ingestion_queue where status in ('queued','retrying') and next_attempt_at<=now() order by created_at limit $1`, [limit])).rows.map((row: Row) => String(row.id))
       : this.jobs.filter((job) => ["queued", "retrying"].includes(job.status) && new Date(job.nextAttemptAt) <= new Date()).slice(0, limit).map((job) => job.id);
+    // The demo queue keeps finished entries for the longest retention a source can choose.
+    if (!this.pool) this.jobs = this.jobs.filter((job) => !["completed", "dead_letter"].includes(job.status) || Date.now() - Date.parse(job.updatedAt) <= 90 * 86_400_000);
     for (const id of ids) await this.process(id).catch(() => undefined);
     return ids.length;
   }
